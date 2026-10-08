@@ -132,6 +132,8 @@ int qcom_scm_shm_bridge_enable(struct device *scm_dev);
 #define QCOM_SCM_SVC_ES			0x10	/* Enterprise Security */
 #define QCOM_SCM_ES_INVALIDATE_ICE_KEY	0x03
 #define QCOM_SCM_ES_CONFIG_SET_ICE_KEY	0x04
+#define QCOM_SCM_ES_CONFIG_SET_ICE_KEY_CE	0x05
+#define QCOM_SCM_ES_INVALIDATE_ICE_KEY_CE	0x06
 #define QCOM_SCM_ES_DERIVE_SW_SECRET	0x07
 #define QCOM_SCM_ES_GENERATE_ICE_KEY	0x08
 #define QCOM_SCM_ES_PREPARE_ICE_KEY	0x09

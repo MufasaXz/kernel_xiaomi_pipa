@@ -130,7 +130,10 @@ struct fscrypt_add_key_arg {
 	__u32 key_id;
 #define FSCRYPT_ADD_KEY_FLAG_HW_WRAPPED	0x00000001
 	__u32 flags;
-	__u32 __reserved[7];
+	__u32 __reserved[6];
+	/* Original Android flag; selects the legacy wrapped-key identifier. */
+#define __FSCRYPT_ADD_KEY_FLAG_HW_WRAPPED		0x00000001
+	__u32 __flags;
 	__u8 raw[];
 };
 

@@ -286,6 +286,17 @@ config QCOM_INLINE_CRYPTO_ENGINE
 	tristate
 	select QCOM_SCM
 
+config QCOM_ICE_SM8250_LEGACY_WRAPPED_KEYS
+	bool "Experimental SM8250 Android legacy wrapped keys"
+	depends on QCOM_INLINE_CRYPTO_ENGINE
+	depends on ARCH_QCOM
+	help
+	  Use SM8250 Android firmware's storage-selecting ES key interface on
+	  Xiaomi pipa UFS only. Requires firmware support for program, evict
+	  and derive-secret calls. This is not HWKM v2 and does not expose
+	  its generate, prepare or import operations. Device validation is
+	  still required before using this with existing encrypted userdata.
+
 config QCOM_PBS
 	tristate "PBS trigger support for Qualcomm Technologies, Inc. PMICS"
 	depends on SPMI

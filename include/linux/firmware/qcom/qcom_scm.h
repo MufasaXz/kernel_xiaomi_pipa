@@ -106,6 +106,16 @@ int qcom_scm_ice_invalidate_key(u32 index);
 int qcom_scm_ice_set_key(u32 index, const u8 *key, u32 key_size,
 			 enum qcom_scm_ice_cipher cipher, u32 data_unit_size);
 bool qcom_scm_has_wrapped_key_support(void);
+/* Legacy storage-selecting ABI used by SM8250 Android firmware. */
+enum qcom_scm_ice_storage_type {
+	QCOM_SCM_ICE_STORAGE_UFS = 10,
+};
+bool qcom_scm_ice_legacy_available(void);
+int qcom_scm_ice_legacy_set_key(u32 index, const u8 *key, u32 key_size,
+			      enum qcom_scm_ice_cipher cipher, u32 data_unit_size,
+			      enum qcom_scm_ice_storage_type storage_type);
+int qcom_scm_ice_legacy_invalidate_key(u32 index,
+				     enum qcom_scm_ice_storage_type storage_type);
 int qcom_scm_derive_sw_secret(const u8 *eph_key, size_t eph_key_size,
 			      u8 *sw_secret, size_t sw_secret_size);
 int qcom_scm_generate_ice_key(u8 *lt_key, size_t lt_key_size);

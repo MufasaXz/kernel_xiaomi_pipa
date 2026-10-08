@@ -12,7 +12,7 @@
   "blocking_interfaces": [
     "KGSL GPU ioctl ABI",
     "ION allocation and downstream Qualcomm display ABI",
-    "SM8250 legacy ICE/SCM wrappedkey_v0 integration",
+    "Device validation of SM8250 legacy ICE/SCM and existing wrappedkey_v0 data",
     "QSEECom userspace ABI",
     "ADSPRPC and Android audio HAL integration",
     "CamX camera and video codec integration",
@@ -23,5 +23,9 @@
   "dm_default_key_software_vm_verified": true,
   "dm_default_key_module_link_verified": true,
   "sm8250_wrapped_keys_verified": false,
-  "storage_test_scope": "Disposable x86 QEMU disk; ext4/f2fs software and inlinecrypt fallback; not device decryption"
+  "storage_test_scope": "Disposable x86 QEMU disk; ext4/f2fs software and inlinecrypt fallback; not device decryption",
+  "sm8250_legacy_wrapped_key_path_ported": true,
+  "android_wrappedkey_v0_flag_ported": true,
+  "android_wrappedkey_v0_flag_vm_verified": true,
+  "pipa_ice_dt_binding_verified": true
 }

@@ -196,6 +196,12 @@ static int ufs_qcom_ice_init(struct ufs_qcom_host *host)
 		return err;
 
 	profile->ll_ops = ufs_qcom_crypto_ops;
+	/* Android wrappedkey_v0 uses Keymaster, not modern block key ioctls. */
+	if (qcom_ice_uses_legacy_wrapped_keys(ice)) {
+		profile->ll_ops.import_key = NULL;
+		profile->ll_ops.generate_key = NULL;
+		profile->ll_ops.prepare_key = NULL;
+	}
 	profile->max_dun_bytes_supported = 8;
 	profile->key_types_supported = qcom_ice_get_supported_key_type(ice);
 	profile->dev = dev;

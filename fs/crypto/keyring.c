@@ -582,8 +582,11 @@ static int add_master_key(struct super_block *sb,
 			 * that hardware-wrapped keys and raw keys will have
 			 * different key identifiers by deriving their key
 			 * identifiers using different KDF contexts.
+			 * Android's wrappedkey_v0 predates that separation and
+			 * must keep context 1 to unlock existing encrypted data.
 			 */
-			keyid_kdf_ctx =
+			keyid_kdf_ctx = secret->android_compat ?
+				HKDF_CONTEXT_KEY_IDENTIFIER_FOR_RAW_KEY :
 				HKDF_CONTEXT_KEY_IDENTIFIER_FOR_HW_WRAPPED_KEY;
 		}
 		fscrypt_init_hkdf(&secret->hkdf, kdf_key, kdf_key_size);
@@ -776,6 +779,16 @@ int fscrypt_ioctl_add_key(struct file *filp, void __user *_uarg)
 		return -EACCES;
 
 	memset(&secret, 0, sizeof(secret));
+
+	if (arg.__flags) {
+		/* Preserve the original Android wrappedkey_v0 on-disk format. */
+		if (arg.__flags & ~__FSCRYPT_ADD_KEY_FLAG_HW_WRAPPED)
+			return -EINVAL;
+		if (arg.flags & FSCRYPT_ADD_KEY_FLAG_HW_WRAPPED)
+			return -EINVAL;
+		arg.flags |= FSCRYPT_ADD_KEY_FLAG_HW_WRAPPED;
+		secret.android_compat = true;
+	}
 
 	if (arg.flags) {
 		if (arg.flags & ~FSCRYPT_ADD_KEY_FLAG_HW_WRAPPED)

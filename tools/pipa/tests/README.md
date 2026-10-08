@@ -62,6 +62,12 @@ options, invalid sector sizes, missing iv_large_sectors and hardware-wrapped
 keys on unsupported storage must be rejected. Success requires guest marker
 PIPA_STORAGE_TEST_PASSED and a successful QEMU exit.
 
+The userspace test checks the fixed 80-byte fscrypt add-key ABI, including
+Android's wrapped-key flag at offset 76 and the upstream flag at offset 48.
+Unknown/conflicting flags, reserved words and wrapped descriptor keys are
+rejected. Recognized formats must reach EOPNOTSUPP on the VM's storage,
+demonstrating flag parsing without pretending that hardware keys were tested.
+
 This does not validate pipa ICE/TrustZone, existing wrapped keys, Android vold,
 power-loss recovery, garbage-collection stress or device boot. The module
 configuration was link-tested; runtime cases use the builtin target.

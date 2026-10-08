@@ -1671,7 +1671,20 @@
 	remote-endpoint = <&pm8150b_typec_mux_in>;
 };
 
+&soc {
+	/* Register range and clock match Xiaomi's kona UFS ICE description. */
+	pipa_ufs_ice: crypto@1d90000 {
+		compatible = "qcom,sm8250-inline-crypto-engine",
+			     "qcom,inline-crypto-engine";
+		reg = <0 0x01d90000 0 0x8000>;
+		clocks = <&gcc GCC_UFS_PHY_ICE_CORE_CLK>;
+		assigned-clocks = <&gcc GCC_UFS_PHY_ICE_CORE_CLK>;
+		assigned-clock-rates = <300000000>;
+	};
+};
+
 &ufs_mem_hc {
+	qcom,ice = <&pipa_ufs_ice>;
 	vcc-supply = <&vreg_l17a_3p0>;
 	vcc-max-microamp = <800000>;
 	vccq-supply = <&vreg_l6a_1p2>;

@@ -96,6 +96,7 @@ struct qcom_ice {
 
 	struct clk *core_clk;
 	bool use_hwkm;
+	bool use_legacy_wrapped_keys;
 	bool hwkm_init_complete;
 };
 
@@ -124,6 +125,11 @@ static bool qcom_ice_check_supported(struct qcom_ice *ice)
 		      QCOM_ICE_FORCE_HW_KEY1_SETTING_MASK)) {
 		dev_warn(dev, "Fuses are blown; ICE is unusable!\n");
 		return false;
+	}
+
+	if (ice->use_legacy_wrapped_keys) {
+		dev_info(dev, "Using experimental SM8250 legacy UFS wrapped keys\n");
+		return true;
 	}
 
 	/*
@@ -359,6 +365,21 @@ int qcom_ice_program_key(struct qcom_ice *ice, unsigned int slot,
 		return -EINVAL;
 	}
 
+	if (ice->use_legacy_wrapped_keys) {
+		if (blk_key->crypto_cfg.key_type != BLK_CRYPTO_KEY_TYPE_HW_WRAPPED)
+			return -EINVAL;
+		err = qcom_scm_ice_legacy_set_key(slot, blk_key->bytes,
+					       blk_key->size,
+					       QCOM_SCM_ICE_CIPHER_AES_256_XTS,
+					       blk_key->crypto_cfg.data_unit_size / 512,
+					       QCOM_SCM_ICE_STORAGE_UFS);
+		/* A failed programming operation may leave a partially set slot. */
+		if (err && qcom_scm_ice_legacy_invalidate_key(slot,
+							    QCOM_SCM_ICE_STORAGE_UFS))
+			dev_err_ratelimited(dev, "Failed to clear legacy ICE keyslot %u\n", slot);
+		return err;
+	}
+
 	if (blk_key->crypto_cfg.key_type == BLK_CRYPTO_KEY_TYPE_HW_WRAPPED)
 		return qcom_ice_program_wrapped_key(ice, slot, blk_key);
 
@@ -389,6 +410,8 @@ EXPORT_SYMBOL_GPL(qcom_ice_program_key);
 
 int qcom_ice_evict_key(struct qcom_ice *ice, int slot)
 {
+	if (ice->use_legacy_wrapped_keys)
+		return qcom_scm_ice_legacy_invalidate_key(slot, QCOM_SCM_ICE_STORAGE_UFS);
 	if (ice->hwkm_init_complete)
 		slot = translate_hwkm_slot(ice, slot);
 	return qcom_scm_ice_invalidate_key(slot);
@@ -405,11 +428,17 @@ EXPORT_SYMBOL_GPL(qcom_ice_evict_key);
  */
 enum blk_crypto_key_type qcom_ice_get_supported_key_type(struct qcom_ice *ice)
 {
-	if (ice->use_hwkm)
+	if (ice->use_hwkm || ice->use_legacy_wrapped_keys)
 		return BLK_CRYPTO_KEY_TYPE_HW_WRAPPED;
 	return BLK_CRYPTO_KEY_TYPE_RAW;
 }
 EXPORT_SYMBOL_GPL(qcom_ice_get_supported_key_type);
+
+bool qcom_ice_uses_legacy_wrapped_keys(struct qcom_ice *ice)
+{
+	return ice->use_legacy_wrapped_keys;
+}
+EXPORT_SYMBOL_GPL(qcom_ice_uses_legacy_wrapped_keys);
 
 /**
  * qcom_ice_derive_sw_secret() - Derive software secret from wrapped key
@@ -428,7 +457,20 @@ int qcom_ice_derive_sw_secret(struct qcom_ice *ice,
 			      const u8 *eph_key, size_t eph_key_size,
 			      u8 sw_secret[BLK_CRYPTO_SW_SECRET_SIZE])
 {
-	int err = qcom_scm_derive_sw_secret(eph_key, eph_key_size,
+	int err;
+
+	if (ice->use_legacy_wrapped_keys) {
+		if (eph_key_size <= BLK_CRYPTO_SW_SECRET_SIZE ||
+		    eph_key_size > BLK_CRYPTO_MAX_HW_WRAPPED_KEY_SIZE)
+			return -EINVAL;
+		/* Match crypto_qti_derive_raw_secret()'s legacy short-key format. */
+		if (eph_key_size <= AES_256_XTS_KEY_SIZE) {
+			memcpy(sw_secret, eph_key, BLK_CRYPTO_SW_SECRET_SIZE);
+			return 0;
+		}
+	}
+
+	err = qcom_scm_derive_sw_secret(eph_key, eph_key_size,
 					    sw_secret,
 					    BLK_CRYPTO_SW_SECRET_SIZE);
 	if (err == -EIO || err == -EINVAL)
@@ -450,6 +492,9 @@ int qcom_ice_generate_key(struct qcom_ice *ice,
 			  u8 lt_key[BLK_CRYPTO_MAX_HW_WRAPPED_KEY_SIZE])
 {
 	int err;
+
+	if (ice->use_legacy_wrapped_keys)
+		return -EOPNOTSUPP;
 
 	err = qcom_scm_generate_ice_key(lt_key, QCOM_ICE_HWKM_WRAPPED_KEY_SIZE);
 	if (err)
@@ -476,6 +521,9 @@ int qcom_ice_prepare_key(struct qcom_ice *ice,
 			 u8 eph_key[BLK_CRYPTO_MAX_HW_WRAPPED_KEY_SIZE])
 {
 	int err;
+
+	if (ice->use_legacy_wrapped_keys)
+		return -EOPNOTSUPP;
 
 	err = qcom_scm_prepare_ice_key(lt_key, lt_key_size,
 				       eph_key, QCOM_ICE_HWKM_WRAPPED_KEY_SIZE);
@@ -505,6 +553,9 @@ int qcom_ice_import_key(struct qcom_ice *ice,
 {
 	int err;
 
+	if (ice->use_legacy_wrapped_keys)
+		return -EOPNOTSUPP;
+
 	err = qcom_scm_import_ice_key(raw_key, raw_key_size,
 				      lt_key, QCOM_ICE_HWKM_WRAPPED_KEY_SIZE);
 	if (err)
@@ -518,11 +569,20 @@ static struct qcom_ice *qcom_ice_create(struct device *dev,
 					void __iomem *base)
 {
 	struct qcom_ice *engine;
+	bool legacy_wrapped;
 
 	if (!qcom_scm_is_available())
 		return ERR_PTR(-EPROBE_DEFER);
 
-	if (!qcom_scm_ice_available()) {
+	/* Limit this ABI to pipa's dedicated SM8250 UFS ICE instance. */
+	legacy_wrapped = IS_ENABLED(CONFIG_QCOM_ICE_SM8250_LEGACY_WRAPPED_KEYS) &&
+		of_machine_is_compatible("xiaomi,pipa") &&
+		of_device_is_compatible(dev->of_node, "qcom,sm8250-inline-crypto-engine");
+	if (legacy_wrapped && !qcom_scm_ice_legacy_available())
+		return ERR_PTR(dev_err_probe(dev, -ENODEV,
+					    "Legacy UFS wrapped-key SCM calls unavailable\n"));
+
+	if (!legacy_wrapped && !qcom_scm_ice_available()) {
 		dev_warn(dev, "ICE SCM interface not found\n");
 		return NULL;
 	}
@@ -533,6 +593,7 @@ static struct qcom_ice *qcom_ice_create(struct device *dev,
 
 	engine->dev = dev;
 	engine->base = base;
+	engine->use_legacy_wrapped_keys = legacy_wrapped;
 
 	/*
 	 * Legacy DT binding uses different clk names for each consumer,

@@ -18,6 +18,7 @@ int qcom_ice_program_key(struct qcom_ice *ice, unsigned int slot,
 			 const struct blk_crypto_key *blk_key);
 int qcom_ice_evict_key(struct qcom_ice *ice, int slot);
 enum blk_crypto_key_type qcom_ice_get_supported_key_type(struct qcom_ice *ice);
+bool qcom_ice_uses_legacy_wrapped_keys(struct qcom_ice *ice);
 int qcom_ice_derive_sw_secret(struct qcom_ice *ice,
 			      const u8 *eph_key, size_t eph_key_size,
 			      u8 sw_secret[BLK_CRYPTO_SW_SECRET_SIZE]);

@@ -1282,6 +1282,80 @@ int qcom_scm_ice_set_key(u32 index, const u8 *key, u32 key_size,
 }
 EXPORT_SYMBOL_GPL(qcom_scm_ice_set_key);
 
+/*
+ * SM8250's Android firmware accepts wrapped keys through ES 0x05/0x06,
+ * with an explicit storage-engine selector.  This is distinct from HWKM v2.
+ * Argument layout follows Xiaomi pipa-t-oss crypto-qti-tz.[ch].
+ */
+bool qcom_scm_ice_legacy_available(void)
+{
+	return __qcom_scm_is_call_available(__scm->dev, QCOM_SCM_SVC_ES,
+					    QCOM_SCM_ES_CONFIG_SET_ICE_KEY_CE) &&
+	       __qcom_scm_is_call_available(__scm->dev, QCOM_SCM_SVC_ES,
+					    QCOM_SCM_ES_INVALIDATE_ICE_KEY_CE) &&
+	       __qcom_scm_is_call_available(__scm->dev, QCOM_SCM_SVC_ES,
+					    QCOM_SCM_ES_DERIVE_SW_SECRET);
+}
+EXPORT_SYMBOL_GPL(qcom_scm_ice_legacy_available);
+
+int qcom_scm_ice_legacy_set_key(u32 index, const u8 *key, u32 key_size,
+			      enum qcom_scm_ice_cipher cipher, u32 data_unit_size,
+			      enum qcom_scm_ice_storage_type storage_type)
+{
+	struct qcom_scm_desc desc = {
+		.svc = QCOM_SCM_SVC_ES,
+		.cmd = QCOM_SCM_ES_CONFIG_SET_ICE_KEY_CE,
+		.arginfo = QCOM_SCM_ARGS(6, QCOM_SCM_VAL, QCOM_SCM_RW,
+					 QCOM_SCM_VAL, QCOM_SCM_VAL,
+					 QCOM_SCM_VAL, QCOM_SCM_VAL),
+		.args[0] = index,
+		.args[2] = key_size,
+		.args[3] = cipher,
+		.args[4] = data_unit_size,
+		.args[5] = storage_type,
+		.owner = ARM_SMCCC_OWNER_SIP,
+	};
+	void *keybuf __free(qcom_tzmem) = NULL;
+	int ret;
+
+	/* Only the UFS AES-XTS wrapped-key path is implemented here. */
+	if (!key || key_size <= 32 || key_size > 128 ||
+	    cipher != QCOM_SCM_ICE_CIPHER_AES_256_XTS ||
+	    storage_type != QCOM_SCM_ICE_STORAGE_UFS ||
+	    !is_power_of_2(data_unit_size) || data_unit_size > 128)
+		return -EINVAL;
+
+	keybuf = qcom_tzmem_alloc(__scm->mempool, key_size, GFP_KERNEL);
+	if (!keybuf)
+		return -ENOMEM;
+
+	/* Wrapped key bytes must not undergo the raw-key endian conversion. */
+	memcpy(keybuf, key, key_size);
+	desc.args[1] = qcom_tzmem_to_phys(keybuf);
+	ret = qcom_scm_call(__scm->dev, &desc, NULL);
+	memzero_explicit(keybuf, key_size);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(qcom_scm_ice_legacy_set_key);
+
+int qcom_scm_ice_legacy_invalidate_key(u32 index,
+				     enum qcom_scm_ice_storage_type storage_type)
+{
+	struct qcom_scm_desc desc = {
+		.svc = QCOM_SCM_SVC_ES,
+		.cmd = QCOM_SCM_ES_INVALIDATE_ICE_KEY_CE,
+		.arginfo = QCOM_SCM_ARGS(2),
+		.args[0] = index,
+		.args[1] = storage_type,
+		.owner = ARM_SMCCC_OWNER_SIP,
+	};
+
+	if (storage_type != QCOM_SCM_ICE_STORAGE_UFS)
+		return -EINVAL;
+	return qcom_scm_call(__scm->dev, &desc, NULL);
+}
+EXPORT_SYMBOL_GPL(qcom_scm_ice_legacy_invalidate_key);
+
 bool qcom_scm_has_wrapped_key_support(void)
 {
 	return __qcom_scm_is_call_available(__scm->dev, QCOM_SCM_SVC_ES,

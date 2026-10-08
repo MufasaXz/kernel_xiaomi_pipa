@@ -18,6 +18,7 @@ ANDROID_BINDER_IPC ANDROID_BINDERFS SECURITY_SELINUX SECCOMP SECCOMP_FILTER
 CGROUPS MEMCG CPUSETS BPF_SYSCALL PSI TMPFS DEVTMPFS
 BLK_DEV_DM DM_DEFAULT_KEY DM_VERITY DM_SNAPSHOT EXT4_FS F2FS_FS FS_ENCRYPTION
 SCSI_UFS_QCOM PHY_QCOM_QMP_UFS PINCTRL_SM8250 SM_GCC_8250
+QCOM_INLINE_CRYPTO_ENGINE QCOM_ICE_SM8250_LEGACY_WRAPPED_KEYS QCOM_TZMEM_MODE_SHMBRIDGE
 DRM_MSM DRM_PANEL_NOVATEK_NT36532 TOUCHSCREEN_NT36523_SPI
 USB_DWC3 USB_CONFIGFS USB_CONFIGFS_F_FS PSTORE_RAM
 """.split()
@@ -25,4 +26,4 @@ missing = ["CONFIG_" + key for key in required if config.get("CONFIG_" + key) !=
 if missing:
     sys.exit("Required builtin configuration missing: " + ", ".join(missing))
 print("Android bring-up configuration checks passed")
-print("Vendor ABI still unresolved: KGSL, ION, /dev/qseecom, SM8250 wrappedkey_v0")
+print("Vendor ABI unresolved: KGSL, ION, /dev/qseecom; legacy wrapped keys need device tests")

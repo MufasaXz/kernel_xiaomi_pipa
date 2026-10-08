@@ -1,7 +1,7 @@
 # SM8250 encrypted userdata compatibility
 
-Status: blocked for the existing Android ROM; no userdata changes authorized
-or needed for this investigation.
+Status: experimental legacy implementation builds; physical key programming
+and existing-data compatibility are unverified. No userdata has been changed.
 
 The actual build output inspected was
 /home/aosp/infx/out/target/product/pipa/vendor/etc/fstab.qcom. It uses F2FS,
@@ -18,10 +18,10 @@ That resolves one layer of the storage dependency, not existing-data access.
 
 | Operation | Working downstream 4.19 path | Current 6.18 path |
 | --- | --- | --- |
-| Program key | ES 0x05: slot, shared key address, key size, cipher, data-unit mask, storage type | ES 0x04: no storage-type argument |
-| Evict key | ES 0x06: slot, storage type | ES 0x03: slot |
+| Program key | ES 0x05: slot, shared key address, key size, cipher, data-unit mask, storage type | Experimental matching wrapper; existing ES 0x04 path retained |
+| Evict key | ES 0x06: slot, storage type | Experimental matching wrapper; existing ES 0x03 path retained |
 | Derive software secret | ES 0x07 via QTEE shared buffers | ES 0x07 via qcom_tzmem buffers |
-| Wrapped key support | Legacy Qualcomm key wrapping; UFS storage type 10 | HWKM v2 path, requiring additional firmware calls 0x08/0x09/0x0a |
+| Wrapped key support | Legacy Qualcomm key wrapping; UFS storage type 10 | Separate legacy pipa UFS path plus existing HWKM v2 support |
 
 Downstream references are drivers/soc/qcom/crypto-qti-tz.[ch],
 drivers/soc/qcom/crypto-qti-common.c and
@@ -30,29 +30,43 @@ raw AES-XTS key words are converted to big endian. The derive-secret helper
 also has a legacy short-key case that copies the software-secret prefix for
 keys of at most 64 bytes. This behavior needs deliberate compatibility review.
 
-In this tree, drivers/soc/qcom/ice.c explicitly limits its wrapped-key path
-to HWKM v2 with the necessary firmware interfaces, effectively SM8650 or later.
-The qcom_ice.use_wrapped_keys parameter therefore cannot enable SM8250's
-legacy path. Advertising wrapped-key support without implementing it would
-leave Android unable to decrypt /data.
+The existing HWKM v2 path still requires modern firmware, effectively SM8650
+or later. A separate QCOM_ICE_SM8250_LEGACY_WRAPPED_KEYS option now implements
+program/evict/derive for pipa's dedicated UFS ICE node, gated by machine,
+ICE compatible and availability of all three legacy SCM calls. Other SoCs
+keep their existing behavior. The modern generate/prepare/import operations
+are removed from the legacy UFS profile; wrappedkey_v0 continues using
+Android Keymaster to prepare keys. Wrapped-key programming failures attempt
+to invalidate the potentially partially programmed slot.
+
+The pipa DT now exposes ICE at 0x01d90000 (size 0x8000), with the UFS PHY ICE
+clock assigned to 300 MHz, matching Xiaomi's kona source. UFS references that
+engine. The ICE binding and its application to the compiled pipa DTB pass
+targeted dt-schema checks.
+
+Android's legacy fscrypt add-key flag at byte offset 76 is also supported,
+using Android common revision 9d29ba85d8a2c505b2d049568c3b1d29c4e0c2fd.
+It selects HKDF key-identifier context 1 to preserve the old on-disk format;
+the upstream flag keeps context 8. Unknown flags, conflicting formats and
+nonzero reserved words are rejected. Both recognized flag formats reach
+the expected unsupported-hardware error in the disposable VM, and all four
+raw-key filesystem round trips still pass. These tests do not validate an
+actual hardware-derived identifier or decrypt existing userdata.
 
 Modern qcom_tzmem already implements the shared-memory bridge transport used
 by secure firmware. The pipa build selects QCOM_TZMEM_MODE_SHMBRIDGE. Its
 buffer lifetime, cache coherency, firmware return values, key erasure and
-ownership rules must be checked when adding legacy ES 0x05/0x06 wrappers;
-copying the old allocator or changing SCM command numbers alone is inadequate.
+ownership rules remain important for firmware validation. The wrappers use
+its DMA-coherent, bridge-registered pool, wipe shared keys before freeing,
+and retain the SCM transport's error handling. No old allocator was copied.
 
 ## Required implementation and evidence
 
-1. Add explicit legacy SCM wrappers with the documented argument layout and
-   correct secure shared buffers. Gate support on matching platform and
-   firmware capabilities, leaving existing raw-key/HWKM consumers intact.
-2. Integrate legacy program/evict/derive operations into ICE and UFS without
-   falsely exposing modern generate/prepare/import operations. Preserve
-   data-unit, slot and key-format semantics across suspend and resume.
-3. Check vold's existing wrappedkey_v0 preparation path and fscrypt v2
-   IV_INO_LBLK_64 policy against the resulting kernel capabilities.
-4. Validate against disposable data on actual SM8250 hardware, then verify
+1. Validate implemented legacy SCM calls and key-format behavior against
+   disposable data on pipa, including error paths and slot eviction.
+2. Verify data-unit, slot and key-format semantics across suspend/resume.
+3. Verify vold/Keymaster and fscrypt v2 IV_INO_LBLK_64 end to end.
+4. After the above succeeds, verify
    existing-data compatibility and recovery. VM software encryption cannot
    establish firmware compatibility.
 

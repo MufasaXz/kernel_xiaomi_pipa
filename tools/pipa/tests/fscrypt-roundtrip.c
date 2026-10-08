@@ -4,12 +4,28 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fscrypt.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+/* Keep this test independent of whether the host headers have Android flags. */
+struct android_add_key_arg {
+	struct fscrypt_key_specifier key_spec;
+	unsigned int raw_size;
+	unsigned int key_id;
+	unsigned int flags;
+	unsigned int reserved[6];
+	unsigned int android_flags;
+	unsigned char raw[64];
+};
+
+_Static_assert(offsetof(struct android_add_key_arg, flags) == 48, "flags ABI");
+_Static_assert(offsetof(struct android_add_key_arg, android_flags) == 76, "Android ABI");
+_Static_assert(offsetof(struct android_add_key_arg, raw) == 80, "raw key ABI");
 
 static void die(const char *operation)
 {
@@ -23,6 +39,44 @@ static void fill(unsigned char *buffer, size_t size, unsigned int seed)
 		seed = seed * 1664525U + 1013904223U;
 		buffer[i] = seed >> 24;
 	}
+}
+
+static void expect_key_error(int fd, struct android_add_key_arg *key,
+			     int expected, const char *label)
+{
+	errno = 0;
+	if (ioctl(fd, FS_IOC_ADD_ENCRYPTION_KEY, key) != -1 || errno != expected) {
+		fprintf(stderr, "%s: expected errno %d, got %d\n", label, expected, errno);
+		exit(1);
+	}
+}
+
+static void check_wrapped_key_abi(int mountfd)
+{
+	struct android_add_key_arg key = {
+		.key_spec.type = FSCRYPT_KEY_SPEC_TYPE_IDENTIFIER,
+		.raw_size = 64,
+	};
+
+	fill(key.raw, sizeof(key.raw), 0x50495041);
+	key.android_flags = 2;
+	expect_key_error(mountfd, &key, EINVAL, "unknown Android flag");
+	key.android_flags = 1;
+	key.flags = 1;
+	expect_key_error(mountfd, &key, EINVAL, "conflicting wrapped-key flags");
+	key.flags = 0;
+	key.reserved[0] = 1;
+	expect_key_error(mountfd, &key, EINVAL, "nonzero reserved field");
+	key.reserved[0] = 0;
+	key.key_spec.type = FSCRYPT_KEY_SPEC_TYPE_DESCRIPTOR;
+	expect_key_error(mountfd, &key, EINVAL, "wrapped descriptor unsupported");
+	key.key_spec.type = FSCRYPT_KEY_SPEC_TYPE_IDENTIFIER;
+	/* Both recognized formats must reach the unsupported-hardware check. */
+	expect_key_error(mountfd, &key, EOPNOTSUPP, "Android wrapped-key flag accepted");
+	key.android_flags = 0;
+	key.flags = 1;
+	expect_key_error(mountfd, &key, EOPNOTSUPP, "upstream wrapped-key flag accepted");
+	puts("PASS legacy/upstream wrapped-key ABI validation (no hardware keys)");
 }
 
 static void check_file(const char *path, int create, unsigned int seed)
@@ -63,6 +117,8 @@ int main(int argc, char **argv)
 
 	if (mountfd < 0)
 		die("open mountpoint");
+	if (create)
+		check_wrapped_key_abi(mountfd);
 	struct fscrypt_add_key_arg *key = calloc(1, sizeof(*key) + 64);
 
 	if (!key)

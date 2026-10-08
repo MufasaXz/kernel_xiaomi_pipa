@@ -61,8 +61,9 @@ be loaded into this kernel. Compilation does not prove any hardware works.
    See [display compatibility](display-compatibility.md) for local evidence.
 2. The built Android vendor fstab uses dm-default-key and wrappedkey_v0 for
    /data. The dm-default-key target now works with software keys in a VM.
-   SM8250's downstream SCM/ICE wrapped-key path is still missing; upstream
-   HWKM v2 support does not implement it. See [storage compatibility](storage-compatibility.md).
+   An experimental SM8250 SCM/ICE wrapped-key path and legacy fscrypt flag
+   compatibility now build, but firmware and existing-data decryption are
+   unverified. See [storage compatibility](storage-compatibility.md).
    Existing encrypted data must remain intact; removing encryption or
    formatting data is not an acceptable compatibility fix.
 3. libQSEEComAPI.so explicitly expects /dev/qseecom. Upstream QCOM_QSEECOM
