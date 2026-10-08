@@ -17,6 +17,7 @@ properties:
           - qcom,sa8775p-inline-crypto-engine
           - qcom,sc7180-inline-crypto-engine
           - qcom,sc7280-inline-crypto-engine
+          - qcom,sm8250-inline-crypto-engine
           - qcom,sm8450-inline-crypto-engine
           - qcom,sm8550-inline-crypto-engine
           - qcom,sm8650-inline-crypto-engine
@@ -27,6 +28,12 @@ properties:
     maxItems: 1
 
   clocks:
+    maxItems: 1
+
+  assigned-clocks:
+    maxItems: 1
+
+  assigned-clock-rates:
     maxItems: 1
 
 required:
