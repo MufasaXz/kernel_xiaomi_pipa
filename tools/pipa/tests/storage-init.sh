@@ -15,6 +15,37 @@ fail()
 }
 trap 'fail command-failed' EXIT
 set -e
+/bin/memfd-compat
+# Exercise real USB enumeration through the dummy host/device controller.
+mkdir -p /sys/kernel/config
+mount -t configfs configfs /sys/kernel/config
+gadget=/sys/kernel/config/usb_gadget/pipa-test
+mkdir "$gadget"
+echo 0x1d6b > "$gadget/idVendor"
+echo 0x0104 > "$gadget/idProduct"
+mkdir "$gadget/functions/acm.usb0" "$gadget/configs/c.1"
+ln -s "$gadget/functions/acm.usb0" "$gadget/configs/c.1/acm.usb0"
+echo dummy_udc.0 > "$gadget/UDC"
+i=0
+while [ "$(cat /sys/class/android_usb/android0/state)" != CONFIGURED ] && [ "$i" -lt 20 ]; do
+    sleep 1
+    i=$((i + 1))
+done
+[ "$(cat /sys/class/android_usb/android0/state)" = CONFIGURED ]
+echo none > "$gadget/UDC"
+i=0
+while [ "$(cat /sys/class/android_usb/android0/state)" != DISCONNECTED ] && [ "$i" -lt 20 ]; do
+    sleep 1
+    i=$((i + 1))
+done
+[ "$(cat /sys/class/android_usb/android0/state)" = DISCONNECTED ]
+rm "$gadget/configs/c.1/acm.usb0"
+rmdir "$gadget/functions/acm.usb0" "$gadget/configs/c.1" "$gadget"
+[ ! -e /sys/class/android_usb/android0 ]
+mkdir "$gadget"
+[ "$(cat /sys/class/android_usb/android0/state)" = DISCONNECTED ]
+rmdir "$gadget"
+echo "PASS Android USB configfs enumeration, disconnect and gadget recreation"
 i=0
 while [ ! -b /dev/vda ] && [ "$i" -lt 20 ]; do
     sleep 1

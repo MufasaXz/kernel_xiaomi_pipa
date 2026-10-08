@@ -27,5 +27,12 @@
   "sm8250_legacy_wrapped_key_path_ported": true,
   "android_wrappedkey_v0_flag_ported": true,
   "android_wrappedkey_v0_flag_vm_verified": true,
-  "pipa_ice_dt_binding_verified": true
+  "pipa_ice_dt_binding_verified": true,
+  "android_memfd_shim_ported": true,
+  "android_memfd_shim_vm_verified": true,
+  "android_usb_configfs_uevent_ported": true,
+  "android_usb_configfs_dummy_udc_vm_verified": true,
+  "pipa_usb_device_verified": false,
+  "mainline_reference_audit": "tools/pipa/mainline-android-reference.md",
+  "rom_memfd_opt_in_commit": "f1bc5c6"
 }

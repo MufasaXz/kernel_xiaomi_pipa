@@ -52,6 +52,8 @@ with tempfile.TemporaryDirectory(prefix="pipa-storage-vm-") as work:
     (root / "init").chmod(0o755)
     run("gcc", "-static", "-O2", "-Wall", "-Wextra", str(here / "fscrypt-roundtrip.c"),
         "-o", str(root / "bin/fscrypt-roundtrip"))
+    run("gcc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", str(here / "memfd-compat.c"),
+        "-o", str(root / "bin/memfd-compat"))
     entries = sorted(str(p.relative_to(root)) for p in root.rglob("*"))
     packed = run("cpio", "--null", "-o", "--format=newc", "--owner=0:0", cwd=root,
                  input=(chr(0).join(entries) + chr(0)).encode(), capture_output=True)

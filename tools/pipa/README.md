@@ -42,6 +42,9 @@ be loaded into this kernel. Compilation does not prove any hardware works.
 - Linux 6.18.28-pipa-a17-v0.1 builds with the pipa DTB.
 - Binder, binderfs, SELinux, seccomp, cgroups, filesystems and USB FunctionFS
   are enabled for Android userspace bring-up.
+- Android memfd/ashmem ioctl compatibility and USB configfs state notification
+  support build. VM cases verify shared-memory write sealing and dummy-UDC
+  enumeration/disconnect plus gadget recreation. Pipa USB remains untested.
 - UFS, MSM DRM, NT36532 panel, touch, mainline audio, Wi-Fi and Bluetooth
   drivers are builtin. Their Android compatibility remains untested.
 - Android dm-default-key and its bio/fscrypt/F2FS hooks are ported. Disposable
@@ -74,6 +77,15 @@ be loaded into this kernel. Compilation does not prove any hardware works.
    keyboard and pen need vendor compatibility and device testing.
 6. The bootloader consumes downstream DTBs/DTBOs. A mainline DTB cannot be
    combined blindly with the existing dtbo partition or vendor_boot DTB.
+
+## Mainline Android reference integration
+
+The supplied mainline Android repositories provide Mesa/minigbm/DRM composer
+and Qualcomm userspace components. See the pinned
+[reference audit](mainline-android-reference.md) for reusable code, local ROM
+dependencies and security limitations. An opt-in memfd init addition lives on
+the matching development branch of device_xiaomi_pipa; it does not make the
+existing vendor image compatible with Linux 6.18 by itself.
 
 ## Release requirement
 

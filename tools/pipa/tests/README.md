@@ -68,6 +68,14 @@ Unknown/conflicting flags, reserved words and wrapped descriptor keys are
 rejected. Recognized formats must reach EOPNOTSUPP on the VM's storage,
 demonstrating flag parsing without pretending that hardware keys were tested.
 
+The same disposable VM now verifies the Android memfd ioctl shim: name, size,
+file identifier, invalid requests and future-write sealing while keeping an
+existing writable mapping usable. A dummy USB host/device controller checks
+the Android configfs state through enumeration, disconnect and gadget removal
+and recreation. These checks do not exercise the pipa USB controller or PHY,
+Android UsbDeviceManager, media codec blobs or 32-bit compat ioctls. Patch
+provenance is recorded in ../mainline-android-reference.md.
+
 This does not validate pipa ICE/TrustZone, existing wrapped keys, Android vold,
 power-loss recovery, garbage-collection stress or device boot. The module
 configuration was link-tested; runtime cases use the builtin target.
