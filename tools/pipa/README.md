@@ -44,6 +44,10 @@ be loaded into this kernel. Compilation does not prove any hardware works.
   are enabled for Android userspace bring-up.
 - UFS, MSM DRM, NT36532 panel, touch, mainline audio, Wi-Fi and Bluetooth
   drivers are builtin. Their Android compatibility remains untested.
+- Android dm-default-key and its bio/fscrypt/F2FS hooks are ported. Disposable
+  x86 VM tests pass for ext4 and F2FS with software and inline file encryption,
+  including byte verification after removing/recreating the mapping. See
+  [storage tests](tests/README.md) for provenance, reproduction and limits.
 - No physical device boot, display, decryption, charging, suspend, camera,
   accessory or recovery testing has been performed.
 
@@ -54,9 +58,10 @@ be loaded into this kernel. Compilation does not prove any hardware works.
    still calls ion_open(), while this tree provides DMA-BUF heaps, not the
    stock ION ABI. The composer also expects downstream MSM DRM interfaces.
    Screen output from a Linux desktop does not establish Android UI support.
-2. Android fstab uses dm-default-key and wrappedkey_v0 for /data. This tree
-   lacks the Android dm-default-key target. Its upstream wrapped-key support
-   is not proof of compatibility with SM8250's downstream SCM/ICE key format.
+2. The built Android vendor fstab uses dm-default-key and wrappedkey_v0 for
+   /data. The dm-default-key target now works with software keys in a VM.
+   SM8250's downstream SCM/ICE wrapped-key path is still missing; upstream
+   HWKM v2 support does not implement it. See [storage compatibility](storage-compatibility.md).
    Existing encrypted data must remain intact; removing encryption or
    formatting data is not an acceptable compatibility fix.
 3. libQSEEComAPI.so explicitly expects /dev/qseecom. Upstream QCOM_QSEECOM

@@ -12,11 +12,16 @@
   "blocking_interfaces": [
     "KGSL GPU ioctl ABI",
     "ION allocation and downstream Qualcomm display ABI",
-    "dm-default-key and SM8250 wrappedkey_v0 integration",
+    "SM8250 legacy ICE/SCM wrappedkey_v0 integration",
     "QSEECom userspace ABI",
     "ADSPRPC and Android audio HAL integration",
     "CamX camera and video codec integration",
     "coherent bootloader DTB/DTBO and vendor_boot integration"
   ],
-  "artifact_distribution": "withheld at user request; source checkpoint only"
+  "artifact_distribution": "withheld at user request; source checkpoint only",
+  "dm_default_key_ported": true,
+  "dm_default_key_software_vm_verified": true,
+  "dm_default_key_module_link_verified": true,
+  "sm8250_wrapped_keys_verified": false,
+  "storage_test_scope": "Disposable x86 QEMU disk; ext4/f2fs software and inlinecrypt fallback; not device decryption"
 }

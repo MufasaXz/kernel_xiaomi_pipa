@@ -16,7 +16,7 @@ required = """
 ARM64_4K_PAGES COMPAT BLK_DEV_INITRD RD_GZIP BOOT_CONFIG
 ANDROID_BINDER_IPC ANDROID_BINDERFS SECURITY_SELINUX SECCOMP SECCOMP_FILTER
 CGROUPS MEMCG CPUSETS BPF_SYSCALL PSI TMPFS DEVTMPFS
-BLK_DEV_DM DM_VERITY DM_SNAPSHOT EXT4_FS F2FS_FS FS_ENCRYPTION
+BLK_DEV_DM DM_DEFAULT_KEY DM_VERITY DM_SNAPSHOT EXT4_FS F2FS_FS FS_ENCRYPTION
 SCSI_UFS_QCOM PHY_QCOM_QMP_UFS PINCTRL_SM8250 SM_GCC_8250
 DRM_MSM DRM_PANEL_NOVATEK_NT36532 TOUCHSCREEN_NT36523_SPI
 USB_DWC3 USB_CONFIGFS USB_CONFIGFS_F_FS PSTORE_RAM
@@ -25,4 +25,4 @@ missing = ["CONFIG_" + key for key in required if config.get("CONFIG_" + key) !=
 if missing:
     sys.exit("Required builtin configuration missing: " + ", ".join(missing))
 print("Android bring-up configuration checks passed")
-print("Vendor ABI NOT provided: KGSL, ION, /dev/qseecom, wrappedkey_v0, dm-default-key")
+print("Vendor ABI still unresolved: KGSL, ION, /dev/qseecom, SM8250 wrappedkey_v0")

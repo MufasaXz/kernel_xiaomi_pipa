@@ -312,6 +312,18 @@ config DM_CRYPT
 
 	  If unsure, say N.
 
+config DM_DEFAULT_KEY
+	tristate "Default-key target support"
+	depends on BLK_DEV_DM
+	depends on BLK_INLINE_ENCRYPTION
+	depends on FS_ENCRYPTION_INLINE_CRYPT
+	help
+	  This device-mapper target assigns a default encryption key to bios
+	  that are not for the contents of an encrypted file. It encrypts
+	  filesystem metadata without encrypting fscrypt file contents twice.
+	  Use it only when key configuration is tightly controlled, as in
+	  Android, and fscrypt keys are as strong as the metadata key.
+
 config DM_SNAPSHOT
        tristate "Snapshot target"
        depends on BLK_DEV_DM

@@ -305,6 +305,9 @@ void fscrypt_set_bio_crypt_ctx(struct bio *bio, const struct inode *inode,
 	const struct fscrypt_inode_info *ci;
 	u64 dun[BLK_CRYPTO_DUN_ARRAY_SIZE];
 
+	if (fscrypt_inode_should_skip_dm_default_key(inode))
+		bio_set_skip_dm_default_key(bio);
+
 	if (!fscrypt_inode_uses_inline_crypto(inode))
 		return;
 	ci = fscrypt_get_inode_info_raw(inode);
@@ -389,6 +392,9 @@ bool fscrypt_mergeable_bio(struct bio *bio, const struct inode *inode,
 
 	if (!!bc != fscrypt_inode_uses_inline_crypto(inode))
 		return false;
+	if (bio_should_skip_dm_default_key(bio) !=
+	    fscrypt_inode_should_skip_dm_default_key(inode))
+		return false;
 	if (!bc)
 		return true;
 	ci = fscrypt_get_inode_info_raw(inode);
@@ -423,7 +429,8 @@ bool fscrypt_mergeable_bio_bh(struct bio *bio,
 	u64 next_lblk;
 
 	if (!bh_get_inode_and_lblk_num(next_bh, &inode, &next_lblk))
-		return !bio->bi_crypt_context;
+		return !bio->bi_crypt_context &&
+		       !bio_should_skip_dm_default_key(bio);
 
 	return fscrypt_mergeable_bio(bio, inode, next_lblk);
 }
