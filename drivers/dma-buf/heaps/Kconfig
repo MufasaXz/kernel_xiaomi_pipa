@@ -22,3 +22,13 @@ config DMABUF_HEAPS_CMA_LEGACY
 	  from the CMA area's devicetree node, or "reserved" if the area is not
 	  defined in the devicetree. This uses the same underlying allocator as
 	  CONFIG_DMABUF_HEAPS_CMA.
+
+config DMABUF_HEAPS_PIPA_QSEECOM
+	bool "Experimental pipa QSEECom CMA heaps"
+	depends on DMABUF_HEAPS_CMA && OF && ARCH_QCOM
+	help
+	  Export only pipa's qseecom and qseecom-ta reserved CMA areas as
+	  dma-buf heaps for the legacy QSEECom userspace ABI. These are normal
+	  CPU-accessible communication buffers, not protected-content heaps.
+	  The QSEECom importer registers each allocation with TrustZone.
+	  Leave disabled until the device security transport is validated.

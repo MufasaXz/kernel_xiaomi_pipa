@@ -21,6 +21,7 @@
 #include <linux/io.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
@@ -424,4 +425,26 @@ static int __init add_default_cma_heap(void)
 	return 0;
 }
 module_init(add_default_cma_heap);
+
+#ifdef CONFIG_DMABUF_HEAPS_PIPA_QSEECOM
+static int __init add_pipa_qseecom_area(struct cma *cma, void *unused)
+{
+	const char *name = cma_get_name(cma);
+
+	/* Never export unrelated or protected reserved-memory regions. */
+	if (!strcmp(name, "qseecom"))
+		return __add_cma_heap(cma, "qseecom");
+	if (!strcmp(name, "qseecom-ta"))
+		return __add_cma_heap(cma, "qseecom_ta");
+	return 0;
+}
+
+static int __init add_pipa_qseecom_heaps(void)
+{
+	if (!of_machine_is_compatible("xiaomi,pipa"))
+		return 0;
+	return cma_for_each_area(add_pipa_qseecom_area, NULL);
+}
+device_initcall(add_pipa_qseecom_heaps);
+#endif
 MODULE_DESCRIPTION("DMA-BUF CMA Heap");

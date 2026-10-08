@@ -69,8 +69,11 @@ be loaded into this kernel. Compilation does not prove any hardware works.
    unverified. See [storage compatibility](storage-compatibility.md).
    Existing encrypted data must remain intact; removing encryption or
    formatting data is not an acceptable compatibility fix.
-3. libQSEEComAPI.so explicitly expects /dev/qseecom. Upstream QCOM_QSEECOM
-   serves a different interface; enabling it does not satisfy those blobs.
+3. libQSEEComAPI.so explicitly expects /dev/qseecom. An experimental legacy
+   QSEECom adaptation and dedicated CMA exporter now compile and link, but
+   are disabled by default and have no secure-world/device validation. See
+   [QSEECom compatibility](qseecom-compatibility.md). Upstream QCOM_QSEECOM
+   alone does not satisfy the legacy blob ABI.
 4. libadsprpc.so expects /dev/adsprpc-smd[-secure]. Upstream FastRPC, remoteproc,
    firmware paths and audio topology need integration with the Android HALs.
 5. CamX camera, video codecs, sensors, charging policy, thermal controls,
@@ -83,9 +86,10 @@ be loaded into this kernel. Compilation does not prove any hardware works.
 The supplied mainline Android repositories provide Mesa/minigbm/DRM composer
 and Qualcomm userspace components. See the pinned
 [reference audit](mainline-android-reference.md) for reusable code, local ROM
-dependencies and security limitations. An opt-in memfd init addition lives on
-the matching development branch of device_xiaomi_pipa; it does not make the
-existing vendor image compatible with Linux 6.18 by itself.
+dependencies and security limitations. The matching device/common development branches now configure the 6.18
+kernel, Mesa freedreno/minigbm/generic DRM composer, firmware, memfd init,
+ueventd and graphics SELinux. The full user ROM build is in progress. These
+source changes do not establish device readiness or existing-data decryption.
 
 ## Release requirement
 

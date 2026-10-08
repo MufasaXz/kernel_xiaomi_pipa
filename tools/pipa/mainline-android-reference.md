@@ -59,7 +59,9 @@ bring-up defaults.
 
 The pipa and sm8250-common repositories contained local Infinity changes
 before this checkpoint. They are preserved and excluded from the new commit.
-Only the pipa opt-in shared-memory addition is changed in the ROM at this stage.
+The new opt-in ROM checkpoint also selects Mesa/minigbm/generic DRM composer,
+firmware, DRM permissions and enforcing graphics SELinux. Dependency revisions
+are pinned in the pipa mainline directory; full ROM compilation is in progress.
 
 ## Kernel patch provenance and adaptations
 

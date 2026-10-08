@@ -252,6 +252,25 @@
 	};
 
 	reserved-memory {
+		/* Stock communication pools. Neither pool contains protected data. */
+		qseecom_mem: qseecom {
+			compatible = "shared-dma-pool";
+			reusable;
+			alloc-ranges = <0x0 0x0 0x1 0x0>;
+			alignment = <0x0 0x400000>;
+			size = <0x0 0x1400000>;
+			status = "disabled";
+		};
+
+		qseecom_ta_mem: qseecom-ta {
+			compatible = "shared-dma-pool";
+			reusable;
+			alloc-ranges = <0x0 0x0 0x1 0x0>;
+			alignment = <0x0 0x400000>;
+			size = <0x0 0x1000000>;
+			status = "disabled";
+		};
+
 		xbl_aop_mem: xbl-aop@80700000 {
 			reg = <0x0 0x80600000 0x0 0x260000>;
 			no-map;
@@ -290,6 +309,26 @@
 			ecc-size = <16>;
 			no-map;
 		};
+	};
+};
+
+/* Review checkpoint: enable only after validating the security transport. */
+&soc {
+	qseecom: qseecom@82400000 {
+		compatible = "qcom,qseecom";
+		reg = <0x0 0x82400000 0x0 0x3a00000>;
+		reg-names = "secapp-region";
+		memory-region = <&qseecom_mem>;
+		qcom,hlos-num-ce-hw-instances = <1>;
+		qcom,hlos-ce-hw-instance = <0>;
+		qcom,qsee-ce-hw-instance = <0>;
+		qcom,disk-encrypt-pipe-pair = <2>;
+		qcom,no-clock-support;
+		qcom,fde-key-size;
+		qcom,appsbl-qseecom-support;
+		qcom,commonlib64-loaded-by-uefi;
+		qcom,qsee-reentrancy-support = <2>;
+		status = "disabled";
 	};
 };
 

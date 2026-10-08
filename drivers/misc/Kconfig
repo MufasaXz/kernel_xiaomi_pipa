@@ -644,6 +644,17 @@ config MCHP_LAN966X_PCI
 	    - lan966x-miim (MDIO_MSCC_MIIM)
 	    - lan966x-switch (LAN966X_SWITCH)
 
+config QSEECOM
+	bool "Experimental legacy Qualcomm QSEECom userspace interface"
+	depends on ARM64 && QCOM_SCM=y && DMA_SHARED_BUFFER
+	depends on !QCOM_QSEECOM
+	depends on QCOM_TZMEM_MODE_SHMBRIDGE
+	help
+	  Provides the downstream /dev/qseecom ioctl interface for 64-bit
+	  vendor clients. This experimental port is not validated on pipa.
+	  Buffers must be physically contiguous and registered with the
+	  SM8250 shared-memory bridge. Leave disabled for release builds.
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"

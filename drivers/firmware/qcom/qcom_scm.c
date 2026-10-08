@@ -1844,6 +1844,35 @@ static int qcom_scm_find_dload_address(struct device *dev, u64 *addr)
 	return 0;
 }
 
+#ifdef CONFIG_QSEECOM
+/* Kernel-internal bridge for the legacy QSEECom request encoder. */
+int qcom_scm_call_raw(u32 owner, u32 svc, u32 cmd, u32 arginfo,
+		      const u64 *args, unsigned int nargs, u64 *res)
+{
+	struct qcom_scm_desc desc = {
+		.owner = owner,
+		.svc = svc,
+		.cmd = cmd,
+		.arginfo = arginfo,
+	};
+	struct qcom_scm_res scm_res = {};
+	int ret;
+
+	BUILD_BUG_ON(QCOM_SCM_RAW_RETS != MAX_QCOM_SCM_RETS);
+	if (!__scm)
+		return -EPROBE_DEFER;
+	if (nargs > MAX_QCOM_SCM_ARGS || (nargs && !args) ||
+	    (arginfo & 0xf) > nargs)
+		return -EINVAL;
+	if (nargs)
+		memcpy(desc.args, args, nargs * sizeof(*args));
+	ret = qcom_scm_call(__scm->dev, &desc, &scm_res);
+	if (res)
+		memcpy(res, scm_res.result, sizeof(scm_res.result));
+	return ret;
+}
+#endif
+
 #ifdef CONFIG_QCOM_QSEECOM
 
 /* Lock for QSEECOM SCM call executions */

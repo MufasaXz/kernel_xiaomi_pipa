@@ -10,8 +10,8 @@
   "recovery_and_rollback_verified": false,
   "sideload_installer_verified": false,
   "blocking_interfaces": [
-    "KGSL GPU ioctl ABI",
-    "ION allocation and downstream Qualcomm display ABI",
+    "Device validation of Mesa freedreno/minigbm/DRM composer integration",
+    "Legacy ION/secure heap users and protected graphics paths",
     "Device validation of SM8250 legacy ICE/SCM and existing wrappedkey_v0 data",
     "QSEECom userspace ABI",
     "ADSPRPC and Android audio HAL integration",
@@ -34,5 +34,17 @@
   "android_usb_configfs_dummy_udc_vm_verified": true,
   "pipa_usb_device_verified": false,
   "mainline_reference_audit": "tools/pipa/mainline-android-reference.md",
-  "rom_memfd_opt_in_commit": "f1bc5c6"
+  "rom_memfd_opt_in_commit": "f1bc5c6",
+  "qseecom_experimental_ported": true,
+  "qseecom_arm64_link_verified": true,
+  "qseecom_device_verified": false,
+  "qseecom_enabled_by_default": false,
+  "qseecom_cma_heaps_ported": true,
+  "rom_graphics_stack_configured": true,
+  "rom_full_build_passed": false,
+  "qseecom_audit": "tools/pipa/qseecom-compatibility.md",
+  "qseecom_listener_cleanup_reviewed": true,
+  "qseecom_remaining_runtime_audit": true,
+  "libion_dmaheap_android_arm64_compile_passed": true,
+  "rom_build_status": "compiling; Soong and Make generation passed; hardware not tested"
 }

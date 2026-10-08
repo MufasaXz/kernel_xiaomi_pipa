@@ -1,6 +1,6 @@
 # Android display compatibility on the current pipa ROM
 
-Status: Android display remains blocked. No physical display or GPU test has
+Status: the mainline Android userspace stack is configured; device display remains unverified. No physical display or GPU test has
 been performed. This audit uses the actual ROM output and its source tree.
 
 ## Confirmed dependencies
@@ -48,11 +48,27 @@ The workspace contains external/mesa3d, external/minigbm and
 external/drm_hwcomposer. Their presence does not establish a working product:
 Mesa needs suitable Android driver build integration, allocator/mapper
 implementations must agree on handles and metadata, and the local
-drm_hwcomposer service selects an sdm_backend default that needs auditing
-before assuming it uses only upstream DRM. HAL manifests, init services,
+drm_hwcomposer service lists sdm_backend as a conditional default. Its source
+and dependencies are added only when DRMHWC.backend=sdm; the pipa mainline
+configuration leaves that selector empty and forces the generic runtime backend. HAL manifests, init services,
 SELinux, GPU device permissions and fence handling must match that product.
 
 The current kernel configuration intentionally enables the existing mainline
 display drivers. Release readiness still requires actual Android compositor,
 GPU, brightness, refresh-rate, suspend/resume, touch and recovery testing on
 pipa, together with storage and boot-image compatibility.
+
+## Implemented ROM checkpoint
+
+The opt-in pipa product now selects the 6.18 source, the reference external/mesa
+Meson integration, freedreno EGL/Vulkan, minigbm MSM and generic DRM HWC3.
+It filters common proprietary graphics service packages and EGL/Vulkan properties,
+packages A650 firmware, installs ODM ueventd rules, and adds enforcing SELinux
+labels/access for the selected graphics stack. HDR, wide-colour and protected
+content capability claims are disabled. Required source revisions are pinned
+in device/xiaomi/pipa/mainline/dependencies.xml.
+
+Soong/Make generation passed and the full Infinity Android 17 user build is
+compiling. A successful ROM build and real display/GPU validation are still
+pending. These changes affect userspace and cannot make a kernel-only ZIP
+compatible with the existing proprietary graphics stack.
