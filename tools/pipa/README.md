@@ -58,6 +58,7 @@ be loaded into this kernel. Compilation does not prove any hardware works.
    still calls ion_open(), while this tree provides DMA-BUF heaps, not the
    stock ION ABI. The composer also expects downstream MSM DRM interfaces.
    Screen output from a Linux desktop does not establish Android UI support.
+   See [display compatibility](display-compatibility.md) for local evidence.
 2. The built Android vendor fstab uses dm-default-key and wrappedkey_v0 for
    /data. The dm-default-key target now works with software keys in a VM.
    SM8250's downstream SCM/ICE wrapped-key path is still missing; upstream
