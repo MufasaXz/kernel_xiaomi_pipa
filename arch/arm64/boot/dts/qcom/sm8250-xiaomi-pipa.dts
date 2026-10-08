@@ -312,6 +312,14 @@
 	};
 };
 
+/* Android checks DT before bootloader-supplied downstream boot paths. */
+&{/firmware} {
+	android {
+		compatible = "android,firmware";
+		boot_devices = "soc@0/1d84000.ufshc";
+	};
+};
+
 /* Review checkpoint: enable only after validating the security transport. */
 &soc {
 	qseecom: qseecom@82400000 {
