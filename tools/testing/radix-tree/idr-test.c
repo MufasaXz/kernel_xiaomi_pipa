@@ -1,15 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * idr-test.c: Test the IDR API
  * Copyright (c) 2016 Matthew Wilcox <willy@infradead.org>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 #include <linux/bitmap.h>
 #include <linux/idr.h>
@@ -19,7 +11,7 @@
 
 #include "test.h"
 
-#define DUMMY_PTR	((void *)0x12)
+#define DUMMY_PTR	((void *)0x10)
 
 int item_idr_free(int id, void *p, void *data)
 {
@@ -62,6 +54,26 @@ void idr_alloc_test(void)
 	}
 
 	idr_for_each(&idr, item_idr_free, &idr);
+	idr_destroy(&idr);
+}
+
+void idr_alloc2_test(void)
+{
+	int id;
+	struct idr idr = IDR_INIT_BASE(idr, 1);
+
+	id = idr_alloc(&idr, idr_alloc2_test, 0, 1, GFP_KERNEL);
+	assert(id == -ENOSPC);
+
+	id = idr_alloc(&idr, idr_alloc2_test, 1, 2, GFP_KERNEL);
+	assert(id == 1);
+
+	id = idr_alloc(&idr, idr_alloc2_test, 0, 1, GFP_KERNEL);
+	assert(id == -ENOSPC);
+
+	id = idr_alloc(&idr, idr_alloc2_test, 0, 2, GFP_KERNEL);
+	assert(id == -ENOSPC);
+
 	idr_destroy(&idr);
 }
 
@@ -227,10 +239,64 @@ void idr_u32_test(int base)
 	idr_u32_test1(&idr, 0xffffffff);
 }
 
-static inline void *idr_mk_value(unsigned long v)
+static void idr_align_test(struct idr *idr)
 {
-	BUG_ON((long)v < 0);
-	return (void *)((v & 1) | 2 | (v << 1));
+	char name[] = "Motorola 68000";
+	int i, id;
+	void *entry;
+
+	for (i = 0; i < 9; i++) {
+		BUG_ON(idr_alloc(idr, &name[i], 0, 0, GFP_KERNEL) != i);
+		idr_for_each_entry(idr, entry, id);
+	}
+	idr_destroy(idr);
+
+	for (i = 1; i < 10; i++) {
+		BUG_ON(idr_alloc(idr, &name[i], 0, 0, GFP_KERNEL) != i - 1);
+		idr_for_each_entry(idr, entry, id);
+	}
+	idr_destroy(idr);
+
+	for (i = 2; i < 11; i++) {
+		BUG_ON(idr_alloc(idr, &name[i], 0, 0, GFP_KERNEL) != i - 2);
+		idr_for_each_entry(idr, entry, id);
+	}
+	idr_destroy(idr);
+
+	for (i = 3; i < 12; i++) {
+		BUG_ON(idr_alloc(idr, &name[i], 0, 0, GFP_KERNEL) != i - 3);
+		idr_for_each_entry(idr, entry, id);
+	}
+	idr_destroy(idr);
+
+	for (i = 0; i < 8; i++) {
+		BUG_ON(idr_alloc(idr, &name[i], 0, 0, GFP_KERNEL) != 0);
+		BUG_ON(idr_alloc(idr, &name[i + 1], 0, 0, GFP_KERNEL) != 1);
+		idr_for_each_entry(idr, entry, id);
+		idr_remove(idr, 1);
+		idr_for_each_entry(idr, entry, id);
+		idr_remove(idr, 0);
+		BUG_ON(!idr_is_empty(idr));
+	}
+
+	for (i = 0; i < 8; i++) {
+		BUG_ON(idr_alloc(idr, NULL, 0, 0, GFP_KERNEL) != 0);
+		idr_for_each_entry(idr, entry, id);
+		idr_replace(idr, &name[i], 0);
+		idr_for_each_entry(idr, entry, id);
+		BUG_ON(idr_find(idr, 0) != &name[i]);
+		idr_remove(idr, 0);
+	}
+
+	for (i = 0; i < 8; i++) {
+		BUG_ON(idr_alloc(idr, &name[i], 0, 0, GFP_KERNEL) != 0);
+		BUG_ON(idr_alloc(idr, NULL, 0, 0, GFP_KERNEL) != 1);
+		idr_remove(idr, 1);
+		idr_for_each_entry(idr, entry, id);
+		idr_replace(idr, &name[i + 1], 0);
+		idr_for_each_entry(idr, entry, id);
+		idr_remove(idr, 0);
+	}
 }
 
 DEFINE_IDR(find_idr);
@@ -242,7 +308,7 @@ static void *idr_throbber(void *arg)
 
 	rcu_register_thread();
 	do {
-		idr_alloc(&find_idr, idr_mk_value(id), id, id + 1, GFP_KERNEL);
+		idr_alloc(&find_idr, xa_mk_value(id), id, id + 1, GFP_KERNEL);
 		idr_remove(&find_idr, id);
 	} while (time(NULL) < start + 10);
 	rcu_unregister_thread();
@@ -250,21 +316,34 @@ static void *idr_throbber(void *arg)
 	return NULL;
 }
 
+/*
+ * There are always either 1 or 2 objects in the IDR.  If we find nothing,
+ * or we find something at an ID we didn't expect, that's a bug.
+ */
 void idr_find_test_1(int anchor_id, int throbber_id)
 {
 	pthread_t throbber;
 	time_t start = time(NULL);
 
-	pthread_create(&throbber, NULL, idr_throbber, &throbber_id);
-
-	BUG_ON(idr_alloc(&find_idr, idr_mk_value(anchor_id), anchor_id,
+	BUG_ON(idr_alloc(&find_idr, xa_mk_value(anchor_id), anchor_id,
 				anchor_id + 1, GFP_KERNEL) != anchor_id);
 
+	pthread_create(&throbber, NULL, idr_throbber, &throbber_id);
+
+	rcu_read_lock();
 	do {
 		int id = 0;
 		void *entry = idr_get_next(&find_idr, &id);
-		BUG_ON(entry != idr_mk_value(id));
+		rcu_read_unlock();
+		if ((id != anchor_id && id != throbber_id) ||
+		    entry != xa_mk_value(id)) {
+			printf("%s(%d, %d): %p at %d\n", __func__, anchor_id,
+				throbber_id, entry, id);
+			abort();
+		}
+		rcu_read_lock();
 	} while (time(NULL) < start + 11);
+	rcu_read_unlock();
 
 	pthread_join(throbber, NULL);
 
@@ -350,6 +429,7 @@ void idr_checks(void)
 
 	idr_replace_test();
 	idr_alloc_test();
+	idr_alloc2_test();
 	idr_null_test();
 	idr_nowait_test();
 	idr_get_next_test(0);
@@ -358,12 +438,14 @@ void idr_checks(void)
 	idr_u32_test(4);
 	idr_u32_test(1);
 	idr_u32_test(0);
+	idr_align_test(&idr);
 	idr_find_test();
 }
 
 #define module_init(x)
 #define module_exit(x)
 #define MODULE_AUTHOR(x)
+#define MODULE_DESCRIPTION(X)
 #define MODULE_LICENSE(x)
 #define dump_stack()    assert(0)
 void ida_dump(struct ida *);
@@ -396,16 +478,16 @@ void ida_check_conv_user(void)
 	DEFINE_IDA(ida);
 	unsigned long i;
 
-	radix_tree_cpu_dead(1);
 	for (i = 0; i < 1000000; i++) {
 		int id = ida_alloc(&ida, GFP_NOWAIT);
 		if (id == -ENOMEM) {
-			IDA_BUG_ON(&ida, (i % IDA_BITMAP_BITS) !=
-					BITS_PER_LONG - 2);
+			IDA_BUG_ON(&ida, ((i % IDA_BITMAP_BITS) !=
+					  BITS_PER_XA_VALUE) &&
+					 ((i % IDA_BITMAP_BITS) != 0));
 			id = ida_alloc(&ida, GFP_KERNEL);
 		} else {
 			IDA_BUG_ON(&ida, (i % IDA_BITMAP_BITS) ==
-					BITS_PER_LONG - 2);
+					BITS_PER_XA_VALUE);
 		}
 		IDA_BUG_ON(&ida, id != i);
 	}
@@ -438,19 +520,17 @@ void ida_check_random(void)
 		goto repeat;
 }
 
-void ida_simple_get_remove_test(void)
+void ida_alloc_free_test(void)
 {
 	DEFINE_IDA(ida);
 	unsigned long i;
 
-	for (i = 0; i < 10000; i++) {
-		assert(ida_simple_get(&ida, 0, 20000, GFP_KERNEL) == i);
-	}
-	assert(ida_simple_get(&ida, 5, 30, GFP_KERNEL) < 0);
+	for (i = 0; i < 10000; i++)
+		assert(ida_alloc_max(&ida, 20000, GFP_KERNEL) == i);
+	assert(ida_alloc_range(&ida, 5, 30, GFP_KERNEL) < 0);
 
-	for (i = 0; i < 10000; i++) {
-		ida_simple_remove(&ida, i);
-	}
+	for (i = 0; i < 10000; i++)
+		ida_free(&ida, i);
 	assert(ida_is_empty(&ida));
 
 	ida_destroy(&ida);
@@ -463,7 +543,7 @@ void user_ida_checks(void)
 	ida_check_nomem();
 	ida_check_conv_user();
 	ida_check_random();
-	ida_simple_get_remove_test();
+	ida_alloc_free_test();
 
 	radix_tree_cpu_dead(1);
 }
@@ -476,8 +556,27 @@ static void *ida_random_fn(void *arg)
 	return NULL;
 }
 
+static void *ida_leak_fn(void *arg)
+{
+	struct ida *ida = arg;
+	time_t s = time(NULL);
+	int i, ret;
+
+	rcu_register_thread();
+
+	do for (i = 0; i < 1000; i++) {
+		ret = ida_alloc_range(ida, 128, 128, GFP_KERNEL);
+		if (ret >= 0)
+			ida_free(ida, 128);
+	} while (time(NULL) < s + 2);
+
+	rcu_unregister_thread();
+	return NULL;
+}
+
 void ida_thread_tests(void)
 {
+	DEFINE_IDA(ida);
 	pthread_t threads[20];
 	int i;
 
@@ -489,6 +588,16 @@ void ida_thread_tests(void)
 
 	while (i--)
 		pthread_join(threads[i], NULL);
+
+	for (i = 0; i < ARRAY_SIZE(threads); i++)
+		if (pthread_create(&threads[i], NULL, ida_leak_fn, &ida)) {
+			perror("creating ida thread");
+			exit(1);
+		}
+
+	while (i--)
+		pthread_join(threads[i], NULL);
+	assert(ida_is_empty(&ida));
 }
 
 void ida_tests(void)
@@ -501,6 +610,7 @@ void ida_tests(void)
 
 int __weak main(void)
 {
+	rcu_register_thread();
 	radix_tree_init();
 	idr_checks();
 	ida_tests();
@@ -508,5 +618,6 @@ int __weak main(void)
 	rcu_barrier();
 	if (nr_allocated)
 		printf("nr_allocated = %d\n", nr_allocated);
+	rcu_unregister_thread();
 	return 0;
 }

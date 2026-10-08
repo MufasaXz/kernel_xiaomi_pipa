@@ -158,7 +158,7 @@ static void bluecard_detach(struct pcmcia_device *p_dev);
 
 static void bluecard_activity_led_timeout(struct timer_list *t)
 {
-	struct bluecard_info *info = from_timer(info, t, timer);
+	struct bluecard_info *info = timer_container_of(info, t, timer);
 	unsigned int iobase = info->p_dev->resource[0]->start;
 
 	if (test_bit(CARD_ACTIVITY, &(info->hw_state))) {
@@ -295,7 +295,6 @@ static void bluecard_write_wakeup(struct bluecard_info *info)
 				baud_reg = REG_CONTROL_BAUD_RATE_115200;
 				break;
 			case PKT_BAUD_RATE_57600:
-				/* Fall through... */
 			default:
 				baud_reg = REG_CONTROL_BAUD_RATE_57600;
 				break;
@@ -585,7 +584,6 @@ static int bluecard_hci_set_baud_rate(struct hci_dev *hdev, int baud)
 		hci_skb_pkt_type(skb) = PKT_BAUD_RATE_115200;
 		break;
 	case 57600:
-		/* Fall through... */
 	default:
 		cmd[4] = 0x03;
 		hci_skb_pkt_type(skb) = PKT_BAUD_RATE_57600;
@@ -640,7 +638,7 @@ static int bluecard_hci_close(struct hci_dev *hdev)
 	bluecard_hci_flush(hdev);
 
 	/* Stop LED timer */
-	del_timer_sync(&(info->timer));
+	timer_delete_sync(&(info->timer));
 
 	/* Disable power LED */
 	outb(0x00, iobase + 0x30);
@@ -887,7 +885,7 @@ static void bluecard_release(struct pcmcia_device *link)
 
 	bluecard_close(info);
 
-	del_timer_sync(&(info->timer));
+	timer_delete_sync(&(info->timer));
 
 	pcmcia_disable_device(link);
 }

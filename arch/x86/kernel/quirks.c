@@ -7,6 +7,10 @@
 #include <linux/irq.h>
 
 #include <asm/hpet.h>
+#include <asm/setup.h>
+#include <asm/mce.h>
+
+#include <linux/platform_data/x86/apple.h>
 
 #if defined(CONFIG_X86_IO_APIC) && defined(CONFIG_SMP) && defined(CONFIG_PCI)
 
@@ -89,8 +93,6 @@ static void ich_force_hpet_resume(void)
 		BUG();
 	else
 		printk(KERN_DEBUG "Force enabled HPET at resume\n");
-
-	return;
 }
 
 static void ich_force_enable_hpet(struct pci_dev *dev)
@@ -111,7 +113,7 @@ static void ich_force_enable_hpet(struct pci_dev *dev)
 	}
 
 	/* use bits 31:14, 16 kB aligned */
-	rcba_base = ioremap_nocache(rcba, 0x4000);
+	rcba_base = ioremap(rcba, 0x4000);
 	if (rcba_base == NULL) {
 		dev_printk(KERN_DEBUG, &dev->dev, "ioremap failed; "
 			"cannot force enable HPET\n");
@@ -447,7 +449,6 @@ static void nvidia_force_enable_hpet(struct pci_dev *dev)
 	dev_printk(KERN_DEBUG, &dev->dev, "Force enabled HPET at 0x%lx\n",
 		force_hpet_address);
 	cached_dev = dev;
-	return;
 }
 
 /* ISA Bridges */
@@ -512,7 +513,6 @@ static void e6xx_force_enable_hpet(struct pci_dev *dev)
 	force_hpet_resume_type = NONE_FORCE_HPET_RESUME;
 	dev_printk(KERN_DEBUG, &dev->dev, "Force enabled HPET at "
 		"0x%lx\n", force_hpet_address);
-	return;
 }
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_E6XX_CU,
 			 e6xx_force_enable_hpet);
@@ -627,10 +627,6 @@ static void amd_disable_seq_and_redirect_scrub(struct pci_dev *dev)
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_16H_NB_F3,
 			amd_disable_seq_and_redirect_scrub);
 
-#if defined(CONFIG_X86_64) && defined(CONFIG_X86_MCE)
-#include <linux/jump_label.h>
-#include <asm/string_64.h>
-
 /* Ivy Bridge, Haswell, Broadwell */
 static void quirk_intel_brickland_xeon_ras_cap(struct pci_dev *pdev)
 {
@@ -639,7 +635,7 @@ static void quirk_intel_brickland_xeon_ras_cap(struct pci_dev *pdev)
 	pci_read_config_dword(pdev, 0x84, &capid0);
 
 	if (capid0 & 0x10)
-		static_branch_inc(&mcsafe_key);
+		enable_copy_mc_fragile();
 }
 
 /* Skylake */
@@ -656,14 +652,13 @@ static void quirk_intel_purley_xeon_ras_cap(struct pci_dev *pdev)
 	 * enabled, so memory machine check recovery is also enabled.
 	 */
 	if ((capid0 & 0xc0) == 0xc0 || (capid5 & 0x1e0))
-		static_branch_inc(&mcsafe_key);
+		enable_copy_mc_fragile();
 
 }
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x0ec3, quirk_intel_brickland_xeon_ras_cap);
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x2fc0, quirk_intel_brickland_xeon_ras_cap);
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x6fc0, quirk_intel_brickland_xeon_ras_cap);
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x2083, quirk_intel_purley_xeon_ras_cap);
-#endif
 #endif
 
 bool x86_apple_machine;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2015, Christoph Hellwig.
  * Copyright (c) 2015, Intel Corporation.
@@ -6,47 +7,25 @@
 #include <linux/memory_hotplug.h>
 #include <linux/libnvdimm.h>
 #include <linux/module.h>
+#include <linux/numa.h>
 
-static const struct attribute_group *e820_pmem_attribute_groups[] = {
-	&nvdimm_bus_attribute_group,
-	NULL,
-};
-
-static const struct attribute_group *e820_pmem_region_attribute_groups[] = {
-	&nd_region_attribute_group,
-	&nd_device_attribute_group,
-	NULL,
-};
-
-static int e820_pmem_remove(struct platform_device *pdev)
+static void e820_pmem_remove(struct platform_device *pdev)
 {
 	struct nvdimm_bus *nvdimm_bus = platform_get_drvdata(pdev);
 
 	nvdimm_bus_unregister(nvdimm_bus);
-	return 0;
 }
-
-#ifdef CONFIG_MEMORY_HOTPLUG
-static int e820_range_to_nid(resource_size_t addr)
-{
-	return memory_add_physaddr_to_nid(addr);
-}
-#else
-static int e820_range_to_nid(resource_size_t addr)
-{
-	return NUMA_NO_NODE;
-}
-#endif
 
 static int e820_register_one(struct resource *res, void *data)
 {
 	struct nd_region_desc ndr_desc;
 	struct nvdimm_bus *nvdimm_bus = data;
+	int nid = phys_to_target_node(res->start);
 
 	memset(&ndr_desc, 0, sizeof(ndr_desc));
 	ndr_desc.res = res;
-	ndr_desc.attr_groups = e820_pmem_region_attribute_groups;
-	ndr_desc.numa_node = e820_range_to_nid(res->start);
+	ndr_desc.numa_node = numa_map_to_online_node(nid);
+	ndr_desc.target_node = nid;
 	set_bit(ND_REGION_PAGEMAP, &ndr_desc.flags);
 	if (!nvdimm_pmem_region_create(nvdimm_bus, &ndr_desc))
 		return -ENXIO;
@@ -60,7 +39,6 @@ static int e820_pmem_probe(struct platform_device *pdev)
 	struct nvdimm_bus *nvdimm_bus;
 	int rc = -ENXIO;
 
-	nd_desc.attr_groups = e820_pmem_attribute_groups;
 	nd_desc.provider_name = "e820";
 	nd_desc.module = THIS_MODULE;
 	nvdimm_bus = nvdimm_bus_register(dev, &nd_desc);
@@ -90,5 +68,6 @@ static struct platform_driver e820_pmem_driver = {
 module_platform_driver(e820_pmem_driver);
 
 MODULE_ALIAS("platform:e820_pmem*");
+MODULE_DESCRIPTION("NVDIMM support for e820 type-12 memory");
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Intel Corporation");

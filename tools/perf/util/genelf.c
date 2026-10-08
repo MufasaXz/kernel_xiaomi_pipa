@@ -1,59 +1,31 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * genelf.c
  * Copyright (C) 2014, Google, Inc
  *
  * Contributed by:
  * 	Stephane Eranian <eranian@gmail.com>
- *
- * Released under the GPL v2. (and only v2, not any later version)
  */
 
 #include <sys/types.h>
-#include <stdio.h>
-#include <getopt.h>
 #include <stddef.h>
 #include <libelf.h>
 #include <string.h>
 #include <stdlib.h>
 #include <inttypes.h>
-#include <limits.h>
-#include <fcntl.h>
 #include <err.h>
-#ifdef HAVE_DWARF_SUPPORT
+#ifdef HAVE_LIBDW_SUPPORT
 #include <dwarf.h>
 #endif
 
-#include "perf.h"
 #include "genelf.h"
+#include "sha1.h"
 #include "../util/jitdump.h"
+#include <linux/compiler.h>
 
 #ifndef NT_GNU_BUILD_ID
 #define NT_GNU_BUILD_ID 3
 #endif
-
-#define JVMTI
-
-#define BUILD_ID_URANDOM /* different uuid for each run */
-
-// FIXME, remove this and fix the deprecation warnings before its removed and
-// We'll break for good here...
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-
-#ifdef HAVE_LIBCRYPTO_SUPPORT
-
-#define BUILD_ID_MD5
-#undef BUILD_ID_SHA	/* does not seem to work well when linked with Java */
-#undef BUILD_ID_URANDOM /* different uuid for each run */
-
-#ifdef BUILD_ID_SHA
-#include <openssl/sha.h>
-#endif
-
-#ifdef BUILD_ID_MD5
-#include <openssl/md5.h>
-#endif
-#endif
-
 
 typedef struct {
   unsigned int namesz;  /* Size of entry's owner string */
@@ -61,11 +33,6 @@ typedef struct {
   unsigned int type;    /* Interpretation of the descriptor */
   char         name[0]; /* Start of the name+desc data */
 } Elf_Note;
-
-struct options {
-	char *output;
-	int fd;
-};
 
 static char shd_string_table[] = {
 	0,
@@ -84,7 +51,7 @@ static char shd_string_table[] = {
 static struct buildid_note {
 	Elf_Note desc;		/* descsz: size of build-id, must be multiple of 4 */
 	char	 name[4];	/* GNU\0 */
-	char	 build_id[20];
+	u8	 build_id[SHA1_DIGEST_SIZE];
 } bnote;
 
 static Elf_Sym symtab[]={
@@ -104,60 +71,6 @@ static Elf_Sym symtab[]={
 	  .st_size  = 0, /* for now */
 	}
 };
-
-#ifdef BUILD_ID_URANDOM
-static void
-gen_build_id(struct buildid_note *note,
-	     unsigned long load_addr __maybe_unused,
-	     const void *code __maybe_unused,
-	     size_t csize __maybe_unused)
-{
-	int fd;
-	size_t sz = sizeof(note->build_id);
-	ssize_t sret;
-
-	fd = open("/dev/urandom", O_RDONLY);
-	if (fd == -1)
-		err(1, "cannot access /dev/urandom for buildid");
-
-	sret = read(fd, note->build_id, sz);
-
-	close(fd);
-
-	if (sret != (ssize_t)sz)
-		memset(note->build_id, 0, sz);
-}
-#endif
-
-#ifdef BUILD_ID_SHA
-static void
-gen_build_id(struct buildid_note *note,
-	     unsigned long load_addr __maybe_unused,
-	     const void *code,
-	     size_t csize)
-{
-	if (sizeof(note->build_id) < SHA_DIGEST_LENGTH)
-		errx(1, "build_id too small for SHA1");
-
-	SHA1(code, csize, (unsigned char *)note->build_id);
-}
-#endif
-
-#ifdef BUILD_ID_MD5
-static void
-gen_build_id(struct buildid_note *note, unsigned long load_addr, const void *code, size_t csize)
-{
-	MD5_CTX context;
-
-	if (sizeof(note->build_id) < 16)
-		errx(1, "build_id too small for MD5");
-
-	MD5_Init(&context);
-	MD5_Update(&context, &load_addr, sizeof(load_addr));
-	MD5_Update(&context, code, csize);
-	MD5_Final((unsigned char *)note->build_id, &context);
-}
-#endif
 
 static int
 jit_add_eh_frame_info(Elf *e, void* unwinding, uint64_t unwinding_header_size,
@@ -247,7 +160,7 @@ jit_add_eh_frame_info(Elf *e, void* unwinding, uint64_t unwinding_header_size,
  * csize: the code size in bytes
  */
 int
-jit_write_elf(int fd, uint64_t load_addr, const char *sym,
+jit_write_elf(int fd, uint64_t load_addr __maybe_unused, const char *sym,
 	      const void *code, int csize,
 	      void *debug __maybe_unused, int nr_debug_entries __maybe_unused,
 	      void *unwinding, uint64_t unwinding_header_size, uint64_t unwinding_size)
@@ -260,6 +173,8 @@ jit_write_elf(int fd, uint64_t load_addr, const char *sym,
 	Elf_Shdr *shdr;
 	uint64_t eh_frame_base_offset;
 	char *strsym = NULL;
+	void *build_id_data = NULL, *tmp;
+	int build_id_data_len;
 	int symlen;
 	int retval = -1;
 
@@ -338,6 +253,14 @@ jit_write_elf(int fd, uint64_t load_addr, const char *sym,
 	shdr->sh_flags = SHF_EXECINSTR | SHF_ALLOC;
 	shdr->sh_entsize = 0;
 
+	build_id_data = malloc(csize);
+	if (build_id_data == NULL) {
+		warnx("cannot allocate build-id data");
+		goto error;
+	}
+	memcpy(build_id_data, code, csize);
+	build_id_data_len = csize;
+
 	/*
 	 * Setup .eh_frame_hdr and .eh_frame
 	 */
@@ -348,6 +271,7 @@ jit_write_elf(int fd, uint64_t load_addr, const char *sym,
 					       eh_frame_base_offset);
 		if (retval)
 			goto error;
+		retval = -1;
 	}
 
 	/*
@@ -420,6 +344,15 @@ jit_write_elf(int fd, uint64_t load_addr, const char *sym,
 	shdr->sh_entsize = sizeof(Elf_Sym);
 	shdr->sh_link = unwinding ? 6 : 4; /* index of .strtab section */
 
+	tmp = realloc(build_id_data, build_id_data_len + sizeof(symtab));
+	if (tmp == NULL) {
+		warnx("cannot allocate build-id data");
+		goto error;
+	}
+	memcpy(tmp + build_id_data_len, symtab, sizeof(symtab));
+	build_id_data = tmp;
+	build_id_data_len += sizeof(symtab);
+
 	/*
 	 * setup symbols string table
 	 * 2 = 1 for 0 in 1st entry, 1 for the 0 at end of symbol for 2nd entry
@@ -462,6 +395,15 @@ jit_write_elf(int fd, uint64_t load_addr, const char *sym,
 	shdr->sh_flags = 0;
 	shdr->sh_entsize = 0;
 
+	tmp = realloc(build_id_data, build_id_data_len + symlen);
+	if (tmp == NULL) {
+		warnx("cannot allocate build-id data");
+		goto error;
+	}
+	memcpy(tmp + build_id_data_len, strsym, symlen);
+	build_id_data = tmp;
+	build_id_data_len += symlen;
+
 	/*
 	 * setup build-id section
 	 */
@@ -480,7 +422,7 @@ jit_write_elf(int fd, uint64_t load_addr, const char *sym,
 	/*
 	 * build-id generation
 	 */
-	gen_build_id(&bnote, load_addr, code, csize);
+	sha1(build_id_data, build_id_data_len, bnote.build_id);
 	bnote.desc.namesz = sizeof(bnote.name); /* must include 0 termination */
 	bnote.desc.descsz = sizeof(bnote.build_id);
 	bnote.desc.type   = NT_GNU_BUILD_ID;
@@ -506,7 +448,7 @@ jit_write_elf(int fd, uint64_t load_addr, const char *sym,
 	shdr->sh_size = sizeof(bnote);
 	shdr->sh_entsize = 0;
 
-#ifdef HAVE_DWARF_SUPPORT
+#ifdef HAVE_LIBDW_SUPPORT
 	if (debug && nr_debug_entries) {
 		retval = jit_add_debug_info(e, load_addr, debug, nr_debug_entries);
 		if (retval)
@@ -525,48 +467,7 @@ error:
 	(void)elf_end(e);
 
 	free(strsym);
-
+	free(build_id_data);
 
 	return retval;
 }
-
-#ifndef JVMTI
-
-static unsigned char x86_code[] = {
-    0xBB, 0x2A, 0x00, 0x00, 0x00, /* movl $42, %ebx */
-    0xB8, 0x01, 0x00, 0x00, 0x00, /* movl $1, %eax */
-    0xCD, 0x80            /* int $0x80 */
-};
-
-static struct options options;
-
-int main(int argc, char **argv)
-{
-	int c, fd, ret;
-
-	while ((c = getopt(argc, argv, "o:h")) != -1) {
-		switch (c) {
-		case 'o':
-			options.output = optarg;
-			break;
-		case 'h':
-			printf("Usage: genelf -o output_file [-h]\n");
-			return 0;
-		default:
-			errx(1, "unknown option");
-		}
-	}
-
-	fd = open(options.output, O_CREAT|O_TRUNC|O_RDWR, 0666);
-	if (fd == -1)
-		err(1, "cannot create file %s", options.output);
-
-	ret = jit_write_elf(fd, "main", x86_code, sizeof(x86_code));
-	close(fd);
-
-	if (ret != 0)
-		unlink(options.output);
-
-	return ret;
-}
-#endif

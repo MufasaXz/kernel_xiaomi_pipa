@@ -151,8 +151,7 @@ struct v9_sdma_mqd {
 	uint32_t reserved_123;
 	uint32_t reserved_124;
 	uint32_t reserved_125;
-	uint32_t reserved_126;
-	uint32_t reserved_127;
+	/* reserved_126,127: repurposed for driver-internal use */
 	uint32_t sdma_engine_id;
 	uint32_t sdma_queue_id;
 };
@@ -197,10 +196,20 @@ struct v9_mqd {
 	uint32_t compute_wave_restore_addr_lo;
 	uint32_t compute_wave_restore_addr_hi;
 	uint32_t compute_wave_restore_control;
-	uint32_t reserved_39;
-	uint32_t reserved_40;
-	uint32_t reserved_41;
-	uint32_t reserved_42;
+	union {
+		struct {
+			uint32_t compute_static_thread_mgmt_se4;
+			uint32_t compute_static_thread_mgmt_se5;
+			uint32_t compute_static_thread_mgmt_se6;
+			uint32_t compute_static_thread_mgmt_se7;
+		};
+		struct {
+			uint32_t compute_current_logic_xcc_id; // offset: 39  (0x27)
+			uint32_t compute_restart_cg_tg_id; // offset: 40  (0x28)
+			uint32_t compute_tg_chunk_size; // offset: 41  (0x29)
+			uint32_t compute_restore_tg_chunk_size; // offset: 42  (0x2A)
+		};
+	};
 	uint32_t reserved_43;
 	uint32_t reserved_44;
 	uint32_t reserved_45;
@@ -383,8 +392,16 @@ struct v9_mqd {
 	uint32_t iqtimer_pkt_dw29;
 	uint32_t iqtimer_pkt_dw30;
 	uint32_t iqtimer_pkt_dw31;
-	uint32_t reserved_225;
-	uint32_t reserved_226;
+	union {
+		struct {
+			uint32_t reserved_225;
+			uint32_t reserved_226;
+		};
+		struct {
+			uint32_t pm4_target_xcc_in_xcp; // offset: 225  (0xE1)
+			uint32_t cp_mqd_stride_size; // offset: 226  (0xE2)
+		};
+	};
 	uint32_t reserved_227;
 	uint32_t set_resources_header;
 	uint32_t set_resources_dw1;

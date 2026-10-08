@@ -1,12 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Enter and leave deep sleep state on MPC83xx
  *
  * Copyright (c) 2006-2008 Freescale Semiconductor, Inc.
  * Author: Scott Wood <scottwood@freescale.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
  */
 
 #include <asm/page.h>
@@ -71,7 +68,8 @@ _GLOBAL(mpc83xx_enter_deep_sleep)
 
 	mfspr	r5, SPRN_HID0
 	mfspr	r6, SPRN_HID1
-	mfspr	r7, SPRN_HID2
+	/* FIXME: Should this use SPRN_HID2_G2_LE? */
+	mfspr	r7, SPRN_HID2_750FX
 
 	stw	r5, SS_HID+0(r3)
 	stw	r6, SS_HID+4(r3)
@@ -399,7 +397,8 @@ mpc83xx_deep_resume:
 
 	mtspr	SPRN_HID0, r5
 	mtspr	SPRN_HID1, r6
-	mtspr	SPRN_HID2, r7
+	/* FIXME: Should this use SPRN_HID2_G2_LE? */
+	mtspr	SPRN_HID2_750FX, r7
 
 	lwz	r4, SS_IABR+0(r3)
 	lwz	r5, SS_IABR+4(r3)
@@ -551,3 +550,4 @@ mpc83xx_deep_resume:
 	mtdec	r0
 
 	rfi
+_ASM_NOKPROBE_SYMBOL(mpc83xx_deep_resume)

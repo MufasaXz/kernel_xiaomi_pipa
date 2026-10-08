@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2015 Pablo Neira Ayuso <pablo@netfilter.org>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
@@ -43,19 +40,20 @@ static int nft_dup_ipv4_init(const struct nft_ctx *ctx,
 	if (tb[NFTA_DUP_SREG_ADDR] == NULL)
 		return -EINVAL;
 
-	err = nft_parse_register_load(tb[NFTA_DUP_SREG_ADDR], &priv->sreg_addr,
+	err = nft_parse_register_load(ctx, tb[NFTA_DUP_SREG_ADDR], &priv->sreg_addr,
 				      sizeof(struct in_addr));
 	if (err < 0)
 		return err;
 
 	if (tb[NFTA_DUP_SREG_DEV])
-		err = nft_parse_register_load(tb[NFTA_DUP_SREG_DEV],
+		err = nft_parse_register_load(ctx, tb[NFTA_DUP_SREG_DEV],
 					      &priv->sreg_dev, sizeof(int));
 
 	return err;
 }
 
-static int nft_dup_ipv4_dump(struct sk_buff *skb, const struct nft_expr *expr)
+static int nft_dup_ipv4_dump(struct sk_buff *skb,
+			     const struct nft_expr *expr, bool reset)
 {
 	struct nft_dup_ipv4 *priv = nft_expr_priv(expr);
 
@@ -78,6 +76,7 @@ static const struct nft_expr_ops nft_dup_ipv4_ops = {
 	.eval		= nft_dup_ipv4_eval,
 	.init		= nft_dup_ipv4_init,
 	.dump		= nft_dup_ipv4_dump,
+	.reduce		= NFT_REDUCE_READONLY,
 };
 
 static const struct nla_policy nft_dup_ipv4_policy[NFTA_DUP_MAX + 1] = {
@@ -110,3 +109,4 @@ module_exit(nft_dup_ipv4_module_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Pablo Neira Ayuso <pablo@netfilter.org>");
 MODULE_ALIAS_NFT_AF_EXPR(AF_INET, "dup");
+MODULE_DESCRIPTION("IPv4 nftables packet duplication support");

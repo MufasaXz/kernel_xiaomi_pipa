@@ -21,6 +21,7 @@
 #include <linux/irq.h>
 #include <linux/kdebug.h>
 #include <linux/module.h>
+#include <linux/profile.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/hotplug.h>
 #include <linux/sched/task_stack.h>
@@ -30,6 +31,7 @@
 #include <linux/thread_info.h>
 
 #include <asm/cacheflush.h>
+#include <asm/coprocessor.h>
 #include <asm/kdebug.h>
 #include <asm/mmu_context.h>
 #include <asm/mxregs.h>
@@ -53,16 +55,12 @@ static void system_flush_invalidate_dcache_range(unsigned long start,
 #define IPI_IRQ	0
 
 static irqreturn_t ipi_interrupt(int irq, void *dev_id);
-static struct irqaction ipi_irqaction = {
-	.handler =	ipi_interrupt,
-	.flags =	IRQF_PERCPU,
-	.name =		"ipi",
-};
 
 void ipi_init(void)
 {
 	unsigned irq = irq_create_mapping(NULL, IPI_IRQ);
-	setup_irq(irq, &ipi_irqaction);
+	if (request_irq(irq, ipi_interrupt, IRQF_PERCPU, "ipi", NULL))
+		pr_err("Failed to request irq %u (ipi)\n", irq);
 }
 
 static inline unsigned int get_core_count(void)
@@ -126,7 +124,7 @@ void secondary_start_kernel(void)
 
 	init_mmu();
 
-#ifdef CONFIG_DEBUG_KERNEL
+#ifdef CONFIG_DEBUG_MISC
 	if (boot_secondary_processors == 0) {
 		pr_debug("%s: boot_secondary_processors:%d; Hanging cpu:%d\n",
 			__func__, boot_secondary_processors, cpu);
@@ -149,7 +147,6 @@ void secondary_start_kernel(void)
 	cpumask_set_cpu(cpu, mm_cpumask(mm));
 	enter_lazy_tlb(mm, current);
 
-	preempt_disable();
 	trace_hardirqs_off();
 
 	calibrate_delay();
@@ -277,6 +274,12 @@ int __cpu_disable(void)
 	 */
 	set_cpu_online(cpu, false);
 
+#if XTENSA_HAVE_COPROCESSORS
+	/*
+	 * Flush coprocessor contexts that are active on the current CPU.
+	 */
+	local_coprocessors_flush_release_all();
+#endif
 	/*
 	 * OK - migrate IRQs away from this CPU
 	 */
@@ -320,7 +323,7 @@ void __cpu_die(unsigned int cpu)
 	pr_err("CPU%u: unable to kill\n", cpu);
 }
 
-void arch_cpu_idle_dead(void)
+void __noreturn arch_cpu_idle_dead(void)
 {
 	cpu_die();
 }
@@ -339,6 +342,8 @@ void __ref cpu_die(void)
 	__asm__ __volatile__(
 			"	movi	a2, cpu_restart\n"
 			"	jx	a2\n");
+
+	BUG();
 }
 
 #endif /* CONFIG_HOTPLUG_CPU */
@@ -372,8 +377,7 @@ static void send_ipi_message(const struct cpumask *callmask,
 	unsigned long mask = 0;
 
 	for_each_cpu(index, callmask)
-		if (index != smp_processor_id())
-			mask |= 1 << index;
+		mask |= 1 << index;
 
 	set_er(mask, MIPISET(msg_id));
 }
@@ -388,7 +392,7 @@ void arch_send_call_function_single_ipi(int cpu)
 	send_ipi_message(cpumask_of(cpu), IPI_CALL_FUNC);
 }
 
-void smp_send_reschedule(int cpu)
+void arch_smp_send_reschedule(int cpu)
 {
 	send_ipi_message(cpumask_of(cpu), IPI_RESCHEDULE);
 }
@@ -412,22 +416,31 @@ irqreturn_t ipi_interrupt(int irq, void *dev_id)
 {
 	unsigned int cpu = smp_processor_id();
 	struct ipi_data *ipi = &per_cpu(ipi_data, cpu);
-	unsigned int msg;
-	unsigned i;
 
-	msg = get_er(MIPICAUSE(cpu));
-	for (i = 0; i < IPI_MAX; i++)
-		if (msg & (1 << i)) {
-			set_er(1 << i, MIPICAUSE(cpu));
-			++ipi->ipi_count[i];
+	for (;;) {
+		unsigned int msg;
+
+		msg = get_er(MIPICAUSE(cpu));
+		set_er(msg, MIPICAUSE(cpu));
+
+		if (!msg)
+			break;
+
+		if (msg & (1 << IPI_CALL_FUNC)) {
+			++ipi->ipi_count[IPI_CALL_FUNC];
+			generic_smp_call_function_interrupt();
 		}
 
-	if (msg & (1 << IPI_RESCHEDULE))
-		scheduler_ipi();
-	if (msg & (1 << IPI_CALL_FUNC))
-		generic_smp_call_function_interrupt();
-	if (msg & (1 << IPI_CPU_STOP))
-		ipi_cpu_stop(cpu);
+		if (msg & (1 << IPI_RESCHEDULE)) {
+			++ipi->ipi_count[IPI_RESCHEDULE];
+			scheduler_ipi();
+		}
+
+		if (msg & (1 << IPI_CPU_STOP)) {
+			++ipi->ipi_count[IPI_CPU_STOP];
+			ipi_cpu_stop(cpu);
+		}
+	}
 
 	return IRQ_HANDLED;
 }

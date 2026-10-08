@@ -21,7 +21,6 @@
  *
  */
 
-#include <drm/drmP.h>
 #include "radeon.h"
 #include "radeon_asic.h"
 #include "sumod.h"
@@ -34,8 +33,7 @@
 #define SUMO_MINIMUM_ENGINE_CLOCK 800
 #define BOOST_DPM_LEVEL 7
 
-static const u32 sumo_utc[SUMO_PM_NUMBER_OF_TC] =
-{
+static const u32 sumo_utc[SUMO_PM_NUMBER_OF_TC] = {
 	SUMO_UTC_DFLT_00,
 	SUMO_UTC_DFLT_01,
 	SUMO_UTC_DFLT_02,
@@ -53,8 +51,7 @@ static const u32 sumo_utc[SUMO_PM_NUMBER_OF_TC] =
 	SUMO_UTC_DFLT_14,
 };
 
-static const u32 sumo_dtc[SUMO_PM_NUMBER_OF_TC] =
-{
+static const u32 sumo_dtc[SUMO_PM_NUMBER_OF_TC] = {
 	SUMO_DTC_DFLT_00,
 	SUMO_DTC_DFLT_01,
 	SUMO_DTC_DFLT_02,
@@ -110,11 +107,11 @@ static void sumo_mg_clockgating_enable(struct radeon_device *rdev, bool enable)
 	local1 = RREG32(CG_CGTT_LOCAL_1);
 
 	if (enable) {
-		WREG32(CG_CGTT_LOCAL_0, (0 & CGCG_CGTT_LOCAL0_MASK) | (local0 & ~CGCG_CGTT_LOCAL0_MASK) );
-		WREG32(CG_CGTT_LOCAL_1, (0 & CGCG_CGTT_LOCAL1_MASK) | (local1 & ~CGCG_CGTT_LOCAL1_MASK) );
+		WREG32(CG_CGTT_LOCAL_0, (0 & CGCG_CGTT_LOCAL0_MASK) | (local0 & ~CGCG_CGTT_LOCAL0_MASK));
+		WREG32(CG_CGTT_LOCAL_1, (0 & CGCG_CGTT_LOCAL1_MASK) | (local1 & ~CGCG_CGTT_LOCAL1_MASK));
 	} else {
-		WREG32(CG_CGTT_LOCAL_0, (0xFFFFFFFF & CGCG_CGTT_LOCAL0_MASK) | (local0 & ~CGCG_CGTT_LOCAL0_MASK) );
-		WREG32(CG_CGTT_LOCAL_1, (0xFFFFCFFF & CGCG_CGTT_LOCAL1_MASK) | (local1 & ~CGCG_CGTT_LOCAL1_MASK) );
+		WREG32(CG_CGTT_LOCAL_0, (0xFFFFFFFF & CGCG_CGTT_LOCAL0_MASK) | (local0 & ~CGCG_CGTT_LOCAL0_MASK));
+		WREG32(CG_CGTT_LOCAL_1, (0xFFFFCFFF & CGCG_CGTT_LOCAL1_MASK) | (local1 & ~CGCG_CGTT_LOCAL1_MASK));
 	}
 }
 
@@ -703,9 +700,9 @@ static void sumo_post_notify_alt_vddnb_change(struct radeon_device *rdev,
 	u32 nbps1_new = 0;
 
 	if (old_ps != NULL)
-		nbps1_old = (old_ps->flags & SUMO_POWERSTATE_FLAGS_FORCE_NBPS1_STATE)? 1 : 0;
+		nbps1_old = (old_ps->flags & SUMO_POWERSTATE_FLAGS_FORCE_NBPS1_STATE) ? 1 : 0;
 
-	nbps1_new = (new_ps->flags & SUMO_POWERSTATE_FLAGS_FORCE_NBPS1_STATE)? 1 : 0;
+	nbps1_new = (new_ps->flags & SUMO_POWERSTATE_FLAGS_FORCE_NBPS1_STATE) ? 1 : 0;
 
 	if (nbps1_old == 0 && nbps1_new == 1)
 		sumo_smu_notify_alt_vddnb_change(rdev, 1, 1);
@@ -1868,6 +1865,26 @@ u32 sumo_dpm_get_current_mclk(struct radeon_device *rdev)
 	struct sumo_power_info *pi = sumo_get_pi(rdev);
 
 	return pi->sys_info.bootup_uma_clk;
+}
+
+u16 sumo_dpm_get_current_vddc(struct radeon_device *rdev)
+{
+	struct sumo_power_info *pi = sumo_get_pi(rdev);
+	struct radeon_ps *rps = &pi->current_rps;
+	struct sumo_ps *ps = sumo_get_ps(rps);
+	struct sumo_pl *pl;
+	u32 current_index =
+		(RREG32(TARGET_AND_CURRENT_PROFILE_INDEX) & CURR_INDEX_MASK) >>
+		CURR_INDEX_SHIFT;
+
+	if (current_index == BOOST_DPM_LEVEL) {
+		pl = &pi->boost_pl;
+	} else if (current_index >= ps->num_levels) {
+		return 0;
+	} else {
+		pl = &ps->levels[current_index];
+	}
+	return sumo_convert_voltage_index_to_value(rdev, pl->vddc_index);
 }
 
 void sumo_dpm_fini(struct radeon_device *rdev)

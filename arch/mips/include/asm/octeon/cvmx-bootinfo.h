@@ -114,7 +114,7 @@ struct cvmx_bootinfo {
 
 	/*
 	 * flags indicating various configuration options.  These
-	 * flags supercede the 'flags' variable and should be used
+	 * flags supersede the 'flags' variable and should be used
 	 * instead if available.
 	 */
 	uint32_t config_flags;
@@ -253,6 +253,7 @@ enum cvmx_board_types_enum {
 	CVMX_BOARD_TYPE_REDWING = 43,
 	CVMX_BOARD_TYPE_NIC68_4 = 44,
 	CVMX_BOARD_TYPE_NIC10E_66 = 45,
+	CVMX_BOARD_TYPE_SNIC10E = 50,
 	CVMX_BOARD_TYPE_MAX,
 
 	/*
@@ -295,7 +296,10 @@ enum cvmx_board_types_enum {
 	 */
 	CVMX_BOARD_TYPE_CUST_PRIVATE_MIN = 20001,
 	CVMX_BOARD_TYPE_UBNT_E100 = 20002,
+	CVMX_BOARD_TYPE_UBNT_E200 = 20003,
+	CVMX_BOARD_TYPE_UBNT_E220 = 20005,
 	CVMX_BOARD_TYPE_CUST_DSR1000N = 20006,
+	CVMX_BOARD_TYPE_UBNT_E300 = 20300,
 	CVMX_BOARD_TYPE_KONTRON_S1901 = 21901,
 	CVMX_BOARD_TYPE_CUST_PRIVATE_MAX = 30000,
 
@@ -366,6 +370,7 @@ static inline const char *cvmx_board_type_to_string(enum
 		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_REDWING)
 		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_NIC68_4)
 		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_NIC10E_66)
+		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_SNIC10E)
 		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_MAX)
 
 			/* Customer boards listed here */
@@ -396,7 +401,10 @@ static inline const char *cvmx_board_type_to_string(enum
 		    /* Customer private range */
 		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_CUST_PRIVATE_MIN)
 		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_UBNT_E100)
+		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_UBNT_E200)
+		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_UBNT_E220)
 		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_CUST_DSR1000N)
+		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_UBNT_E300)
 		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_KONTRON_S1901)
 		ENUM_BRD_TYPE_CASE(CVMX_BOARD_TYPE_CUST_PRIVATE_MAX)
 	}

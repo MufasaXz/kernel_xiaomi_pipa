@@ -1,18 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *    Support for LGDT3302 and LGDT3303 - VSB/QAM
  *
  *    Copyright (C) 2005 Wilson Michaels <wilsonmichaels@earthlink.net>
- *
- *    This program is free software; you can redistribute it and/or modify
- *    it under the terms of the GNU General Public License as published by
- *    the Free Software Foundation; either version 2 of the License, or
- *    (at your option) any later version.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU General Public License for more details.
- *
  */
 
 /*
@@ -38,7 +28,7 @@
 #include <asm/byteorder.h>
 
 #include <media/dvb_frontend.h>
-#include <media/dvb_math.h>
+#include <linux/int_log.h>
 #include "lgdt330x_priv.h"
 #include "lgdt330x.h"
 
@@ -867,8 +857,7 @@ static struct dvb_frontend *lgdt330x_get_dvb_frontend(struct i2c_client *client)
 static const struct dvb_frontend_ops lgdt3302_ops;
 static const struct dvb_frontend_ops lgdt3303_ops;
 
-static int lgdt330x_probe(struct i2c_client *client,
-			  const struct i2c_device_id *id)
+static int lgdt330x_probe(struct i2c_client *client)
 {
 	struct lgdt330x_state *state = NULL;
 	u8 buf[1];
@@ -929,11 +918,11 @@ struct dvb_frontend *lgdt330x_attach(const struct lgdt330x_config *_config,
 	struct i2c_board_info board_info = {};
 	struct lgdt330x_config config = *_config;
 
-	strlcpy(board_info.type, "lgdt330x", sizeof(board_info.type));
+	strscpy(board_info.type, "lgdt330x", sizeof(board_info.type));
 	board_info.addr = demod_address;
 	board_info.platform_data = &config;
-	client = i2c_new_device(i2c, &board_info);
-	if (!client || !client->dev.driver)
+	client = i2c_new_client_device(i2c, &board_info);
+	if (!i2c_client_has_driver(client))
 		return NULL;
 
 	return lgdt330x_get_dvb_frontend(client);
@@ -984,19 +973,17 @@ static const struct dvb_frontend_ops lgdt3303_ops = {
 	.release              = lgdt330x_release,
 };
 
-static int lgdt330x_remove(struct i2c_client *client)
+static void lgdt330x_remove(struct i2c_client *client)
 {
 	struct lgdt330x_state *state = i2c_get_clientdata(client);
 
 	dev_dbg(&client->dev, "\n");
 
 	kfree(state);
-
-	return 0;
 }
 
 static const struct i2c_device_id lgdt330x_id_table[] = {
-	{"lgdt330x", 0},
+	{ "lgdt330x" },
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, lgdt330x_id_table);

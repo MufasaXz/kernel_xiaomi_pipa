@@ -1,6 +1,6 @@
 /* Key type used to cache DNS lookups made by the kernel
  *
- * See Documentation/networking/dns_resolver.txt
+ * See Documentation/networking/dns_resolver.rst
  *
  *   Copyright (c) 2007 Igor Mammedov
  *   Author(s): Igor Mammedov (niallain@gmail.com)
@@ -29,6 +29,7 @@
 #include <linux/keyctl.h>
 #include <linux/err.h>
 #include <linux/seq_file.h>
+#include <linux/dns_resolver.h>
 #include <keys/dns_resolver-type.h>
 #include <keys/user-type.h>
 #include "internal.h"
@@ -48,14 +49,44 @@ const struct cred *dns_resolver_cache;
 /*
  * Preparse instantiation data for a dns_resolver key.
  *
- * The data must be a NUL-terminated string, with the NUL char accounted in
- * datalen.
+ * For normal hostname lookups, the data must be a NUL-terminated string, with
+ * the NUL char accounted in datalen.
  *
  * If the data contains a '#' characters, then we take the clause after each
  * one to be an option of the form 'key=value'.  The actual data of interest is
  * the string leading up to the first '#'.  For instance:
  *
  *        "ip1,ip2,...#foo=bar"
+ *
+ * For server list requests, the data must begin with a NUL char and be
+ * followed by a byte indicating the version of the data format.  Version 1
+ * looks something like (note this is packed):
+ *
+ *	u8      Non-string marker (ie. 0)
+ *	u8	Content (DNS_PAYLOAD_IS_*)
+ *	u8	Version (e.g. 1)
+ *	u8	Source of server list
+ *	u8	Lookup status of server list
+ *	u8	Number of servers
+ *	foreach-server {
+ *		__le16	Name length
+ *		__le16	Priority (as per SRV record, low first)
+ *		__le16	Weight (as per SRV record, higher first)
+ *		__le16	Port
+ *		u8	Source of address list
+ *		u8	Lookup status of address list
+ *		u8	Protocol (DNS_SERVER_PROTOCOL_*)
+ *		u8	Number of addresses
+ *		char[]	Name (not NUL-terminated)
+ *		foreach-address {
+ *			u8		Family (DNS_ADDRESS_IS_*)
+ *			union {
+ *				u8[4]	ipv4_addr
+ *				u8[16]	ipv6_addr
+ *			}
+ *		}
+ *	}
+ *
  */
 static int
 dns_resolver_preparse(struct key_preparsed_payload *prep)
@@ -66,9 +97,45 @@ dns_resolver_preparse(struct key_preparsed_payload *prep)
 	int datalen = prep->datalen, result_len = 0;
 	const char *data = prep->data, *end, *opt;
 
+	if (datalen <= 1 || !data)
+		return -EINVAL;
+
+	if (data[0] == 0) {
+		const struct dns_server_list_v1_header *v1;
+
+		/* It may be a server list. */
+		if (datalen < sizeof(*v1))
+			return -EINVAL;
+
+		v1 = (const struct dns_server_list_v1_header *)data;
+		kenter("[%u,%u],%u", v1->hdr.content, v1->hdr.version, datalen);
+		if (v1->hdr.content != DNS_PAYLOAD_IS_SERVER_LIST) {
+			pr_warn_ratelimited(
+				"dns_resolver: Unsupported content type (%u)\n",
+				v1->hdr.content);
+			return -EINVAL;
+		}
+
+		if (v1->hdr.version != 1) {
+			pr_warn_ratelimited(
+				"dns_resolver: Unsupported server list version (%u)\n",
+				v1->hdr.version);
+			return -EINVAL;
+		}
+
+		if ((v1->status != DNS_LOOKUP_GOOD &&
+		     v1->status != DNS_LOOKUP_GOOD_WITH_BAD)) {
+			if (prep->expiry == TIME64_MAX)
+				prep->expiry = ktime_get_real_seconds() + 1;
+		}
+
+		result_len = datalen;
+		goto store_result;
+	}
+
 	kenter("'%*.*s',%u", datalen, datalen, data, datalen);
 
-	if (datalen <= 1 || !data || data[datalen - 1] != '\0')
+	if (!data || data[datalen - 1] != '\0')
 		return -EINVAL;
 	datalen--;
 
@@ -144,6 +211,7 @@ dns_resolver_preparse(struct key_preparsed_payload *prep)
 		return 0;
 	}
 
+store_result:
 	kdebug("store result");
 	prep->quotalen = result_len;
 
@@ -253,6 +321,7 @@ static long dns_resolver_read(const struct key *key,
 
 struct key_type key_type_dns_resolver = {
 	.name		= "dns_resolver",
+	.flags		= KEY_TYPE_NET_DOMAIN | KEY_TYPE_INSTANT_REAP,
 	.preparse	= dns_resolver_preparse,
 	.free_preparse	= dns_resolver_free_preparse,
 	.instantiate	= generic_key_instantiate,
@@ -275,7 +344,7 @@ static int __init init_dns_resolver(void)
 	 * this is used to prevent malicious redirections from being installed
 	 * with add_key().
 	 */
-	cred = prepare_kernel_cred(NULL);
+	cred = prepare_kernel_cred(&init_task);
 	if (!cred)
 		return -ENOMEM;
 

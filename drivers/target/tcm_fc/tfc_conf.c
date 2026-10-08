@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*******************************************************************************
  * Filename:  tcm_fc.c
  *
@@ -10,15 +11,6 @@
  *
  * Copyright (c) 2009,2010 Nicholas A. Bellinger <nab@linux-iscsi.org>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  ****************************************************************************/
 
 #include <linux/module.h>
@@ -33,7 +25,7 @@
 #include <linux/configfs.h>
 #include <linux/kernel.h>
 #include <linux/ctype.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <scsi/libfc.h>
 
 #include <target/target_core_base.h>
@@ -392,11 +384,6 @@ static inline struct ft_tpg *ft_tpg(struct se_portal_group *se_tpg)
 	return container_of(se_tpg, struct ft_tpg, se_tpg);
 }
 
-static char *ft_get_fabric_name(void)
-{
-	return "fc";
-}
-
 static char *ft_get_fabric_wwn(struct se_portal_group *se_tpg)
 {
 	return ft_tpg(se_tpg)->lport_wwn->name;
@@ -411,15 +398,6 @@ static u16 ft_get_tag(struct se_portal_group *se_tpg)
 	return ft_tpg(se_tpg)->index;
 }
 
-static int ft_check_false(struct se_portal_group *se_tpg)
-{
-	return 0;
-}
-
-static void ft_set_default_node_attr(struct se_node_acl *se_nacl)
-{
-}
-
 static u32 ft_tpg_get_inst_index(struct se_portal_group *se_tpg)
 {
 	return ft_tpg(se_tpg)->index;
@@ -427,15 +405,10 @@ static u32 ft_tpg_get_inst_index(struct se_portal_group *se_tpg)
 
 static const struct target_core_fabric_ops ft_fabric_ops = {
 	.module =			THIS_MODULE,
-	.name =				"fc",
+	.fabric_name =			"fc",
 	.node_acl_size =		sizeof(struct ft_node_acl),
-	.get_fabric_name =		ft_get_fabric_name,
 	.tpg_get_wwn =			ft_get_fabric_wwn,
 	.tpg_get_tag =			ft_get_tag,
-	.tpg_check_demo_mode =		ft_check_false,
-	.tpg_check_demo_mode_cache =	ft_check_false,
-	.tpg_check_demo_mode_write_protect = ft_check_false,
-	.tpg_check_prod_mode_write_protect = ft_check_false,
 	.tpg_get_inst_index =		ft_tpg_get_inst_index,
 	.check_stop_free =		ft_check_stop_free,
 	.release_cmd =			ft_release_cmd,
@@ -443,9 +416,6 @@ static const struct target_core_fabric_ops ft_fabric_ops = {
 	.sess_get_index =		ft_sess_get_index,
 	.sess_get_initiator_sid =	NULL,
 	.write_pending =		ft_write_pending,
-	.write_pending_status =		ft_write_pending_status,
-	.set_default_node_attributes =	ft_set_default_node_attr,
-	.get_cmd_state =		ft_get_cmd_state,
 	.queue_data_in =		ft_queue_data_in,
 	.queue_status =			ft_queue_status,
 	.queue_tm_rsp =			ft_queue_tm_resp,
@@ -462,6 +432,9 @@ static const struct target_core_fabric_ops ft_fabric_ops = {
 
 	.tfc_wwn_attrs			= ft_wwn_attrs,
 	.tfc_tpg_nacl_base_attrs	= ft_nacl_base_attrs,
+
+	.default_submit_type		= TARGET_DIRECT_SUBMIT,
+	.direct_submit_supp		= 1,
 };
 
 static struct notifier_block ft_notifier = {

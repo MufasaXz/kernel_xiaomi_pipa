@@ -1,17 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for the internal tuner of Montage M88RS6000
  *
  * Copyright (C) 2014 Max nibble <nibble.max@gmail.com>
- *
- *    This program is free software; you can redistribute it and/or modify
- *    it under the terms of the GNU General Public License as published by
- *    the Free Software Foundation; either version 2 of the License, or
- *    (at your option) any later version.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU General Public License for more details.
  */
 
 #include "m88rs6000t.h"
@@ -582,8 +573,7 @@ static const struct dvb_tuner_ops m88rs6000t_tuner_ops = {
 	.get_rf_strength = m88rs6000t_get_rf_strength,
 };
 
-static int m88rs6000t_probe(struct i2c_client *client,
-		const struct i2c_device_id *id)
+static int m88rs6000t_probe(struct i2c_client *client)
 {
 	struct m88rs6000t_config *cfg = client->dev.platform_data;
 	struct dvb_frontend *fe = cfg->fe;
@@ -706,7 +696,7 @@ err:
 	return ret;
 }
 
-static int m88rs6000t_remove(struct i2c_client *client)
+static void m88rs6000t_remove(struct i2c_client *client)
 {
 	struct m88rs6000t_dev *dev = i2c_get_clientdata(client);
 	struct dvb_frontend *fe = dev->cfg.fe;
@@ -716,12 +706,10 @@ static int m88rs6000t_remove(struct i2c_client *client)
 	memset(&fe->ops.tuner_ops, 0, sizeof(struct dvb_tuner_ops));
 	fe->tuner_priv = NULL;
 	kfree(dev);
-
-	return 0;
 }
 
 static const struct i2c_device_id m88rs6000t_id[] = {
-	{"m88rs6000t", 0},
+	{ "m88rs6000t" },
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, m88rs6000t_id);

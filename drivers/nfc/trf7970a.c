@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * TI TRF7970a RFID/NFC Transceiver Driver
  *
@@ -6,10 +7,6 @@
  * Author: Erick Macias <emacias@ti.com>
  * Author: Felipe Balbi <balbi@ti.com>
  * Author: Mark A. Greer <mgreer@animalcreek.com>
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2  of
- * the License as published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -172,7 +169,7 @@
 
 /* Bits determining whether its a direct command or register R/W,
  * whether to use a continuous SPI transaction or not, and the actual
- * direct cmd opcode or regster address.
+ * direct cmd opcode or register address.
  */
 #define TRF7970A_CMD_BIT_CTRL			BIT(7)
 #define TRF7970A_CMD_BIT_RW			BIT(6)
@@ -275,12 +272,18 @@
 #define TRF7970A_MODULATOR_EN_OOK		BIT(6)
 #define TRF7970A_MODULATOR_27MHZ		BIT(7)
 
+#define TRF7970A_RX_GAIN_REDUCTION_MAX_DB	15
+#define TRF7970A_RX_GAIN_REDUCTION_DB_PER_LSB	5
 #define TRF7970A_RX_SPECIAL_SETTINGS_NO_LIM	BIT(0)
 #define TRF7970A_RX_SPECIAL_SETTINGS_AGCR	BIT(1)
-#define TRF7970A_RX_SPECIAL_SETTINGS_GD_0DB	(0x0 << 2)
-#define TRF7970A_RX_SPECIAL_SETTINGS_GD_5DB	(0x1 << 2)
-#define TRF7970A_RX_SPECIAL_SETTINGS_GD_10DB	(0x2 << 2)
-#define TRF7970A_RX_SPECIAL_SETTINGS_GD_15DB	(0x3 << 2)
+#define TRF7970A_RX_SPECIAL_SETTINGS_GD_SHIFT	2
+#define TRF7970A_RX_SPECIAL_SETTINGS_GD_MAX	(0x3)
+#define TRF7970A_RX_SPECIAL_SETTINGS_GD_MASK	(TRF7970A_RX_SPECIAL_SETTINGS_GD_MAX << \
+							TRF7970A_RX_SPECIAL_SETTINGS_GD_SHIFT)
+#define TRF7970A_RX_SPECIAL_SETTINGS_GD_0DB	(0x0 << TRF7970A_RX_SPECIAL_SETTINGS_GD_SHIFT)
+#define TRF7970A_RX_SPECIAL_SETTINGS_GD_5DB	(0x1 << TRF7970A_RX_SPECIAL_SETTINGS_GD_SHIFT)
+#define TRF7970A_RX_SPECIAL_SETTINGS_GD_10DB	(0x2 << TRF7970A_RX_SPECIAL_SETTINGS_GD_SHIFT)
+#define TRF7970A_RX_SPECIAL_SETTINGS_GD_15DB	(0x3 << TRF7970A_RX_SPECIAL_SETTINGS_GD_SHIFT)
 #define TRF7970A_RX_SPECIAL_SETTINGS_HBT	BIT(4)
 #define TRF7970A_RX_SPECIAL_SETTINGS_M848	BIT(5)
 #define TRF7970A_RX_SPECIAL_SETTINGS_C424	BIT(6)
@@ -455,6 +458,8 @@ struct trf7970a {
 	unsigned int			timeout;
 	bool				ignore_timeout;
 	struct delayed_work		timeout_work;
+	u8				rx_gain_reduction;
+	bool			custom_rx_gain_reduction;
 };
 
 static int trf7970a_cmd(struct trf7970a *trf, u8 opcode)
@@ -554,6 +559,41 @@ static int trf7970a_read_irqstatus(struct trf7970a *trf, u8 *status)
 	return ret;
 }
 
+static int trf7970a_update_rx_gain_reduction(struct trf7970a *trf)
+{
+	int ret = 0;
+	u8 reg;
+
+	if (!trf->custom_rx_gain_reduction)
+		return 0;
+
+	ret = trf7970a_read(trf, TRF7970A_RX_SPECIAL_SETTINGS, &reg);
+	if (ret)
+		return ret;
+	reg &= ~(TRF7970A_RX_SPECIAL_SETTINGS_GD_MASK);
+	reg |= trf->rx_gain_reduction;
+
+	ret = trf7970a_write(trf, TRF7970A_RX_SPECIAL_SETTINGS, reg);
+
+	return ret;
+}
+
+static int trf7970a_update_iso_ctrl_register(struct trf7970a *trf, u8 iso_ctrl)
+{
+	int ret;
+
+	ret = trf7970a_write(trf, TRF7970A_ISO_CTRL, iso_ctrl);
+	if (ret)
+		return ret;
+	/*
+	 * Every time the ISO_CTRL register is written, the RX special setting register is reset by
+	 * the chip. When a custom gain reguduction is required, it should be rewritten now.
+	 */
+	ret = trf7970a_update_rx_gain_reduction(trf);
+
+	return ret;
+}
+
 static int trf7970a_read_target_proto(struct trf7970a *trf, u8 *target_proto)
 {
 	int ret;
@@ -647,7 +687,7 @@ static void trf7970a_send_err_upstream(struct trf7970a *trf, int errno)
 }
 
 static int trf7970a_transmit(struct trf7970a *trf, struct sk_buff *skb,
-			     unsigned int len, u8 *prefix,
+			     unsigned int len, const u8 *prefix,
 			     unsigned int prefix_len)
 {
 	struct spi_transfer t[2];
@@ -933,8 +973,7 @@ static irqreturn_t trf7970a_irq(int irq, void *dev_id)
 			}
 
 			if (iso_ctrl != trf->iso_ctrl) {
-				ret = trf7970a_write(trf, TRF7970A_ISO_CTRL,
-						     iso_ctrl);
+				ret = trf7970a_update_iso_ctrl_register(trf, iso_ctrl);
 				if (ret)
 					goto err_unlock_exit;
 
@@ -1035,6 +1074,11 @@ static int trf7970a_init(struct trf7970a *trf)
 	dev_dbg(trf->dev, "Initializing device - state: %d\n", trf->state);
 
 	ret = trf7970a_cmd(trf, TRF7970A_CMD_SOFT_INIT);
+	if (ret)
+		goto err_out;
+
+	/* Set the gain reduction after soft init */
+	ret = trf7970a_update_rx_gain_reduction(trf);
 	if (ret)
 		goto err_out;
 
@@ -1157,7 +1201,7 @@ static int trf7970a_switch_rf(struct nfc_digital_dev *ddev, bool on)
 			dev_err(trf->dev, "%s - Invalid request: %d %d\n",
 				__func__, trf->state, on);
 			ret = -EINVAL;
-			/* FALLTHROUGH */
+			fallthrough;
 		case TRF7970A_ST_IDLE:
 		case TRF7970A_ST_IDLE_RX_BLOCKED:
 		case TRF7970A_ST_WAIT_FOR_RX_DATA:
@@ -1312,7 +1356,7 @@ static int trf7970a_in_config_framing(struct trf7970a *trf, int framing)
 	}
 
 	if (iso_ctrl != trf->iso_ctrl) {
-		ret = trf7970a_write(trf, TRF7970A_ISO_CTRL, iso_ctrl);
+		ret = trf7970a_update_iso_ctrl_register(trf, iso_ctrl);
 		if (ret)
 			return ret;
 
@@ -1386,15 +1430,15 @@ static int trf7970a_is_iso15693_write_or_lock(u8 cmd)
 	case ISO15693_CMD_WRITE_DSFID:
 	case ISO15693_CMD_LOCK_DSFID:
 		return 1;
-		break;
 	default:
 		return 0;
 	}
 }
 
-static int trf7970a_per_cmd_config(struct trf7970a *trf, struct sk_buff *skb)
+static int trf7970a_per_cmd_config(struct trf7970a *trf,
+				   const struct sk_buff *skb)
 {
-	u8 *req = skb->data;
+	const u8 *req = skb->data;
 	u8 special_fcn_reg1, iso_ctrl;
 	int ret;
 
@@ -1444,7 +1488,7 @@ static int trf7970a_per_cmd_config(struct trf7970a *trf, struct sk_buff *skb)
 		}
 
 		if (iso_ctrl != trf->iso_ctrl) {
-			ret = trf7970a_write(trf, TRF7970A_ISO_CTRL, iso_ctrl);
+			ret = trf7970a_update_iso_ctrl_register(trf, iso_ctrl);
 			if (ret)
 				return ret;
 
@@ -1608,8 +1652,7 @@ static int trf7970a_tg_config_rf_tech(struct trf7970a *trf, int tech)
 	 */
 	if ((trf->framing == NFC_DIGITAL_FRAMING_NFC_DEP_ACTIVATED) &&
 	    (trf->iso_ctrl_tech != trf->iso_ctrl)) {
-		ret = trf7970a_write(trf, TRF7970A_ISO_CTRL,
-				     trf->iso_ctrl_tech);
+		ret = trf7970a_update_iso_ctrl_register(trf, trf->iso_ctrl_tech);
 
 		trf->iso_ctrl = trf->iso_ctrl_tech;
 	}
@@ -1657,7 +1700,7 @@ static int trf7970a_tg_config_framing(struct trf7970a *trf, int framing)
 	trf->framing = framing;
 
 	if (iso_ctrl != trf->iso_ctrl) {
-		ret = trf7970a_write(trf, TRF7970A_ISO_CTRL, iso_ctrl);
+		ret = trf7970a_update_iso_ctrl_register(trf, iso_ctrl);
 		if (ret)
 			return ret;
 
@@ -1758,6 +1801,10 @@ static int _trf7970a_tg_listen(struct nfc_digital_dev *ddev, u16 timeout,
 	if (ret)
 		goto out_err;
 
+	ret = trf7970a_update_rx_gain_reduction(trf);
+	if (ret)
+		goto out_err;
+
 	ret = trf7970a_write(trf, TRF7970A_REG_IO_CTRL,
 			     trf->io_ctrl | TRF7970A_REG_IO_CTRL_VRS(0x1));
 	if (ret)
@@ -1796,7 +1843,7 @@ out_err:
 static int trf7970a_tg_listen(struct nfc_digital_dev *ddev, u16 timeout,
 			      nfc_digital_cmd_complete_t cb, void *arg)
 {
-	struct trf7970a *trf = nfc_digital_get_drvdata(ddev);
+	const struct trf7970a *trf = nfc_digital_get_drvdata(ddev);
 
 	dev_dbg(trf->dev, "Listen - state: %d, timeout: %d ms\n",
 		trf->state, timeout);
@@ -1808,7 +1855,7 @@ static int trf7970a_tg_listen_md(struct nfc_digital_dev *ddev,
 				 u16 timeout, nfc_digital_cmd_complete_t cb,
 				 void *arg)
 {
-	struct trf7970a *trf = nfc_digital_get_drvdata(ddev);
+	const struct trf7970a *trf = nfc_digital_get_drvdata(ddev);
 	int ret;
 
 	dev_dbg(trf->dev, "Listen MD - state: %d, timeout: %d ms\n",
@@ -1829,7 +1876,7 @@ static int trf7970a_tg_listen_md(struct nfc_digital_dev *ddev,
 
 static int trf7970a_tg_get_rf_tech(struct nfc_digital_dev *ddev, u8 *rf_tech)
 {
-	struct trf7970a *trf = nfc_digital_get_drvdata(ddev);
+	const struct trf7970a *trf = nfc_digital_get_drvdata(ddev);
 
 	dev_dbg(trf->dev, "Get RF Tech - state: %d, rf_tech: %d\n",
 		trf->state, trf->md_rf_tech);
@@ -1866,7 +1913,7 @@ static void trf7970a_abort_cmd(struct nfc_digital_dev *ddev)
 	mutex_unlock(&trf->lock);
 }
 
-static struct nfc_digital_ops trf7970a_nfc_ops = {
+static const struct nfc_digital_ops trf7970a_nfc_ops = {
 	.in_configure_hw	= trf7970a_in_configure_hw,
 	.in_send_cmd		= trf7970a_send_cmd,
 	.tg_configure_hw	= trf7970a_tg_configure_hw,
@@ -1948,6 +1995,10 @@ static int trf7970a_startup(struct trf7970a *trf)
 	if (ret)
 		return ret;
 
+	ret = trf7970a_update_rx_gain_reduction(trf);
+	if (ret)
+		return ret;
+
 	pm_runtime_set_active(trf->dev);
 	pm_runtime_enable(trf->dev);
 	pm_runtime_mark_last_busy(trf->dev);
@@ -1964,7 +2015,7 @@ static void trf7970a_shutdown(struct trf7970a *trf)
 	case TRF7970A_ST_WAIT_TO_ISSUE_EOF:
 	case TRF7970A_ST_LISTENING:
 		trf7970a_send_err_upstream(trf, -ECANCELED);
-		/* FALLTHROUGH */
+		fallthrough;
 	case TRF7970A_ST_IDLE:
 	case TRF7970A_ST_IDLE_RX_BLOCKED:
 		trf7970a_switch_rf_off(trf);
@@ -1979,7 +2030,7 @@ static void trf7970a_shutdown(struct trf7970a *trf)
 	trf7970a_power_down(trf);
 }
 
-static int trf7970a_get_autosuspend_delay(struct device_node *np)
+static int trf7970a_get_autosuspend_delay(const struct device_node *np)
 {
 	int autosuspend_delay, ret;
 
@@ -1992,10 +2043,11 @@ static int trf7970a_get_autosuspend_delay(struct device_node *np)
 
 static int trf7970a_probe(struct spi_device *spi)
 {
-	struct device_node *np = spi->dev.of_node;
+	const struct device_node *np = spi->dev.of_node;
 	struct trf7970a *trf;
 	int uvolts, autosuspend_delay, ret;
 	u32 clk_freq = TRF7970A_13MHZ_CLOCK_FREQUENCY;
+	u32 rx_gain_reduction_db;
 
 	if (!np) {
 		dev_err(&spi->dev, "No Device Tree entry\n");
@@ -2055,6 +2107,20 @@ static int trf7970a_probe(struct spi_device *spi)
 		dev_dbg(trf->dev, "trf7970a configured for 27MHz crystal\n");
 	} else {
 		trf->modulator_sys_clk_ctrl = 0;
+	}
+
+	if (of_property_read_u32(np, "ti,rx-gain-reduction-db", &rx_gain_reduction_db) == 0) {
+		if (rx_gain_reduction_db > TRF7970A_RX_GAIN_REDUCTION_MAX_DB) {
+			dev_warn(trf->dev, "RX Gain reduction too high. Ignored\n");
+		} else if ((rx_gain_reduction_db % TRF7970A_RX_GAIN_REDUCTION_DB_PER_LSB)) {
+			dev_warn(trf->dev, "RX Gain must be set in 5 dB increments. Ignored\n");
+		} else {
+			dev_dbg(trf->dev, "RX gain set to -%udB\n", rx_gain_reduction_db);
+			trf->rx_gain_reduction = ((rx_gain_reduction_db /
+				TRF7970A_RX_GAIN_REDUCTION_DB_PER_LSB) <<
+				TRF7970A_RX_SPECIAL_SETTINGS_GD_SHIFT);
+			trf->custom_rx_gain_reduction = true;
+		}
 	}
 
 	ret = devm_request_threaded_irq(trf->dev, spi->irq, NULL,
@@ -2150,7 +2216,7 @@ err_destroy_lock:
 	return ret;
 }
 
-static int trf7970a_remove(struct spi_device *spi)
+static void trf7970a_remove(struct spi_device *spi)
 {
 	struct trf7970a *trf = spi_get_drvdata(spi);
 
@@ -2167,8 +2233,6 @@ static int trf7970a_remove(struct spi_device *spi)
 	regulator_disable(trf->vin_regulator);
 
 	mutex_destroy(&trf->lock);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -2176,8 +2240,6 @@ static int trf7970a_suspend(struct device *dev)
 {
 	struct spi_device *spi = to_spi_device(dev);
 	struct trf7970a *trf = spi_get_drvdata(spi);
-
-	dev_dbg(dev, "Suspend\n");
 
 	mutex_lock(&trf->lock);
 
@@ -2193,8 +2255,6 @@ static int trf7970a_resume(struct device *dev)
 	struct spi_device *spi = to_spi_device(dev);
 	struct trf7970a *trf = spi_get_drvdata(spi);
 	int ret;
-
-	dev_dbg(dev, "Resume\n");
 
 	mutex_lock(&trf->lock);
 
@@ -2213,8 +2273,6 @@ static int trf7970a_pm_runtime_suspend(struct device *dev)
 	struct trf7970a *trf = spi_get_drvdata(spi);
 	int ret;
 
-	dev_dbg(dev, "Runtime suspend\n");
-
 	mutex_lock(&trf->lock);
 
 	ret = trf7970a_power_down(trf);
@@ -2230,8 +2288,6 @@ static int trf7970a_pm_runtime_resume(struct device *dev)
 	struct trf7970a *trf = spi_get_drvdata(spi);
 	int ret;
 
-	dev_dbg(dev, "Runtime resume\n");
-
 	ret = trf7970a_power_up(trf);
 	if (!ret)
 		pm_runtime_mark_last_busy(dev);
@@ -2246,7 +2302,7 @@ static const struct dev_pm_ops trf7970a_pm_ops = {
 			   trf7970a_pm_runtime_resume, NULL)
 };
 
-static const struct of_device_id trf7970a_of_match[] = {
+static const struct of_device_id trf7970a_of_match[] __maybe_unused = {
 	{.compatible = "ti,trf7970a",},
 	{},
 };

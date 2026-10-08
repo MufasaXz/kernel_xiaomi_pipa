@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * PowerNV OPAL Dump Interface
  *
  * Copyright 2013,2014 IBM Corp.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/kobject.h>
@@ -92,9 +88,14 @@ static ssize_t dump_ack_store(struct dump_obj *dump_obj,
 			      const char *buf,
 			      size_t count)
 {
-	dump_send_ack(dump_obj->id);
-	sysfs_remove_file_self(&dump_obj->kobj, &attr->attr);
-	kobject_put(&dump_obj->kobj);
+	/*
+	 * Try to self remove this attribute. If we are successful,
+	 * delete the kobject itself.
+	 */
+	if (sysfs_remove_file_self(&dump_obj->kobj, &attr->attr)) {
+		dump_send_ack(dump_obj->id);
+		kobject_put(&dump_obj->kobj);
+	}
 	return count;
 }
 
@@ -149,7 +150,7 @@ static struct attribute *initiate_attrs[] = {
 	NULL,
 };
 
-static struct attribute_group initiate_attr_group = {
+static const struct attribute_group initiate_attr_group = {
 	.attrs = initiate_attrs,
 };
 
@@ -207,11 +208,12 @@ static struct attribute *dump_default_attrs[] = {
 	&ack_attribute.attr,
 	NULL,
 };
+ATTRIBUTE_GROUPS(dump_default);
 
-static struct kobj_type dump_ktype = {
+static const struct kobj_type dump_ktype = {
 	.sysfs_ops = &dump_sysfs_ops,
 	.release = &dump_release,
-	.default_attrs = dump_default_attrs,
+	.default_groups = dump_default_groups,
 };
 
 static int64_t dump_read_info(uint32_t *dump_id, uint32_t *dump_size, uint32_t *dump_type)
@@ -284,7 +286,7 @@ out:
 }
 
 static ssize_t dump_attr_read(struct file *filep, struct kobject *kobj,
-			      struct bin_attribute *bin_attr,
+			      const struct bin_attribute *bin_attr,
 			      char *buffer, loff_t pos, size_t count)
 {
 	ssize_t rc;
@@ -418,7 +420,7 @@ void __init opal_platform_dump_init(void)
 	int rc;
 	int dump_irq;
 
-	/* ELOG not supported by firmware */
+	/* Dump not supported by firmware */
 	if (!opal_check_token(OPAL_DUMP_READ))
 		return;
 

@@ -7,16 +7,6 @@
 //		      Mauro Carvalho Chehab <mchehab@kernel.org>
 //		      Sascha Sommer <saschasommer@freenet.de>
 // Copyright (C) 2012 Frank Schäfer <fschaefer.oss@googlemail.com>
-//
-// This program is free software; you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation; either version 2 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
 
 #include "em28xx.h"
 
@@ -426,8 +416,9 @@ int em28xx_audio_analog_set(struct em28xx *dev)
 	int ret, i;
 	u8 xclk;
 
+	/* Set GPIOs here for boards without audio */
 	if (dev->int_audio_type == EM28XX_INT_AUDIO_NONE)
-		return 0;
+		return em28xx_gpio_set(dev, INPUT(dev->ctl_input)->gpio);
 
 	/*
 	 * It is assumed that all devices use master volume for output.
@@ -698,8 +689,10 @@ int em28xx_capture_start(struct em28xx *dev, int start)
 
 	if (dev->mode == EM28XX_ANALOG_MODE)
 		led = em28xx_find_led(dev, EM28XX_LED_ANALOG_CAPTURING);
-	else
+	else if (dev->ts == PRIMARY_TS)
 		led = em28xx_find_led(dev, EM28XX_LED_DIGITAL_CAPTURING);
+	else
+		led = em28xx_find_led(dev, EM28XX_LED_DIGITAL_CAPTURING_TS2);
 
 	if (led)
 		em28xx_write_reg_bits(dev, led->gpio_reg,
@@ -777,6 +770,7 @@ EXPORT_SYMBOL_GPL(em28xx_set_mode);
 static void em28xx_irq_callback(struct urb *urb)
 {
 	struct em28xx *dev = urb->context;
+	unsigned long flags;
 	int i;
 
 	switch (urb->status) {
@@ -793,9 +787,9 @@ static void em28xx_irq_callback(struct urb *urb)
 	}
 
 	/* Copy data from URB */
-	spin_lock(&dev->slock);
+	spin_lock_irqsave(&dev->slock, flags);
 	dev->usb_ctl.urb_data_copy(dev, urb);
-	spin_unlock(&dev->slock);
+	spin_unlock_irqrestore(&dev->slock, flags);
 
 	/* Reset urb buffers */
 	for (i = 0; i < urb->number_of_packets; i++) {

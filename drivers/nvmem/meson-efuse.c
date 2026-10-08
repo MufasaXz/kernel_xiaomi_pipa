@@ -6,6 +6,7 @@
  * Author: Carlo Caione <carlo@endlessm.com>
  */
 
+#include <linux/clk.h>
 #include <linux/module.h>
 #include <linux/nvmem-provider.h>
 #include <linux/of.h>
@@ -16,15 +17,25 @@
 static int meson_efuse_read(void *context, unsigned int offset,
 			    void *val, size_t bytes)
 {
-	return meson_sm_call_read((u8 *)val, bytes, SM_EFUSE_READ, offset,
-				  bytes, 0, 0, 0);
+	struct meson_sm_firmware *fw = context;
+	int ret;
+
+	ret = meson_sm_call_read(fw, (u8 *)val, bytes, SM_EFUSE_READ, offset,
+				 bytes, 0, 0, 0);
+
+	return ret < 0 ? ret : 0;
 }
 
 static int meson_efuse_write(void *context, unsigned int offset,
 			     void *val, size_t bytes)
 {
-	return meson_sm_call_write((u8 *)val, bytes, SM_EFUSE_WRITE, offset,
-				   bytes, 0, 0, 0);
+	struct meson_sm_firmware *fw = context;
+	int ret;
+
+	ret = meson_sm_call_write(fw, (u8 *)val, bytes, SM_EFUSE_WRITE, offset,
+				  bytes, 0, 0, 0);
+
+	return ret < 0 ? ret : 0;
 }
 
 static const struct of_device_id meson_efuse_match[] = {
@@ -36,12 +47,31 @@ MODULE_DEVICE_TABLE(of, meson_efuse_match);
 static int meson_efuse_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	struct meson_sm_firmware *fw;
 	struct nvmem_device *nvmem;
 	struct nvmem_config *econfig;
+	struct clk *clk;
 	unsigned int size;
+	struct device_node *sm_np __free(device_node) =
+			of_parse_phandle(pdev->dev.of_node, "secure-monitor", 0);
 
-	if (meson_sm_call(SM_EFUSE_USER_MAX, &size, 0, 0, 0, 0, 0) < 0)
+	if (!sm_np) {
+		dev_err(&pdev->dev, "no secure-monitor node\n");
+		return -ENODEV;
+	}
+
+	fw = meson_sm_get(sm_np);
+	if (!fw)
+		return -EPROBE_DEFER;
+
+	clk = devm_clk_get_enabled(dev, NULL);
+	if (IS_ERR(clk))
+		return dev_err_probe(dev, PTR_ERR(clk), "failed to get efuse gate");
+
+	if (meson_sm_call(fw, SM_EFUSE_USER_MAX, &size, 0, 0, 0, 0, 0) < 0) {
+		dev_err(dev, "failed to get max user");
 		return -EINVAL;
+	}
 
 	econfig = devm_kzalloc(dev, sizeof(*econfig), GFP_KERNEL);
 	if (!econfig)
@@ -49,11 +79,13 @@ static int meson_efuse_probe(struct platform_device *pdev)
 
 	econfig->dev = dev;
 	econfig->name = dev_name(dev);
+	econfig->add_legacy_fixed_of_cells = true;
 	econfig->stride = 1;
 	econfig->word_size = 1;
 	econfig->reg_read = meson_efuse_read;
 	econfig->reg_write = meson_efuse_write;
 	econfig->size = size;
+	econfig->priv = fw;
 
 	nvmem = devm_nvmem_register(&pdev->dev, econfig);
 

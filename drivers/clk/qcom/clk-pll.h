@@ -1,14 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (c) 2013, 2021, The Linux Foundation. All rights reserved.
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Copyright (c) 2013, The Linux Foundation. All rights reserved.
  */
 
 #ifndef __QCOM_CLK_PLL_H__
@@ -30,12 +22,6 @@ struct pll_freq_tbl {
 	u16 m;
 	u16 n;
 	u32 ibits;
-};
-
-struct pll_spm_ctrl {
-	u32 offset;
-	u32 event_bit;
-	void __iomem *spm_base;
 };
 
 /**
@@ -64,13 +50,11 @@ struct clk_pll {
 	const struct pll_freq_tbl *freq_tbl;
 
 	struct clk_regmap clkr;
-	struct pll_spm_ctrl spm_ctrl;
 };
 
 extern const struct clk_ops clk_pll_ops;
 extern const struct clk_ops clk_pll_vote_ops;
 extern const struct clk_ops clk_pll_sr2_ops;
-extern const struct clk_ops clk_pll_hf_ops;
 
 #define to_clk_pll(_hw) container_of(to_clk_regmap(_hw), struct clk_pll, clkr)
 

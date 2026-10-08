@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * USB-to-WWAN Driver for Sierra Wireless modems
  *
@@ -9,19 +10,6 @@
  *
  * IMPORTANT DISCLAIMER: This driver is not commercially supported by
  * Sierra Wireless. Use at your own risk.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 #define DRIVER_VERSION "v.2.0"
@@ -42,7 +30,7 @@ static const char driver_name[] = "sierra_net";
 #include <linux/usb/cdc.h>
 #include <net/ip.h>
 #include <net/udp.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/usb/usbnet.h>
 
 #define SWI_USB_REQUEST_GET_FW_ATTR	0x06
@@ -196,7 +184,7 @@ static const struct net_device_ops sierra_net_device_ops = {
 	.ndo_start_xmit         = usbnet_start_xmit,
 	.ndo_tx_timeout         = usbnet_tx_timeout,
 	.ndo_change_mtu         = usbnet_change_mtu,
-	.ndo_get_stats64        = usbnet_get_stats64,
+	.ndo_get_stats64        = dev_get_tstats64,
 	.ndo_set_mac_address    = eth_mac_addr,
 	.ndo_validate_addr      = eth_validate_addr,
 };
@@ -364,11 +352,6 @@ static void sierra_net_set_ctx_index(struct sierra_net_data *priv, u8 ctx_ix)
 	priv->tx_hdr_template[1] = ctx_ix;
 	*((__be16 *)&priv->tx_hdr_template[2]) =
 		cpu_to_be16(SIERRA_NET_HIP_EXT_IP_OUT_ID);
-}
-
-static inline int sierra_net_is_valid_addrlen(u8 len)
-{
-	return len == sizeof(struct in_addr);
 }
 
 static int sierra_net_parse_lsi(struct usbnet *dev, char *data, int datalen)
@@ -539,7 +522,7 @@ static void sierra_net_kevent(struct work_struct *work)
 						" stopping sync timer",
 						hh.msgspecific.byte);
 				/* Got sync resp - stop timer & clear mask */
-				del_timer_sync(&priv->sync_timer);
+				timer_delete_sync(&priv->sync_timer);
 				clear_bit(SIERRA_NET_TIMER_EXPIRY,
 					  &priv->kevent_flags);
 				break;
@@ -590,7 +573,7 @@ static void sierra_net_defer_kevent(struct usbnet *dev, int work)
  */
 static void sierra_sync_timer(struct timer_list *t)
 {
-	struct sierra_net_data *priv = from_timer(priv, t, sync_timer);
+	struct sierra_net_data *priv = timer_container_of(priv, t, sync_timer);
 	struct usbnet *dev = priv->usbnet;
 
 	dev_dbg(&dev->udev->dev, "%s", __func__);
@@ -629,8 +612,8 @@ static void sierra_net_get_drvinfo(struct net_device *net,
 {
 	/* Inherit standard device info */
 	usbnet_get_drvinfo(net, info);
-	strlcpy(info->driver, driver_name, sizeof(info->driver));
-	strlcpy(info->version, DRIVER_VERSION, sizeof(info->version));
+	strscpy(info->driver, driver_name, sizeof(info->driver));
+	strscpy(info->version, DRIVER_VERSION, sizeof(info->version));
 }
 
 static u32 sierra_net_get_link(struct net_device *net)
@@ -646,8 +629,8 @@ static const struct ethtool_ops sierra_net_ethtool_ops = {
 	.get_msglevel = usbnet_get_msglevel,
 	.set_msglevel = usbnet_set_msglevel,
 	.nway_reset = usbnet_nway_reset,
-	.get_link_ksettings = usbnet_get_link_ksettings,
-	.set_link_ksettings = usbnet_set_link_ksettings,
+	.get_link_ksettings = usbnet_get_link_ksettings_mii,
+	.set_link_ksettings = usbnet_set_link_ksettings_mii,
 };
 
 static int sierra_net_get_fw_attr(struct usbnet *dev, u16 *datap)
@@ -780,7 +763,7 @@ static void sierra_net_unbind(struct usbnet *dev, struct usb_interface *intf)
 	dev_dbg(&dev->udev->dev, "%s", __func__);
 
 	/* kill the timer and work */
-	del_timer_sync(&priv->sync_timer);
+	timer_shutdown_sync(&priv->sync_timer);
 	cancel_work_sync(&priv->sierra_net_kevent);
 
 	/* tell modem we are going away */

@@ -25,32 +25,18 @@
 #include <asm/vdso/processor.h>
 
 /*
- * Return current * instruction pointer ("program counter").
- */
-#define current_text_addr() ({ __label__ _l; _l: &&_l;})
-
-/*
  * System setup and hardware flags..
  */
 
 extern unsigned int vced_count, vcei_count;
-
-/*
- * MIPS does have an arch_pick_mmap_layout()
- */
-#define HAVE_ARCH_PICK_MMAP_LAYOUT 1
+extern int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src);
 
 #ifdef CONFIG_32BIT
-#ifdef CONFIG_KVM_GUEST
-/* User space process size is limited to 1GB in KVM Guest Mode */
-#define TASK_SIZE	0x3fff8000UL
-#else
 /*
  * User space process size: 2GB. This is hardcoded into a few places,
  * so don't change it unless you know what you are doing.
  */
 #define TASK_SIZE	0x80000000UL
-#endif
 
 #define STACK_TOP_MAX	TASK_SIZE
 
@@ -216,28 +202,16 @@ struct octeon_cop2_state {
 #define COP2_INIT						\
 	.cp2			= {0,},
 
+#if defined(CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE) && \
+	CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE > 0
 struct octeon_cvmseg_state {
 	unsigned long cvmseg[CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE]
 			    [cpu_dcache_line_size() / sizeof(unsigned long)];
 };
-
-#elif defined(CONFIG_CPU_XLP)
-struct nlm_cop2_state {
-	u64	rx[4];
-	u64	tx[4];
-	u32	tx_msg_status;
-	u32	rx_msg_status;
-};
-
-#define COP2_INIT						\
-	.cp2			= {{0}, {0}, 0, 0},
+#endif
 #else
 #define COP2_INIT
 #endif
-
-typedef struct {
-	unsigned long seg;
-} mm_segment_t;
 
 #ifdef CONFIG_CPU_HAS_MSA
 # define ARCH_MIN_TASKALIGN	16
@@ -261,6 +235,7 @@ struct thread_struct {
 	/* Saved cp0 stuff. */
 	unsigned long cp0_status;
 
+#ifdef CONFIG_MIPS_FP_SUPPORT
 	/* Saved fpu/fpu emulator stuff. */
 	struct mips_fpu_struct fpu FPU_ALIGN;
 	/* Assigned branch delay slot 'emulation' frame */
@@ -269,6 +244,7 @@ struct thread_struct {
 	unsigned long bd_emu_branch_pc;
 	/* PC to continue from following a branch delay slot 'emulation' */
 	unsigned long bd_emu_cont_pc;
+#endif
 #ifdef CONFIG_MIPS_MT_FPAFF
 	/* Emulated instruction count */
 	unsigned long emulated_fp;
@@ -289,10 +265,10 @@ struct thread_struct {
 	unsigned long trap_nr;
 #ifdef CONFIG_CPU_CAVIUM_OCTEON
 	struct octeon_cop2_state cp2 __attribute__ ((__aligned__(128)));
+#if defined(CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE) && \
+	CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE > 0
 	struct octeon_cvmseg_state cvmseg __attribute__ ((__aligned__(128)));
 #endif
-#ifdef CONFIG_CPU_XLP
-	struct nlm_cop2_state cp2;
 #endif
 	struct mips_abi *abi;
 };
@@ -304,6 +280,21 @@ struct thread_struct {
 #else
 #define FPAFF_INIT
 #endif /* CONFIG_MIPS_MT_FPAFF */
+
+#ifdef CONFIG_MIPS_FP_SUPPORT
+# define FPU_INIT						\
+	.fpu			= {				\
+		.fpr		= {{{0,},},},			\
+		.fcr31		= 0,				\
+		.msacsr		= 0,				\
+	},							\
+	/* Delay slot emulation */				\
+	.bd_emu_frame = ATOMIC_INIT(BD_EMUFRAME_NONE),		\
+	.bd_emu_branch_pc = 0,					\
+	.bd_emu_cont_pc = 0,
+#else
+# define FPU_INIT
+#endif
 
 #define INIT_THREAD  {						\
 	/*							\
@@ -327,19 +318,11 @@ struct thread_struct {
 	/*							\
 	 * Saved FPU/FPU emulator stuff				\
 	 */							\
-	.fpu			= {				\
-		.fpr		= {{{0,},},},			\
-		.fcr31		= 0,				\
-		.msacsr		= 0,				\
-	},							\
+	FPU_INIT						\
 	/*							\
 	 * FPU affinity state (null if not FPAFF)		\
 	 */							\
 	FPAFF_INIT						\
-	/* Delay slot emulation */				\
-	.bd_emu_frame = ATOMIC_INIT(BD_EMUFRAME_NONE),		\
-	.bd_emu_branch_pc = 0,					\
-	.bd_emu_cont_pc = 0,					\
 	/*							\
 	 * Saved DSP stuff					\
 	 */							\
@@ -366,9 +349,6 @@ struct thread_struct {
 
 struct task_struct;
 
-/* Free all resources held by a thread. */
-#define release_thread(thread) do { } while(0)
-
 /*
  * Do necessary setup to start up a newly executed thread.
  */
@@ -378,7 +358,7 @@ static inline void flush_thread(void)
 {
 }
 
-unsigned long get_wchan(struct task_struct *p);
+unsigned long __get_wchan(struct task_struct *p);
 
 #define __KSTK_TOS(tsk) ((unsigned long)task_stack_page(tsk) + \
 			 THREAD_SIZE - 32 - sizeof(struct pt_regs))
@@ -421,5 +401,7 @@ extern int mips_set_process_fp_mode(struct task_struct *task,
 
 #define GET_FP_MODE(task)		mips_get_process_fp_mode(task)
 #define SET_FP_MODE(task,value)		mips_set_process_fp_mode(task, value)
+
+void show_registers(struct pt_regs *regs);
 
 #endif /* _ASM_PROCESSOR_H */

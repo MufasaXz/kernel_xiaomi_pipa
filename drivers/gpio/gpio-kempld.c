@@ -1,17 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Kontron PLD GPIO driver
  *
  * Copyright (c) 2010-2013 Kontron Europe GmbH
  * Author: Michael Brunner <michael.brunner@kontron.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License 2 as published
- * by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/init.h>
@@ -71,7 +63,8 @@ static int kempld_gpio_get(struct gpio_chip *chip, unsigned offset)
 	return !!kempld_gpio_get_bit(pld, KEMPLD_GPIO_LVL_NUM(offset), offset);
 }
 
-static void kempld_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
+static int kempld_gpio_set(struct gpio_chip *chip, unsigned int offset,
+			   int value)
 {
 	struct kempld_gpio_data *gpio = gpiochip_get_data(chip);
 	struct kempld_device_data *pld = gpio->pld;
@@ -79,6 +72,8 @@ static void kempld_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
 	kempld_get_mutex(pld);
 	kempld_gpio_bitop(pld, KEMPLD_GPIO_LVL_NUM(offset), offset, value);
 	kempld_release_mutex(pld);
+
+	return 0;
 }
 
 static int kempld_gpio_direction_input(struct gpio_chip *chip, unsigned offset)
@@ -112,7 +107,10 @@ static int kempld_gpio_get_direction(struct gpio_chip *chip, unsigned offset)
 	struct kempld_gpio_data *gpio = gpiochip_get_data(chip);
 	struct kempld_device_data *pld = gpio->pld;
 
-	return !kempld_gpio_get_bit(pld, KEMPLD_GPIO_DIR_NUM(offset), offset);
+	if (kempld_gpio_get_bit(pld, KEMPLD_GPIO_DIR_NUM(offset), offset))
+		return GPIO_LINE_DIRECTION_OUT;
+
+	return GPIO_LINE_DIRECTION_IN;
 }
 
 static int kempld_gpio_pincount(struct kempld_device_data *pld)

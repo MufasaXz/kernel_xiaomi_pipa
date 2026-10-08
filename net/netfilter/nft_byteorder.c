@@ -1,14 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2008-2009 Patrick McHardy <kaber@trash.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Development of this code funded by Astaro AG (http://www.astaro.com/)
  */
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/module.h>
@@ -26,9 +23,9 @@ struct nft_byteorder {
 	u8			size;
 };
 
-static void nft_byteorder_eval(const struct nft_expr *expr,
-			       struct nft_regs *regs,
-			       const struct nft_pktinfo *pkt)
+void nft_byteorder_eval(const struct nft_expr *expr,
+			struct nft_regs *regs,
+			const struct nft_pktinfo *pkt)
 {
 	const struct nft_byteorder *priv = nft_expr_priv(expr);
 	u32 *src = &regs->data[priv->sreg];
@@ -47,14 +44,16 @@ static void nft_byteorder_eval(const struct nft_expr *expr,
 		switch (priv->op) {
 		case NFT_BYTEORDER_NTOH:
 			for (i = 0; i < priv->len / 8; i++) {
-				src64 = get_unaligned((u64 *)&src[i]);
-				put_unaligned_be64(src64, &dst64[i]);
+				src64 = nft_reg_load64(&src[i]);
+				nft_reg_store64(&dst64[i],
+						be64_to_cpu((__force __be64)src64));
 			}
 			break;
 		case NFT_BYTEORDER_HTON:
 			for (i = 0; i < priv->len / 8; i++) {
-				src64 = get_unaligned_be64(&src[i]);
-				put_unaligned(src64, &dst64[i]);
+				src64 = (__force __u64)
+					cpu_to_be64(nft_reg_load64(&src[i]));
+				nft_reg_store64(&dst64[i], src64);
 			}
 			break;
 		}
@@ -90,9 +89,9 @@ static void nft_byteorder_eval(const struct nft_expr *expr,
 static const struct nla_policy nft_byteorder_policy[NFTA_BYTEORDER_MAX + 1] = {
 	[NFTA_BYTEORDER_SREG]	= { .type = NLA_U32 },
 	[NFTA_BYTEORDER_DREG]	= { .type = NLA_U32 },
-	[NFTA_BYTEORDER_OP]	= { .type = NLA_U32 },
-	[NFTA_BYTEORDER_LEN]	= { .type = NLA_U32 },
-	[NFTA_BYTEORDER_SIZE]	= { .type = NLA_U32 },
+	[NFTA_BYTEORDER_OP]	= NLA_POLICY_MAX(NLA_BE32, 255),
+	[NFTA_BYTEORDER_LEN]	= NLA_POLICY_MAX(NLA_BE32, 255),
+	[NFTA_BYTEORDER_SIZE]	= NLA_POLICY_MAX(NLA_BE32, 255),
 };
 
 static int nft_byteorder_init(const struct nft_ctx *ctx,
@@ -140,7 +139,7 @@ static int nft_byteorder_init(const struct nft_ctx *ctx,
 
 	priv->len = len;
 
-	err = nft_parse_register_load(tb[NFTA_BYTEORDER_SREG], &priv->sreg,
+	err = nft_parse_register_load(ctx, tb[NFTA_BYTEORDER_SREG], &priv->sreg,
 				      priv->len);
 	if (err < 0)
 		return err;
@@ -150,7 +149,8 @@ static int nft_byteorder_init(const struct nft_ctx *ctx,
 					priv->len);
 }
 
-static int nft_byteorder_dump(struct sk_buff *skb, const struct nft_expr *expr)
+static int nft_byteorder_dump(struct sk_buff *skb,
+			      const struct nft_expr *expr, bool reset)
 {
 	const struct nft_byteorder *priv = nft_expr_priv(expr);
 
@@ -170,12 +170,23 @@ nla_put_failure:
 	return -1;
 }
 
+static bool nft_byteorder_reduce(struct nft_regs_track *track,
+				 const struct nft_expr *expr)
+{
+	struct nft_byteorder *priv = nft_expr_priv(expr);
+
+	nft_reg_track_cancel(track, priv->dreg, priv->len);
+
+	return false;
+}
+
 static const struct nft_expr_ops nft_byteorder_ops = {
 	.type		= &nft_byteorder_type,
 	.size		= NFT_EXPR_SIZE(sizeof(struct nft_byteorder)),
 	.eval		= nft_byteorder_eval,
 	.init		= nft_byteorder_init,
 	.dump		= nft_byteorder_dump,
+	.reduce		= nft_byteorder_reduce,
 };
 
 struct nft_expr_type nft_byteorder_type __read_mostly = {

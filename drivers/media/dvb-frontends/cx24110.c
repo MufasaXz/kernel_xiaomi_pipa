@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
     cx24110 - Single Chip Satellite Channel Receiver driver module
 
@@ -5,20 +6,6 @@
     work
     Copyright (C) 1999 Convergence Integrated Media GmbH <ralph@convergence.de>
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
 */
 
@@ -237,13 +224,13 @@ static enum fe_code_rate cx24110_get_fec(struct cx24110_state *state)
 	}
 }
 
-static int cx24110_set_symbolrate (struct cx24110_state* state, u32 srate)
+static int cx24110_set_symbolrate (struct cx24110_state *state, u32 srate)
 {
 /* fixme (low): add error handling */
 	u32 ratio;
 	u32 tmp, fclk, BDRI;
 
-	static const u32 bands[]={5000000UL,15000000UL,90999000UL/2};
+	static const u32 bands[] = {5000000UL, 15000000UL, 90999000UL/2};
 	int i;
 
 	dprintk("cx24110 debug: entering %s(%d)\n",__func__,srate);

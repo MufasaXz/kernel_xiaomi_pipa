@@ -1,17 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * HWSIM IEEE 802.15.4 interface
  *
  * (C) 2018 Mojatau, Alexander Aring <aring@mojatau.com>
  * Copyright 2007-2012 Siemens AG
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  *
  * Based on fakelb, original Written by:
  * Sergey Lapin <slapin@ossfans.org>
@@ -26,6 +18,7 @@
 #include <linux/netdevice.h>
 #include <linux/device.h>
 #include <linux/spinlock.h>
+#include <net/ieee802154_netdev.h>
 #include <net/mac802154.h>
 #include <net/cfg802154.h>
 #include <net/genetlink.h>
@@ -36,8 +29,6 @@ MODULE_LICENSE("GPL");
 
 static LIST_HEAD(hwsim_phys);
 static DEFINE_MUTEX(hwsim_phys_lock);
-
-static LIST_HEAD(hwsim_ifup_phys);
 
 static struct platform_device *mac802154hwsim_dev;
 
@@ -57,6 +48,8 @@ static const struct genl_multicast_group hwsim_mcgrps[] = {
 struct hwsim_pib {
 	u8 page;
 	u8 channel;
+	struct ieee802154_hw_addr_filt filt;
+	enum ieee802154_filtering_level filt_level;
 
 	struct rcu_head rcu;
 };
@@ -85,7 +78,6 @@ struct hwsim_phy {
 	struct list_head edges;
 
 	struct list_head list;
-	struct list_head list_ifup;
 };
 
 static int hwsim_add_one(struct genl_info *info, struct device *dev,
@@ -99,22 +91,166 @@ static int hwsim_hw_ed(struct ieee802154_hw *hw, u8 *level)
 	return 0;
 }
 
-static int hwsim_hw_channel(struct ieee802154_hw *hw, u8 page, u8 channel)
+static int hwsim_update_pib(struct ieee802154_hw *hw, u8 page, u8 channel,
+			    struct ieee802154_hw_addr_filt *filt,
+			    enum ieee802154_filtering_level filt_level)
 {
 	struct hwsim_phy *phy = hw->priv;
 	struct hwsim_pib *pib, *pib_old;
 
-	pib = kzalloc(sizeof(*pib), GFP_KERNEL);
+	pib = kzalloc(sizeof(*pib), GFP_ATOMIC);
 	if (!pib)
 		return -ENOMEM;
 
+	pib_old = rtnl_dereference(phy->pib);
+
 	pib->page = page;
 	pib->channel = channel;
+	pib->filt.short_addr = filt->short_addr;
+	pib->filt.pan_id = filt->pan_id;
+	pib->filt.ieee_addr = filt->ieee_addr;
+	pib->filt.pan_coord = filt->pan_coord;
+	pib->filt_level = filt_level;
 
-	pib_old = rtnl_dereference(phy->pib);
 	rcu_assign_pointer(phy->pib, pib);
 	kfree_rcu(pib_old, rcu);
 	return 0;
+}
+
+static int hwsim_hw_channel(struct ieee802154_hw *hw, u8 page, u8 channel)
+{
+	struct hwsim_phy *phy = hw->priv;
+	struct hwsim_pib *pib;
+	int ret;
+
+	rcu_read_lock();
+	pib = rcu_dereference(phy->pib);
+	ret = hwsim_update_pib(hw, page, channel, &pib->filt, pib->filt_level);
+	rcu_read_unlock();
+
+	return ret;
+}
+
+static int hwsim_hw_addr_filt(struct ieee802154_hw *hw,
+			      struct ieee802154_hw_addr_filt *filt,
+			      unsigned long changed)
+{
+	struct hwsim_phy *phy = hw->priv;
+	struct hwsim_pib *pib;
+	int ret;
+
+	rcu_read_lock();
+	pib = rcu_dereference(phy->pib);
+	ret = hwsim_update_pib(hw, pib->page, pib->channel, filt, pib->filt_level);
+	rcu_read_unlock();
+
+	return ret;
+}
+
+static void hwsim_hw_receive(struct ieee802154_hw *hw, struct sk_buff *skb,
+			     u8 lqi)
+{
+	struct ieee802154_hdr hdr;
+	struct hwsim_phy *phy = hw->priv;
+	struct hwsim_pib *pib;
+
+	rcu_read_lock();
+	pib = rcu_dereference(phy->pib);
+
+	if (!pskb_may_pull(skb, 3)) {
+		dev_dbg(hw->parent, "invalid frame\n");
+		goto drop;
+	}
+
+	memcpy(&hdr, skb->data, 3);
+
+	/* Level 4 filtering: Frame fields validity */
+	if (pib->filt_level == IEEE802154_FILTERING_4_FRAME_FIELDS) {
+		/* a) Drop reserved frame types */
+		switch (mac_cb(skb)->type) {
+		case IEEE802154_FC_TYPE_BEACON:
+		case IEEE802154_FC_TYPE_DATA:
+		case IEEE802154_FC_TYPE_ACK:
+		case IEEE802154_FC_TYPE_MAC_CMD:
+			break;
+		default:
+			dev_dbg(hw->parent, "unrecognized frame type 0x%x\n",
+				mac_cb(skb)->type);
+			goto drop;
+		}
+
+		/* b) Drop reserved frame versions */
+		switch (hdr.fc.version) {
+		case IEEE802154_2003_STD:
+		case IEEE802154_2006_STD:
+		case IEEE802154_STD:
+			break;
+		default:
+			dev_dbg(hw->parent,
+				"unrecognized frame version 0x%x\n",
+				hdr.fc.version);
+			goto drop;
+		}
+
+		/* c) PAN ID constraints */
+		if ((mac_cb(skb)->dest.mode == IEEE802154_ADDR_LONG ||
+		     mac_cb(skb)->dest.mode == IEEE802154_ADDR_SHORT) &&
+		    mac_cb(skb)->dest.pan_id != pib->filt.pan_id &&
+		    mac_cb(skb)->dest.pan_id != cpu_to_le16(IEEE802154_PANID_BROADCAST)) {
+			dev_dbg(hw->parent,
+				"unrecognized PAN ID %04x\n",
+				le16_to_cpu(mac_cb(skb)->dest.pan_id));
+			goto drop;
+		}
+
+		/* d1) Short address constraints */
+		if (mac_cb(skb)->dest.mode == IEEE802154_ADDR_SHORT &&
+		    mac_cb(skb)->dest.short_addr != pib->filt.short_addr &&
+		    mac_cb(skb)->dest.short_addr != cpu_to_le16(IEEE802154_ADDR_BROADCAST)) {
+			dev_dbg(hw->parent,
+				"unrecognized short address %04x\n",
+				le16_to_cpu(mac_cb(skb)->dest.short_addr));
+			goto drop;
+		}
+
+		/* d2) Extended address constraints */
+		if (mac_cb(skb)->dest.mode == IEEE802154_ADDR_LONG &&
+		    mac_cb(skb)->dest.extended_addr != pib->filt.ieee_addr) {
+			dev_dbg(hw->parent,
+				"unrecognized long address 0x%016llx\n",
+				mac_cb(skb)->dest.extended_addr);
+			goto drop;
+		}
+
+		/* d4) Specific PAN coordinator case (no parent) */
+		if ((mac_cb(skb)->type == IEEE802154_FC_TYPE_DATA ||
+		     mac_cb(skb)->type == IEEE802154_FC_TYPE_MAC_CMD) &&
+		    mac_cb(skb)->dest.mode == IEEE802154_ADDR_NONE) {
+			dev_dbg(hw->parent,
+				"relaying is not supported\n");
+			goto drop;
+		}
+
+		/* e) Beacon frames follow specific PAN ID rules */
+		if (mac_cb(skb)->type == IEEE802154_FC_TYPE_BEACON &&
+		    pib->filt.pan_id != cpu_to_le16(IEEE802154_PANID_BROADCAST) &&
+		    mac_cb(skb)->dest.pan_id != pib->filt.pan_id) {
+			dev_dbg(hw->parent,
+				"invalid beacon PAN ID %04x\n",
+				le16_to_cpu(mac_cb(skb)->dest.pan_id));
+			goto drop;
+		}
+	}
+
+	rcu_read_unlock();
+
+	ieee802154_rx_irqsafe(hw, skb, lqi);
+
+	return;
+
+drop:
+	rcu_read_unlock();
+	kfree_skb(skb);
 }
 
 static int hwsim_hw_xmit(struct ieee802154_hw *hw, struct sk_buff *skb)
@@ -144,8 +280,7 @@ static int hwsim_hw_xmit(struct ieee802154_hw *hw, struct sk_buff *skb)
 
 			einfo = rcu_dereference(e->info);
 			if (newskb)
-				ieee802154_rx_irqsafe(e->endpoint->hw, newskb,
-						      einfo->lqi);
+				hwsim_hw_receive(e->endpoint->hw, newskb, einfo->lqi);
 		}
 	}
 	rcu_read_unlock();
@@ -159,8 +294,6 @@ static int hwsim_hw_start(struct ieee802154_hw *hw)
 	struct hwsim_phy *phy = hw->priv;
 
 	phy->suspended = false;
-	list_add_rcu(&phy->list_ifup, &hwsim_ifup_phys);
-	synchronize_rcu();
 
 	return 0;
 }
@@ -170,14 +303,27 @@ static void hwsim_hw_stop(struct ieee802154_hw *hw)
 	struct hwsim_phy *phy = hw->priv;
 
 	phy->suspended = true;
-	list_del_rcu(&phy->list_ifup);
-	synchronize_rcu();
 }
 
 static int
 hwsim_set_promiscuous_mode(struct ieee802154_hw *hw, const bool on)
 {
-	return 0;
+	enum ieee802154_filtering_level filt_level;
+	struct hwsim_phy *phy = hw->priv;
+	struct hwsim_pib *pib;
+	int ret;
+
+	if (on)
+		filt_level = IEEE802154_FILTERING_NONE;
+	else
+		filt_level = IEEE802154_FILTERING_4_FRAME_FIELDS;
+
+	rcu_read_lock();
+	pib = rcu_dereference(phy->pib);
+	ret = hwsim_update_pib(hw, pib->page, pib->channel, &pib->filt, filt_level);
+	rcu_read_unlock();
+
+	return ret;
 }
 
 static const struct ieee802154_ops hwsim_ops = {
@@ -188,6 +334,7 @@ static const struct ieee802154_ops hwsim_ops = {
 	.start = hwsim_hw_start,
 	.stop = hwsim_hw_stop,
 	.set_promiscuous_mode = hwsim_set_promiscuous_mode,
+	.set_hw_addr_filt = hwsim_hw_addr_filt,
 };
 
 static int hwsim_new_radio_nl(struct sk_buff *msg, struct genl_info *info)
@@ -235,14 +382,16 @@ static int append_radio_msg(struct sk_buff *skb, struct hwsim_phy *phy)
 		return 0;
 	}
 
-	nl_edges = nla_nest_start(skb, MAC802154_HWSIM_ATTR_RADIO_EDGES);
+	nl_edges = nla_nest_start_noflag(skb,
+					 MAC802154_HWSIM_ATTR_RADIO_EDGES);
 	if (!nl_edges) {
 		rcu_read_unlock();
 		return -ENOBUFS;
 	}
 
 	list_for_each_entry_rcu(e, &phy->edges, list) {
-		nl_edge = nla_nest_start(skb, MAC802154_HWSIM_ATTR_RADIO_EDGE);
+		nl_edge = nla_nest_start_noflag(skb,
+						MAC802154_HWSIM_ATTR_RADIO_EDGE);
 		if (!nl_edge) {
 			rcu_read_unlock();
 			nla_nest_cancel(skb, nl_edges);
@@ -282,7 +431,7 @@ static int hwsim_get_radio(struct sk_buff *skb, struct hwsim_phy *phy,
 			   struct netlink_callback *cb, int flags)
 {
 	void *hdr;
-	int res = -EMSGSIZE;
+	int res;
 
 	hdr = genlmsg_put(skb, portid, seq, &hwsim_genl_family, flags,
 			  MAC802154_HWSIM_CMD_GET_RADIO);
@@ -436,9 +585,7 @@ static int hwsim_new_edge_nl(struct sk_buff *msg, struct genl_info *info)
 	    !info->attrs[MAC802154_HWSIM_ATTR_RADIO_EDGE])
 		return -EINVAL;
 
-	if (nla_parse_nested(edge_attrs, MAC802154_HWSIM_EDGE_ATTR_MAX,
-			     info->attrs[MAC802154_HWSIM_ATTR_RADIO_EDGE],
-			     hwsim_edge_policy, NULL))
+	if (nla_parse_nested_deprecated(edge_attrs, MAC802154_HWSIM_EDGE_ATTR_MAX, info->attrs[MAC802154_HWSIM_ATTR_RADIO_EDGE], hwsim_edge_policy, NULL))
 		return -EINVAL;
 
 	if (!edge_attrs[MAC802154_HWSIM_EDGE_ATTR_ENDPOINT_ID])
@@ -500,9 +647,7 @@ static int hwsim_del_edge_nl(struct sk_buff *msg, struct genl_info *info)
 	    !info->attrs[MAC802154_HWSIM_ATTR_RADIO_EDGE])
 		return -EINVAL;
 
-	if (nla_parse_nested(edge_attrs, MAC802154_HWSIM_EDGE_ATTR_MAX,
-			     info->attrs[MAC802154_HWSIM_ATTR_RADIO_EDGE],
-			     hwsim_edge_policy, NULL))
+	if (nla_parse_nested_deprecated(edge_attrs, MAC802154_HWSIM_EDGE_ATTR_MAX, info->attrs[MAC802154_HWSIM_ATTR_RADIO_EDGE], hwsim_edge_policy, NULL))
 		return -EINVAL;
 
 	if (!edge_attrs[MAC802154_HWSIM_EDGE_ATTR_ENDPOINT_ID])
@@ -550,9 +695,7 @@ static int hwsim_set_edge_lqi(struct sk_buff *msg, struct genl_info *info)
 	    !info->attrs[MAC802154_HWSIM_ATTR_RADIO_EDGE])
 		return -EINVAL;
 
-	if (nla_parse_nested(edge_attrs, MAC802154_HWSIM_EDGE_ATTR_MAX,
-			     info->attrs[MAC802154_HWSIM_ATTR_RADIO_EDGE],
-			     hwsim_edge_policy, NULL))
+	if (nla_parse_nested_deprecated(edge_attrs, MAC802154_HWSIM_EDGE_ATTR_MAX, info->attrs[MAC802154_HWSIM_ATTR_RADIO_EDGE], hwsim_edge_policy, NULL))
 		return -EINVAL;
 
 	if (!edge_attrs[MAC802154_HWSIM_EDGE_ATTR_ENDPOINT_ID] ||
@@ -605,40 +748,40 @@ static const struct nla_policy hwsim_genl_policy[MAC802154_HWSIM_ATTR_MAX + 1] =
 };
 
 /* Generic Netlink operations array */
-static const struct genl_ops hwsim_nl_ops[] = {
+static const struct genl_small_ops hwsim_nl_ops[] = {
 	{
 		.cmd = MAC802154_HWSIM_CMD_NEW_RADIO,
-		.policy = hwsim_genl_policy,
+		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = hwsim_new_radio_nl,
 		.flags = GENL_UNS_ADMIN_PERM,
 	},
 	{
 		.cmd = MAC802154_HWSIM_CMD_DEL_RADIO,
-		.policy = hwsim_genl_policy,
+		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = hwsim_del_radio_nl,
 		.flags = GENL_UNS_ADMIN_PERM,
 	},
 	{
 		.cmd = MAC802154_HWSIM_CMD_GET_RADIO,
-		.policy = hwsim_genl_policy,
+		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = hwsim_get_radio_nl,
 		.dumpit = hwsim_dump_radio_nl,
 	},
 	{
 		.cmd = MAC802154_HWSIM_CMD_NEW_EDGE,
-		.policy = hwsim_genl_policy,
+		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = hwsim_new_edge_nl,
 		.flags = GENL_UNS_ADMIN_PERM,
 	},
 	{
 		.cmd = MAC802154_HWSIM_CMD_DEL_EDGE,
-		.policy = hwsim_genl_policy,
+		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = hwsim_del_edge_nl,
 		.flags = GENL_UNS_ADMIN_PERM,
 	},
 	{
 		.cmd = MAC802154_HWSIM_CMD_SET_EDGE,
-		.policy = hwsim_genl_policy,
+		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = hwsim_set_edge_lqi,
 		.flags = GENL_UNS_ADMIN_PERM,
 	},
@@ -648,9 +791,11 @@ static struct genl_family hwsim_genl_family __ro_after_init = {
 	.name = "MAC802154_HWSIM",
 	.version = 1,
 	.maxattr = MAC802154_HWSIM_ATTR_MAX,
+	.policy = hwsim_genl_policy,
 	.module = THIS_MODULE,
-	.ops = hwsim_nl_ops,
-	.n_ops = ARRAY_SIZE(hwsim_nl_ops),
+	.small_ops = hwsim_nl_ops,
+	.n_small_ops = ARRAY_SIZE(hwsim_nl_ops),
+	.resv_start_op = MAC802154_HWSIM_CMD_NEW_EDGE + 1,
 	.mcgrps = hwsim_mcgrps,
 	.n_mcgrps = ARRAY_SIZE(hwsim_mcgrps),
 };
@@ -808,6 +953,8 @@ static int hwsim_add_one(struct genl_info *info, struct device *dev,
 	}
 
 	pib->channel = 13;
+	pib->filt.short_addr = cpu_to_le16(IEEE802154_ADDR_BROADCAST);
+	pib->filt.pan_id = cpu_to_le16(IEEE802154_PANID_BROADCAST);
 	rcu_assign_pointer(phy->pib, pib);
 	phy->idx = idx;
 	INIT_LIST_HEAD(&phy->edges);
@@ -888,7 +1035,7 @@ err_slave:
 	return err;
 }
 
-static int hwsim_remove(struct platform_device *pdev)
+static void hwsim_remove(struct platform_device *pdev)
 {
 	struct hwsim_phy *phy, *tmp;
 
@@ -896,8 +1043,6 @@ static int hwsim_remove(struct platform_device *pdev)
 	list_for_each_entry_safe(phy, tmp, &hwsim_phys, list)
 		hwsim_del(phy);
 	mutex_unlock(&hwsim_phys_lock);
-
-	return 0;
 }
 
 static struct platform_driver mac802154hwsim_driver = {

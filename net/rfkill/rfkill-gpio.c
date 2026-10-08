@@ -1,27 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (c) 2011, NVIDIA Corporation.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
-#include <linux/gpio.h>
+#include <linux/dmi.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mod_devicetable.h>
 #include <linux/rfkill.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/clk.h>
 #include <linux/slab.h>
@@ -89,6 +77,20 @@ static int rfkill_gpio_acpi_probe(struct device *dev,
 	return devm_acpi_dev_add_driver_gpios(dev, acpi_rfkill_default_gpios);
 }
 
+/* List of DMI matches for devices on which rfkill-gpio should not load,
+ * to avoid firmware bugs.
+ */
+static const struct dmi_system_id rfkill_gpio_deny_table[] = {
+	{
+		/* Lenovo Yoga Tab 3 Pro YT3-X90, bogus "BCM4752" device in DSDT */
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Intel Corporation"),
+			DMI_MATCH(DMI_PRODUCT_VERSION, "Blade3-10A-001"),
+		},
+	},
+	{ }
+};
+
 static int rfkill_gpio_probe(struct platform_device *pdev)
 {
 	struct rfkill_gpio_data *rfkill;
@@ -97,6 +99,9 @@ static int rfkill_gpio_probe(struct platform_device *pdev)
 	const char *type_property;
 	struct gpio_desc *gpio;
 	int ret;
+
+	if (dmi_check_system(rfkill_gpio_deny_table))
+		return -ENODEV;
 
 	rfkill = devm_kzalloc(&pdev->dev, sizeof(*rfkill), GFP_KERNEL);
 	if (!rfkill)
@@ -157,6 +162,9 @@ static int rfkill_gpio_probe(struct platform_device *pdev)
 	if (!rfkill->rfkill_dev)
 		return -ENOMEM;
 
+	if (device_property_present(&pdev->dev, "default-blocked"))
+		rfkill_init_sw_state(rfkill->rfkill_dev, true);
+
 	ret = rfkill_register(rfkill->rfkill_dev);
 	if (ret < 0)
 		goto err_destroy;
@@ -173,14 +181,12 @@ err_destroy:
 	return ret;
 }
 
-static int rfkill_gpio_remove(struct platform_device *pdev)
+static void rfkill_gpio_remove(struct platform_device *pdev)
 {
 	struct rfkill_gpio_data *rfkill = platform_get_drvdata(pdev);
 
 	rfkill_unregister(rfkill->rfkill_dev);
 	rfkill_destroy(rfkill->rfkill_dev);
-
-	return 0;
 }
 
 #ifdef CONFIG_ACPI

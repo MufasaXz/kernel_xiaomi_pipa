@@ -1,19 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2010 IBM Corporation
  *
  * Authors:
  * Mimi Zohar <zohar@us.ibm.com>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, version 2 of the License.
- *
  * File: evm_secfs.c
  *	- Used to signal when key is on keyring
  *	- Get the key and enable EVM
  */
-
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/audit.h>
 #include <linux/uaccess.h>
@@ -22,7 +17,6 @@
 #include "evm.h"
 
 static struct dentry *evm_dir;
-static struct dentry *evm_init_tpm;
 static struct dentry *evm_symlink;
 
 #ifdef CONFIG_EVM_ADD_XATTRS
@@ -144,8 +138,12 @@ static ssize_t evm_read_xattrs(struct file *filp, char __user *buf,
 	if (rc)
 		return -ERESTARTSYS;
 
-	list_for_each_entry(xattr, &evm_config_xattrnames, list)
+	list_for_each_entry(xattr, &evm_config_xattrnames, list) {
+		if (!xattr->enabled)
+			continue;
+
 		size += strlen(xattr->name) + 1;
+	}
 
 	temp = kmalloc(size + 1, GFP_KERNEL);
 	if (!temp) {
@@ -154,6 +152,9 @@ static ssize_t evm_read_xattrs(struct file *filp, char __user *buf,
 	}
 
 	list_for_each_entry(xattr, &evm_config_xattrnames, list) {
+		if (!xattr->enabled)
+			continue;
+
 		sprintf(temp + offset, "%s\n", xattr->name);
 		offset += strlen(xattr->name) + 1;
 	}
@@ -193,8 +194,9 @@ static ssize_t evm_write_xattrs(struct file *file, const char __user *buf,
 	if (count > XATTR_NAME_MAX)
 		return -E2BIG;
 
-	ab = audit_log_start(NULL, GFP_KERNEL, AUDIT_INTEGRITY_EVM_XATTR);
-	if (!ab)
+	ab = audit_log_start(audit_context(), GFP_KERNEL,
+			     AUDIT_INTEGRITY_EVM_XATTR);
+	if (!ab && IS_ENABLED(CONFIG_AUDIT))
 		return -ENOMEM;
 
 	xattr = kmalloc(sizeof(struct xattr_list), GFP_KERNEL);
@@ -203,6 +205,7 @@ static ssize_t evm_write_xattrs(struct file *file, const char __user *buf,
 		goto out;
 	}
 
+	xattr->enabled = true;
 	xattr->name = memdup_user_nul(buf, count);
 	if (IS_ERR(xattr->name)) {
 		err = PTR_ERR(xattr->name);
@@ -215,22 +218,21 @@ static ssize_t evm_write_xattrs(struct file *file, const char __user *buf,
 	if (len && xattr->name[len-1] == '\n')
 		xattr->name[len-1] = '\0';
 
+	audit_log_format(ab, "xattr=");
+	audit_log_untrustedstring(ab, xattr->name);
+
 	if (strcmp(xattr->name, ".") == 0) {
 		evm_xattrs_locked = 1;
 		newattrs.ia_mode = S_IFREG | 0440;
 		newattrs.ia_valid = ATTR_MODE;
 		inode = evm_xattrs->d_inode;
 		inode_lock(inode);
-		err = simple_setattr(evm_xattrs, &newattrs);
+		err = simple_setattr(&nop_mnt_idmap, evm_xattrs, &newattrs);
 		inode_unlock(inode);
-		audit_log_format(ab, "locked");
 		if (!err)
 			err = count;
 		goto out;
 	}
-
-	audit_log_format(ab, "xattr=");
-	audit_log_untrustedstring(ab, xattr->name);
 
 	if (strncmp(xattr->name, XATTR_SECURITY_PREFIX,
 		    XATTR_SECURITY_PREFIX_LEN) != 0) {
@@ -250,6 +252,10 @@ static ssize_t evm_write_xattrs(struct file *file, const char __user *buf,
 	list_for_each_entry(tmp, &evm_config_xattrnames, list) {
 		if (strcmp(xattr->name, tmp->name) == 0) {
 			err = -EEXIST;
+			if (!tmp->enabled) {
+				tmp->enabled = true;
+				err = count;
+			}
 			mutex_unlock(&xattr_list_mutex);
 			goto out;
 		}
@@ -261,7 +267,7 @@ static ssize_t evm_write_xattrs(struct file *file, const char __user *buf,
 	audit_log_end(ab);
 	return count;
 out:
-	audit_log_format(ab, " res=%d", err);
+	audit_log_format(ab, " res=%d", (err < 0) ? err : 0);
 	audit_log_end(ab);
 	if (xattr) {
 		kfree(xattr->name);
@@ -279,7 +285,7 @@ static int evm_init_xattrs(void)
 {
 	evm_xattrs = securityfs_create_file("evm_xattrs", 0660, evm_dir, NULL,
 					    &evm_xattr_ops);
-	if (!evm_xattrs || IS_ERR(evm_xattrs))
+	if (IS_ERR(evm_xattrs))
 		return -EFAULT;
 
 	return 0;
@@ -294,21 +300,22 @@ static int evm_init_xattrs(void)
 int __init evm_init_secfs(void)
 {
 	int error = 0;
+	struct dentry *dentry;
 
 	evm_dir = securityfs_create_dir("evm", integrity_dir);
-	if (!evm_dir || IS_ERR(evm_dir))
+	if (IS_ERR(evm_dir))
 		return -EFAULT;
 
-	evm_init_tpm = securityfs_create_file("evm", 0660,
-					      evm_dir, NULL, &evm_key_ops);
-	if (!evm_init_tpm || IS_ERR(evm_init_tpm)) {
+	dentry = securityfs_create_file("evm", 0660,
+				      evm_dir, NULL, &evm_key_ops);
+	if (IS_ERR(dentry)) {
 		error = -EFAULT;
 		goto out;
 	}
 
 	evm_symlink = securityfs_create_symlink("evm", NULL,
 						"integrity/evm/evm", NULL);
-	if (!evm_symlink || IS_ERR(evm_symlink)) {
+	if (IS_ERR(evm_symlink)) {
 		error = -EFAULT;
 		goto out;
 	}
@@ -321,7 +328,6 @@ int __init evm_init_secfs(void)
 	return 0;
 out:
 	securityfs_remove(evm_symlink);
-	securityfs_remove(evm_init_tpm);
 	securityfs_remove(evm_dir);
 	return error;
 }

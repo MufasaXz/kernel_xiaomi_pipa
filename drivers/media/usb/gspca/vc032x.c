@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Z-star vc0321 library
  *
  * Copyright (C) 2009-2010 Jean-François Moine <http://moinejf.free.fr>
  * Copyright (C) 2006 Koninski Artur takeshi87@o2.pl
  * Copyright (C) 2006 Michel Xhaard
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -1805,7 +1796,7 @@ static const u8 ov7660_60HZ[][4] = {
 	{}
 };
 
-static const u8 ov7660_NoFliker[][4] = {
+static const u8 ov7660_NoFlicker[][4] = {
 	{0x00, 0x13, 0x87, 0xaa},
 	{}
 };
@@ -3328,8 +3319,8 @@ static void sethvflip(struct gspca_dev *gspca_dev, bool hflip, bool vflip)
 static void setlightfreq(struct gspca_dev *gspca_dev, s32 val)
 {
 	struct sd *sd = (struct sd *) gspca_dev;
-	static const u8 (*ov7660_freq_tb[3])[4] =
-		{ov7660_NoFliker, ov7660_50HZ, ov7660_60HZ};
+	static const u8 (*ov7660_freq_tb[3])[4] = {
+		ov7660_NoFlicker, ov7660_50HZ, ov7660_60HZ};
 
 	if (sd->sensor != SENSOR_OV7660)
 		return;

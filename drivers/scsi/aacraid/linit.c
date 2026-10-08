@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	Adaptec AAC series RAID controller driver
  *	(c) Copyright 2001 Red Hat Inc.
@@ -8,20 +9,6 @@
  * Copyright (c) 2000-2010 Adaptec, Inc.
  *               2010-2015 PMC-Sierra, Inc. (aacraid@pmc-sierra.com)
  *		 2016-2017 Microsemi Corp. (aacraid@microsemi.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; see the file COPYING.  If not, write to
- * the Free Software Foundation, 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  * Module Name:
  *   linit.c
@@ -39,14 +26,13 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/pci.h>
-#include <linux/aer.h>
-#include <linux/pci-aspm.h>
 #include <linux/slab.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/syscalls.h>
 #include <linux/delay.h>
 #include <linux/kthread.h>
+#include <linux/msdos_partition.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
@@ -243,8 +229,8 @@ static struct aac_driver_ident aac_drivers[] = {
 
 /**
  *	aac_queuecommand	-	queue a SCSI command
+ *	@shost:		Scsi host to queue command on
  *	@cmd:		SCSI command to queue
- *	@done:		Function to call on command completion
  *
  *	Queues a command for execution by the associated Host Adapter.
  *
@@ -254,10 +240,9 @@ static struct aac_driver_ident aac_drivers[] = {
 static int aac_queuecommand(struct Scsi_Host *shost,
 			    struct scsi_cmnd *cmd)
 {
-	int r = 0;
-	cmd->SCp.phase = AAC_OWNER_LOWLEVEL;
-	r = (aac_scsi_cmd(cmd) ? FAILED : 0);
-	return r;
+	aac_priv(cmd)->owner = AAC_OWNER_LOWLEVEL;
+
+	return aac_scsi_cmd(cmd) ? FAILED : 0;
 }
 
 /**
@@ -288,7 +273,7 @@ struct aac_driver_ident* aac_get_driver_ident(int devtype)
 /**
  *	aac_biosparm	-	return BIOS parameters for disk
  *	@sdev: The scsi device corresponding to the disk
- *	@bdev: the block device corresponding to the disk
+ *	@disk: the gendisk corresponding to the disk
  *	@capacity: the sector capacity of the disk
  *	@geom: geometry block to fill in
  *
@@ -307,7 +292,7 @@ struct aac_driver_ident* aac_get_driver_ident(int devtype)
  *	be displayed.
  */
 
-static int aac_biosparm(struct scsi_device *sdev, struct block_device *bdev,
+static int aac_biosparm(struct scsi_device *sdev, struct gendisk *disk,
 			sector_t capacity, int *geom)
 {
 	struct diskparm *param = (struct diskparm *)geom;
@@ -339,12 +324,12 @@ static int aac_biosparm(struct scsi_device *sdev, struct block_device *bdev,
 	 *	entry whose end_head matches one of the standard geometry
 	 *	translations ( 64/32, 128/32, 255/63 ).
 	 */
-	buf = scsi_bios_ptable(bdev);
+	buf = scsi_bios_ptable(disk);
 	if (!buf)
 		return 0;
-	if(*(__le16 *)(buf + 0x40) == cpu_to_le16(0xaa55)) {
-		struct partition *first = (struct partition * )buf;
-		struct partition *entry = first;
+	if (*(__le16 *)(buf + 0x40) == cpu_to_le16(MSDOS_LABEL_MAGIC)) {
+		struct msdos_partition *first = (struct msdos_partition *)buf;
+		struct msdos_partition *entry = first;
 		int saved_cylinders = param->cylinders;
 		int num;
 		unsigned char end_head, end_sec;
@@ -376,9 +361,10 @@ static int aac_biosparm(struct scsi_device *sdev, struct block_device *bdev,
 
 		param->cylinders = cap_to_cyls(capacity, param->heads * param->sectors);
 		if (num < 4 && end_sec == param->sectors) {
-			if (param->cylinders != saved_cylinders)
+			if (param->cylinders != saved_cylinders) {
 				dprintk((KERN_DEBUG "Adopting geometry: heads=%d, sectors=%d from partition table %d.\n",
 					param->heads, param->sectors, num));
+			}
 		} else if (end_head > 0 || end_sec > 0) {
 			dprintk((KERN_DEBUG "Strange geometry: heads=%d, sectors=%d in partition table %d.\n",
 				end_head + 1, end_sec, num));
@@ -391,20 +377,23 @@ static int aac_biosparm(struct scsi_device *sdev, struct block_device *bdev,
 }
 
 /**
- *	aac_slave_configure		-	compute queue depths
+ *	aac_sdev_configure		-	compute queue depths
  *	@sdev:	SCSI device we are considering
+ *	@lim:	Request queue limits
  *
  *	Selects queue depths for each target device based on the host adapter's
  *	total capacity and the queue depth supported by the target device.
  *	A queue depth of one automatically disables tagged queueing.
  */
 
-static int aac_slave_configure(struct scsi_device *sdev)
+static int aac_sdev_configure(struct scsi_device *sdev,
+			      struct queue_limits *lim)
 {
 	struct aac_dev *aac = (struct aac_dev *)sdev->host->hostdata;
 	int chn, tid;
 	unsigned int depth = 0;
 	unsigned int set_timeout = 0;
+	int timeout = 0;
 	bool set_qd_dev_type = false;
 	u8 devtype = 0;
 
@@ -497,10 +486,13 @@ common_config:
 
 	/*
 	 * Firmware has an individual device recovery time typically
-	 * of 35 seconds, give us a margin.
+	 * of 35 seconds, give us a margin. Thor devices can take longer in
+	 * error recovery, hence different value.
 	 */
-	if (set_timeout && sdev->request_queue->rq_timeout < (45 * HZ))
-		blk_queue_rq_timeout(sdev->request_queue, 45*HZ);
+	if (set_timeout) {
+		timeout = aac->sa_firmware ? AAC_SA_TIMEOUT : AAC_ARC_TIMEOUT;
+		blk_queue_rq_timeout(sdev->request_queue, timeout * HZ);
+	}
 
 	if (depth > 256)
 		depth = 256;
@@ -613,72 +605,82 @@ static struct device_attribute aac_unique_id_attr = {
 
 
 
-static struct device_attribute *aac_dev_attrs[] = {
-	&aac_raid_level_attr,
-	&aac_unique_id_attr,
+static struct attribute *aac_dev_attrs[] = {
+	&aac_raid_level_attr.attr,
+	&aac_unique_id_attr.attr,
 	NULL,
 };
 
-static int aac_ioctl(struct scsi_device *sdev, int cmd, void __user * arg)
+ATTRIBUTE_GROUPS(aac_dev);
+
+static int aac_ioctl(struct scsi_device *sdev, unsigned int cmd,
+		     void __user *arg)
 {
+	int retval;
 	struct aac_dev *dev = (struct aac_dev *)sdev->host->hostdata;
 	if (!capable(CAP_SYS_RAWIO))
 		return -EPERM;
+	retval = aac_adapter_check_health(dev);
+	if (retval)
+		return -EBUSY;
 	return aac_do_ioctl(dev, cmd, arg);
 }
 
+struct fib_count_data {
+	int mlcnt;
+	int llcnt;
+	int ehcnt;
+	int fwcnt;
+	int krlcnt;
+};
+
+static bool fib_count_iter(struct scsi_cmnd *scmnd, void *data)
+{
+	struct fib_count_data *fib_count = data;
+
+	switch (aac_priv(scmnd)->owner) {
+	case AAC_OWNER_FIRMWARE:
+		fib_count->fwcnt++;
+		break;
+	case AAC_OWNER_ERROR_HANDLER:
+		fib_count->ehcnt++;
+		break;
+	case AAC_OWNER_LOWLEVEL:
+		fib_count->llcnt++;
+		break;
+	case AAC_OWNER_MIDLEVEL:
+		fib_count->mlcnt++;
+		break;
+	default:
+		fib_count->krlcnt++;
+		break;
+	}
+	return true;
+}
+
+/* Called during SCSI EH, so we don't need to block requests */
 static int get_num_of_incomplete_fibs(struct aac_dev *aac)
 {
-
-	unsigned long flags;
-	struct scsi_device *sdev = NULL;
 	struct Scsi_Host *shost = aac->scsi_host_ptr;
-	struct scsi_cmnd *scmnd = NULL;
 	struct device *ctrl_dev;
+	struct fib_count_data fcnt = { };
 
-	int mlcnt  = 0;
-	int llcnt  = 0;
-	int ehcnt  = 0;
-	int fwcnt  = 0;
-	int krlcnt = 0;
-
-	__shost_for_each_device(sdev, shost) {
-		spin_lock_irqsave(&sdev->list_lock, flags);
-		list_for_each_entry(scmnd, &sdev->cmd_list, list) {
-			switch (scmnd->SCp.phase) {
-			case AAC_OWNER_FIRMWARE:
-				fwcnt++;
-				break;
-			case AAC_OWNER_ERROR_HANDLER:
-				ehcnt++;
-				break;
-			case AAC_OWNER_LOWLEVEL:
-				llcnt++;
-				break;
-			case AAC_OWNER_MIDLEVEL:
-				mlcnt++;
-				break;
-			default:
-				krlcnt++;
-				break;
-			}
-		}
-		spin_unlock_irqrestore(&sdev->list_lock, flags);
-	}
+	scsi_host_busy_iter(shost, fib_count_iter, &fcnt);
 
 	ctrl_dev = &aac->pdev->dev;
 
-	dev_info(ctrl_dev, "outstanding cmd: midlevel-%d\n", mlcnt);
-	dev_info(ctrl_dev, "outstanding cmd: lowlevel-%d\n", llcnt);
-	dev_info(ctrl_dev, "outstanding cmd: error handler-%d\n", ehcnt);
-	dev_info(ctrl_dev, "outstanding cmd: firmware-%d\n", fwcnt);
-	dev_info(ctrl_dev, "outstanding cmd: kernel-%d\n", krlcnt);
+	dev_info(ctrl_dev, "outstanding cmd: midlevel-%d\n", fcnt.mlcnt);
+	dev_info(ctrl_dev, "outstanding cmd: lowlevel-%d\n", fcnt.llcnt);
+	dev_info(ctrl_dev, "outstanding cmd: error handler-%d\n", fcnt.ehcnt);
+	dev_info(ctrl_dev, "outstanding cmd: firmware-%d\n", fcnt.fwcnt);
+	dev_info(ctrl_dev, "outstanding cmd: kernel-%d\n", fcnt.krlcnt);
 
-	return mlcnt + llcnt + ehcnt + fwcnt;
+	return fcnt.mlcnt + fcnt.llcnt + fcnt.ehcnt + fcnt.fwcnt;
 }
 
 static int aac_eh_abort(struct scsi_cmnd* cmd)
 {
+	struct aac_cmd_priv *cmd_priv = aac_priv(cmd);
 	struct scsi_device * dev = cmd->device;
 	struct Scsi_Host * host = dev->host;
 	struct aac_dev * aac = (struct aac_dev *)host->hostdata;
@@ -731,7 +733,7 @@ static int aac_eh_abort(struct scsi_cmnd* cmd)
 		tmf->error_length = cpu_to_le32(FW_ERROR_BUFFER_SIZE);
 
 		fib->hbacmd_size = sizeof(*tmf);
-		cmd->SCp.sent_command = 0;
+		cmd_priv->sent_command = 0;
 
 		status = aac_hba_send(HBA_IU_TYPE_SCSI_TM_REQ, fib,
 				  (fib_callback) aac_hba_callback,
@@ -743,7 +745,7 @@ static int aac_eh_abort(struct scsi_cmnd* cmd)
 		}
 		/* Wait up to 15 secs for completion */
 		for (count = 0; count < 15; ++count) {
-			if (cmd->SCp.sent_command) {
+			if (cmd_priv->sent_command) {
 				ret = SUCCESS;
 				break;
 			}
@@ -766,6 +768,7 @@ static int aac_eh_abort(struct scsi_cmnd* cmd)
 			    !(aac->raw_io_64) ||
 			    ((cmd->cmnd[1] & 0x1f) != SAI_READ_CAPACITY_16))
 				break;
+			fallthrough;
 		case INQUIRY:
 		case READ_CAPACITY:
 			/*
@@ -782,7 +785,7 @@ static int aac_eh_abort(struct scsi_cmnd* cmd)
 				(fib->callback_data == cmd)) {
 					fib->flags |=
 						FIB_CONTEXT_FLAG_TIMED_OUT;
-					cmd->SCp.phase =
+					cmd_priv->owner =
 						AAC_OWNER_ERROR_HANDLER;
 					ret = SUCCESS;
 				}
@@ -809,7 +812,7 @@ static int aac_eh_abort(struct scsi_cmnd* cmd)
 					(command->device == cmd->device)) {
 					fib->flags |=
 						FIB_CONTEXT_FLAG_TIMED_OUT;
-					command->SCp.phase =
+					aac_priv(command)->owner =
 						AAC_OWNER_ERROR_HANDLER;
 					if (command == cmd)
 						ret = SUCCESS;
@@ -858,15 +861,14 @@ static u8 aac_eh_tmf_hard_reset_fib(struct aac_hba_map_info *info,
 
 	address = (u64)fib->hw_error_pa;
 	rst->error_ptr_hi = cpu_to_le32((u32)(address >> 32));
-	rst->error_ptr_lo = cpu_to_le32
-		((u32)(address & 0xffffffff));
+	rst->error_ptr_lo = cpu_to_le32((u32)(address & 0xffffffff));
 	rst->error_length = cpu_to_le32(FW_ERROR_BUFFER_SIZE);
 	fib->hbacmd_size = sizeof(*rst);
 
-       return HBA_IU_TYPE_SATA_REQ;
+	return HBA_IU_TYPE_SATA_REQ;
 }
 
-void aac_tmf_callback(void *context, struct fib *fibptr)
+static void aac_tmf_callback(void *context, struct fib *fibptr)
 {
 	struct aac_hba_resp *err =
 		&((struct aac_native_hba *)fibptr->hw_fib_va)->resp.err;
@@ -1057,7 +1059,7 @@ static int aac_eh_bus_reset(struct scsi_cmnd* cmd)
 			if (bus >= AAC_MAX_BUSES || cid >= AAC_MAX_TARGETS ||
 			    info->devtype != AAC_DEVTYPE_NATIVE_RAW) {
 				fib->flags |= FIB_CONTEXT_FLAG_EH_RESET;
-				cmd->SCp.phase = AAC_OWNER_ERROR_HANDLER;
+				aac_priv(cmd)->owner = AAC_OWNER_ERROR_HANDLER;
 			}
 		}
 	}
@@ -1080,7 +1082,7 @@ static int aac_eh_bus_reset(struct scsi_cmnd* cmd)
  *	@scsi_cmd:	SCSI command block causing the reset
  *
  */
-int aac_eh_host_reset(struct scsi_cmnd *cmd)
+static int aac_eh_host_reset(struct scsi_cmnd *cmd)
 {
 	struct scsi_device * dev = cmd->device;
 	struct Scsi_Host * host = dev->host;
@@ -1161,7 +1163,6 @@ static int aac_cfg_open(struct inode *inode, struct file *file)
 
 /**
  *	aac_cfg_ioctl		-	AAC configuration request
- *	@inode: inode of device
  *	@file: file handle
  *	@cmd: ioctl command code
  *	@arg: argument
@@ -1183,62 +1184,6 @@ static long aac_cfg_ioctl(struct file *file,
 
 	return aac_do_ioctl(aac, cmd, (void __user *)arg);
 }
-
-#ifdef CONFIG_COMPAT
-static long aac_compat_do_ioctl(struct aac_dev *dev, unsigned cmd, unsigned long arg)
-{
-	long ret;
-	switch (cmd) {
-	case FSACTL_MINIPORT_REV_CHECK:
-	case FSACTL_SENDFIB:
-	case FSACTL_OPEN_GET_ADAPTER_FIB:
-	case FSACTL_CLOSE_GET_ADAPTER_FIB:
-	case FSACTL_SEND_RAW_SRB:
-	case FSACTL_GET_PCI_INFO:
-	case FSACTL_QUERY_DISK:
-	case FSACTL_DELETE_DISK:
-	case FSACTL_FORCE_DELETE_DISK:
-	case FSACTL_GET_CONTAINERS:
-	case FSACTL_SEND_LARGE_FIB:
-		ret = aac_do_ioctl(dev, cmd, (void __user *)arg);
-		break;
-
-	case FSACTL_GET_NEXT_ADAPTER_FIB: {
-		struct fib_ioctl __user *f;
-
-		f = compat_alloc_user_space(sizeof(*f));
-		ret = 0;
-		if (clear_user(f, sizeof(*f)))
-			ret = -EFAULT;
-		if (copy_in_user(f, (void __user *)arg, sizeof(struct fib_ioctl) - sizeof(u32)))
-			ret = -EFAULT;
-		if (!ret)
-			ret = aac_do_ioctl(dev, cmd, f);
-		break;
-	}
-
-	default:
-		ret = -ENOIOCTLCMD;
-		break;
-	}
-	return ret;
-}
-
-static int aac_compat_ioctl(struct scsi_device *sdev, int cmd, void __user *arg)
-{
-	struct aac_dev *dev = (struct aac_dev *)sdev->host->hostdata;
-	if (!capable(CAP_SYS_RAWIO))
-		return -EPERM;
-	return aac_compat_do_ioctl(dev, cmd, (unsigned long)arg);
-}
-
-static long aac_compat_cfg_ioctl(struct file *file, unsigned cmd, unsigned long arg)
-{
-	if (!capable(CAP_SYS_RAWIO))
-		return -EPERM;
-	return aac_compat_do_ioctl(file->private_data, cmd, arg);
-}
-#endif
 
 static ssize_t aac_show_model(struct device *device,
 			      struct device_attribute *attr, char *buf)
@@ -1289,20 +1234,21 @@ static ssize_t aac_show_flags(struct device *cdev,
 	if (nblank(dprintk(x)))
 		len = snprintf(buf, PAGE_SIZE, "dprintk\n");
 #ifdef AAC_DETAILED_STATUS_INFO
-	len += snprintf(buf + len, PAGE_SIZE - len,
-			"AAC_DETAILED_STATUS_INFO\n");
+	len += scnprintf(buf + len, PAGE_SIZE - len,
+			 "AAC_DETAILED_STATUS_INFO\n");
 #endif
 	if (dev->raw_io_interface && dev->raw_io_64)
-		len += snprintf(buf + len, PAGE_SIZE - len,
-				"SAI_READ_CAPACITY_16\n");
+		len += scnprintf(buf + len, PAGE_SIZE - len,
+				 "SAI_READ_CAPACITY_16\n");
 	if (dev->jbod)
-		len += snprintf(buf + len, PAGE_SIZE - len, "SUPPORTED_JBOD\n");
+		len += scnprintf(buf + len, PAGE_SIZE - len,
+				 "SUPPORTED_JBOD\n");
 	if (dev->supplement_adapter_info.supported_options2 &
 		AAC_OPTION_POWER_MANAGEMENT)
-		len += snprintf(buf + len, PAGE_SIZE - len,
-				"SUPPORTED_POWER_MANAGEMENT\n");
+		len += scnprintf(buf + len, PAGE_SIZE - len,
+				 "SUPPORTED_POWER_MANAGEMENT\n");
 	if (dev->msi)
-		len += snprintf(buf + len, PAGE_SIZE - len, "PCI_HAS_MSI\n");
+		len += scnprintf(buf + len, PAGE_SIZE - len, "PCI_HAS_MSI\n");
 	return len;
 }
 
@@ -1499,20 +1445,22 @@ static struct device_attribute aac_reset = {
 	.show = aac_show_reset_adapter,
 };
 
-static struct device_attribute *aac_attrs[] = {
-	&aac_model,
-	&aac_vendor,
-	&aac_flags,
-	&aac_kernel_version,
-	&aac_monitor_version,
-	&aac_bios_version,
-	&aac_lld_version,
-	&aac_serial_number,
-	&aac_max_channel,
-	&aac_max_id,
-	&aac_reset,
+static struct attribute *aac_host_attrs[] = {
+	&aac_model.attr,
+	&aac_vendor.attr,
+	&aac_flags.attr,
+	&aac_kernel_version.attr,
+	&aac_monitor_version.attr,
+	&aac_bios_version.attr,
+	&aac_lld_version.attr,
+	&aac_serial_number.attr,
+	&aac_max_channel.attr,
+	&aac_max_id.attr,
+	&aac_reset.attr,
 	NULL
 };
+
+ATTRIBUTE_GROUPS(aac_host);
 
 ssize_t aac_get_serial_number(struct device *device, char *buf)
 {
@@ -1523,27 +1471,27 @@ static const struct file_operations aac_cfg_fops = {
 	.owner		= THIS_MODULE,
 	.unlocked_ioctl	= aac_cfg_ioctl,
 #ifdef CONFIG_COMPAT
-	.compat_ioctl   = aac_compat_cfg_ioctl,
+	.compat_ioctl   = aac_cfg_ioctl,
 #endif
 	.open		= aac_cfg_open,
 	.llseek		= noop_llseek,
 };
 
-static struct scsi_host_template aac_driver_template = {
+static const struct scsi_host_template aac_driver_template = {
 	.module				= THIS_MODULE,
 	.name				= "AAC",
 	.proc_name			= AAC_DRIVERNAME,
 	.info				= aac_info,
 	.ioctl				= aac_ioctl,
 #ifdef CONFIG_COMPAT
-	.compat_ioctl			= aac_compat_ioctl,
+	.compat_ioctl			= aac_ioctl,
 #endif
 	.queuecommand			= aac_queuecommand,
 	.bios_param			= aac_biosparm,
-	.shost_attrs			= aac_attrs,
-	.slave_configure		= aac_slave_configure,
+	.shost_groups			= aac_host_groups,
+	.sdev_configure			= aac_sdev_configure,
 	.change_queue_depth		= aac_change_queue_depth,
-	.sdev_attrs			= aac_dev_attrs,
+	.sdev_groups			= aac_dev_groups,
 	.eh_abort_handler		= aac_eh_abort,
 	.eh_device_reset_handler	= aac_eh_dev_reset,
 	.eh_target_reset_handler	= aac_eh_target_reset,
@@ -1558,9 +1506,9 @@ static struct scsi_host_template aac_driver_template = {
 #else
 	.cmd_per_lun			= AAC_NUM_IO_FIB,
 #endif
-	.use_clustering			= ENABLE_CLUSTERING,
 	.emulated			= 1,
 	.no_write_same			= 1,
+	.cmd_size			= sizeof(struct aac_cmd_priv),
 };
 
 static void __aac_shutdown(struct aac_dev * aac)
@@ -1578,7 +1526,7 @@ static void __aac_shutdown(struct aac_dev * aac)
 			struct fib *fib = &aac->fibs[i];
 			if (!(fib->hw_fib_va->header.XferState & cpu_to_le32(NoResponseExpected | Async)) &&
 			    (fib->hw_fib_va->header.XferState & cpu_to_le32(ResponseExpected)))
-				up(&fib->event_wait);
+				complete(&fib->event_wait);
 		}
 		kthread_stop(aac->thread);
 		aac->thread = NULL;
@@ -1614,6 +1562,19 @@ static void aac_init_char(void)
 	}
 }
 
+void aac_reinit_aif(struct aac_dev *aac, unsigned int index)
+{
+	/*
+	 * Firmware may send a AIF messages very early and the Driver may have
+	 * ignored as it is not fully ready to process the messages. Send
+	 * AIF to firmware so that if there are any unprocessed events they
+	 * can be processed now.
+	 */
+	if (aac_drivers[index].quirks & AAC_QUIRK_SRC)
+		aac_intr_normal(aac, 0, 2, 0, NULL);
+
+}
+
 static int aac_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	unsigned index = id->driver_data;
@@ -1647,7 +1608,7 @@ static int aac_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto out;
 
 	if (!(aac_drivers[index].quirks & AAC_QUIRK_SRC)) {
-		error = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
+		error = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
 		if (error) {
 			dev_err(&pdev->dev, "PCI 32 BIT dma mask set failed");
 			goto out_disable_pdev;
@@ -1666,7 +1627,7 @@ static int aac_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
 		mask_bits = 32;
 	}
 
-	error = pci_set_consistent_dma_mask(pdev, dmamask);
+	error = dma_set_coherent_mask(&pdev->dev, dmamask);
 	if (error) {
 		dev_err(&pdev->dev, "PCI %d B consistent dma mask set failed\n"
 				, mask_bits);
@@ -1684,7 +1645,6 @@ static int aac_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
 	shost->irq = pdev->irq;
 	shost->unique_id = unique_id;
 	shost->max_cmd_len = 16;
-	shost->use_cmd_list = 1;
 
 	if (aac_cfg_major == AAC_CHARDEV_NEEDS_REINIT)
 		aac_init_char();
@@ -1715,6 +1675,8 @@ static int aac_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
 	mutex_init(&aac->scan_mutex);
 
 	INIT_DELAYED_WORK(&aac->safw_rescan_work, aac_safw_rescan_worker);
+	INIT_DELAYED_WORK(&aac->src_reinit_aif_worker,
+				aac_src_reinit_aif_worker);
 	/*
 	 *	Map in the registers from the adapter.
 	 */
@@ -1770,11 +1732,10 @@ static int aac_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
 		shost->max_sectors = (shost->sg_tablesize * 8) + 112;
 	}
 
-	error = pci_set_dma_max_seg_size(pdev,
-		(aac->adapter_info.options & AAC_OPT_NEW_COMM) ?
-			(shost->max_sectors << 9) : 65536);
-	if (error)
-		goto out_deinit;
+	if (aac->adapter_info.options & AAC_OPT_NEW_COMM)
+		shost->max_segment_size = shost->max_sectors << 9;
+	else
+		shost->max_segment_size = 65536;
 
 	/*
 	 * Firmware printf works only with older firmware.
@@ -1823,7 +1784,6 @@ static int aac_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	aac_scan_host(aac);
 
-	pci_enable_pcie_error_reporting(pdev);
 	pci_save_state(pdev);
 
 	return 0;
@@ -1898,42 +1858,25 @@ error_iounmap:
 
 }
 
-#if (defined(CONFIG_PM))
-static int aac_suspend(struct pci_dev *pdev, pm_message_t state)
+static int __maybe_unused aac_suspend(struct device *dev)
 {
-
-	struct Scsi_Host *shost = pci_get_drvdata(pdev);
+	struct Scsi_Host *shost = dev_get_drvdata(dev);
 	struct aac_dev *aac = (struct aac_dev *)shost->hostdata;
 
-	scsi_block_requests(shost);
-	aac_cancel_safw_rescan_worker(aac);
+	scsi_host_block(shost);
+	aac_cancel_rescan_worker(aac);
 	aac_send_shutdown(aac);
 
 	aac_release_resources(aac);
 
-	pci_set_drvdata(pdev, shost);
-	pci_save_state(pdev);
-	pci_disable_device(pdev);
-	pci_set_power_state(pdev, pci_choose_state(pdev, state));
-
 	return 0;
 }
 
-static int aac_resume(struct pci_dev *pdev)
+static int __maybe_unused aac_resume(struct device *dev)
 {
-	struct Scsi_Host *shost = pci_get_drvdata(pdev);
+	struct Scsi_Host *shost = dev_get_drvdata(dev);
 	struct aac_dev *aac = (struct aac_dev *)shost->hostdata;
-	int r;
 
-	pci_set_power_state(pdev, PCI_D0);
-	pci_enable_wake(pdev, PCI_D0, 0);
-	pci_restore_state(pdev);
-	r = pci_enable_device(pdev);
-
-	if (r)
-		goto fail_device;
-
-	pci_set_master(pdev);
 	if (aac_acquire_resources(aac))
 		goto fail_device;
 	/*
@@ -1941,22 +1884,21 @@ static int aac_resume(struct pci_dev *pdev)
 	* aac_send_shutdown() to block ioctls from upperlayer
 	*/
 	aac->adapter_shutdown = 0;
-	scsi_unblock_requests(shost);
+	scsi_host_unblock(shost, SDEV_RUNNING);
 
 	return 0;
 
 fail_device:
 	printk(KERN_INFO "%s%d: resume failed.\n", aac->name, aac->id);
 	scsi_host_put(shost);
-	pci_disable_device(pdev);
 	return -ENODEV;
 }
-#endif
 
 static void aac_shutdown(struct pci_dev *dev)
 {
 	struct Scsi_Host *shost = pci_get_drvdata(dev);
-	scsi_block_requests(shost);
+
+	scsi_host_block(shost);
 	__aac_shutdown((struct aac_dev *)shost->hostdata);
 }
 
@@ -1965,7 +1907,7 @@ static void aac_remove_one(struct pci_dev *pdev)
 	struct Scsi_Host *shost = pci_get_drvdata(pdev);
 	struct aac_dev *aac = (struct aac_dev *)shost->hostdata;
 
-	aac_cancel_safw_rescan_worker(aac);
+	aac_cancel_rescan_worker(aac);
 	scsi_remove_host(shost);
 
 	__aac_shutdown(aac);
@@ -1988,28 +1930,8 @@ static void aac_remove_one(struct pci_dev *pdev)
 	}
 }
 
-static void aac_flush_ios(struct aac_dev *aac)
-{
-	int i;
-	struct scsi_cmnd *cmd;
-
-	for (i = 0; i < aac->scsi_host_ptr->can_queue; i++) {
-		cmd = (struct scsi_cmnd *)aac->fibs[i].callback_data;
-		if (cmd && (cmd->SCp.phase == AAC_OWNER_FIRMWARE)) {
-			scsi_dma_unmap(cmd);
-
-			if (aac->handle_pci_error)
-				cmd->result = DID_NO_CONNECT << 16;
-			else
-				cmd->result = DID_RESET << 16;
-
-			cmd->scsi_done(cmd);
-		}
-	}
-}
-
 static pci_ers_result_t aac_pci_error_detected(struct pci_dev *pdev,
-					enum pci_channel_state error)
+					pci_channel_state_t error)
 {
 	struct Scsi_Host *shost = pci_get_drvdata(pdev);
 	struct aac_dev *aac = shost_priv(shost);
@@ -2022,19 +1944,18 @@ static pci_ers_result_t aac_pci_error_detected(struct pci_dev *pdev,
 	case pci_channel_io_frozen:
 		aac->handle_pci_error = 1;
 
-		scsi_block_requests(aac->scsi_host_ptr);
-		aac_cancel_safw_rescan_worker(aac);
-		aac_flush_ios(aac);
+		scsi_host_block(shost);
+		aac_cancel_rescan_worker(aac);
+		scsi_host_complete_all_commands(shost, DID_NO_CONNECT);
 		aac_release_resources(aac);
 
-		pci_disable_pcie_error_reporting(pdev);
 		aac_adapter_ioremap(aac, 0);
 
 		return PCI_ERS_RESULT_NEED_RESET;
 	case pci_channel_io_perm_failure:
 		aac->handle_pci_error = 1;
 
-		aac_flush_ios(aac);
+		scsi_host_complete_all_commands(shost, DID_NO_CONNECT);
 		return PCI_ERS_RESULT_DISCONNECT;
 	}
 
@@ -2075,10 +1996,7 @@ fail_device:
 static void aac_pci_resume(struct pci_dev *pdev)
 {
 	struct Scsi_Host *shost = pci_get_drvdata(pdev);
-	struct scsi_device *sdev = NULL;
 	struct aac_dev *aac = (struct aac_dev *)shost_priv(shost);
-
-	pci_cleanup_aer_uncorrect_error_status(pdev);
 
 	if (aac_adapter_ioremap(aac, aac->base_size)) {
 
@@ -2104,32 +2022,28 @@ static void aac_pci_resume(struct pci_dev *pdev)
 	aac->adapter_shutdown = 0;
 	aac->handle_pci_error = 0;
 
-	shost_for_each_device(sdev, shost)
-		if (sdev->sdev_state == SDEV_OFFLINE)
-			sdev->sdev_state = SDEV_RUNNING;
-	scsi_unblock_requests(aac->scsi_host_ptr);
+	scsi_host_unblock(shost, SDEV_RUNNING);
 	aac_scan_host(aac);
 	pci_save_state(pdev);
 
 	dev_err(&pdev->dev, "aacraid: PCI error - resume\n");
 }
 
-static struct pci_error_handlers aac_pci_err_handler = {
+static const struct pci_error_handlers aac_pci_err_handler = {
 	.error_detected		= aac_pci_error_detected,
 	.mmio_enabled		= aac_pci_mmio_enabled,
 	.slot_reset		= aac_pci_slot_reset,
 	.resume			= aac_pci_resume,
 };
 
+static SIMPLE_DEV_PM_OPS(aac_pm_ops, aac_suspend, aac_resume);
+
 static struct pci_driver aac_pci_driver = {
 	.name		= AAC_DRIVERNAME,
 	.id_table	= aac_pci_tbl,
 	.probe		= aac_probe_one,
 	.remove		= aac_remove_one,
-#if (defined(CONFIG_PM))
-	.suspend	= aac_suspend,
-	.resume		= aac_resume,
-#endif
+	.driver.pm      = &aac_pm_ops,
 	.shutdown	= aac_shutdown,
 	.err_handler    = &aac_pci_err_handler,
 };

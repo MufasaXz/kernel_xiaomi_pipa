@@ -1,17 +1,19 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (c) 2016-2018, The Linux Foundation. All rights reserved. */
+/*
+ * Copyright (c) 2016-2018, 2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2024, Qualcomm Innovation Center, Inc. All rights reserved.
+ */
 
+#include <linux/bitfield.h>
+#include <linux/debugfs.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
-#include <linux/of_platform.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
-#include <linux/types.h>
-#include <linux/debugfs.h>
-#include <linux/fs.h>
 #include <linux/seq_file.h>
+#include <linux/types.h>
 
 #include <soc/qcom/cmd-db.h>
 
@@ -19,7 +21,8 @@
 #define MAX_SLV_ID		8
 #define SLAVE_ID_MASK		0x7
 #define SLAVE_ID_SHIFT		16
-#define CMD_DB_STANDALONE_MASK BIT(0)
+#define SLAVE_ID(addr)		FIELD_GET(GENMASK(19, 16), addr)
+#define VRM_ADDR(addr)		FIELD_GET(GENMASK(19, 4), addr)
 
 /**
  * struct entry_header: header for each entry in cmddb
@@ -106,8 +109,7 @@ static bool cmd_db_magic_matches(const struct cmd_db_header *header)
 
 static struct cmd_db_header *cmd_db_header;
 
-
-static inline void *rsc_to_entry_header(struct rsc_hdr *hdr)
+static inline const void *rsc_to_entry_header(const struct rsc_hdr *hdr)
 {
 	u16 offset = le16_to_cpu(hdr->header_offset);
 
@@ -115,7 +117,7 @@ static inline void *rsc_to_entry_header(struct rsc_hdr *hdr)
 }
 
 static inline void *
-rsc_offset(struct rsc_hdr *hdr, struct entry_header *ent)
+rsc_offset(const struct rsc_hdr *hdr, const struct entry_header *ent)
 {
 	u16 offset = le16_to_cpu(hdr->data_offset);
 	u16 loffset = le16_to_cpu(ent->offset);
@@ -137,25 +139,21 @@ int cmd_db_ready(void)
 
 	return 0;
 }
-EXPORT_SYMBOL(cmd_db_ready);
+EXPORT_SYMBOL_GPL(cmd_db_ready);
 
-static int cmd_db_get_header(const char *id, struct entry_header *eh,
-			     struct rsc_hdr *rh)
+static int cmd_db_get_header(const char *id, const struct entry_header **eh,
+			     const struct rsc_hdr **rh)
 {
-	struct rsc_hdr *rsc_hdr;
-	struct entry_header *ent;
+	const struct rsc_hdr *rsc_hdr;
+	const struct entry_header *ent;
 	int ret, i, j;
-	u8 query[8];
+	u8 query[sizeof(ent->id)] __nonstring;
 
 	ret = cmd_db_ready();
 	if (ret)
 		return ret;
 
-	if (!eh || !rh)
-		return -EINVAL;
-
-	/* Pad out query string to same length as in DB */
-	strncpy(query, id, sizeof(query));
+	strtomem_pad(query, id, 0);
 
 	for (i = 0; i < MAX_SLV_ID; i++) {
 		rsc_hdr = &cmd_db_header->header[i];
@@ -164,14 +162,13 @@ static int cmd_db_get_header(const char *id, struct entry_header *eh,
 
 		ent = rsc_to_entry_header(rsc_hdr);
 		for (j = 0; j < le16_to_cpu(rsc_hdr->cnt); j++, ent++) {
-			if (memcmp(ent->id, query, sizeof(ent->id)) == 0)
-				break;
-		}
-
-		if (j < le16_to_cpu(rsc_hdr->cnt)) {
-			memcpy(eh, ent, sizeof(*ent));
-			memcpy(rh, rsc_hdr, sizeof(*rh));
-			return 0;
+			if (memcmp(ent->id, query, sizeof(ent->id)) == 0) {
+				if (eh)
+					*eh = ent;
+				if (rh)
+					*rh = rsc_hdr;
+				return 0;
+			}
 		}
 	}
 
@@ -191,67 +188,62 @@ static int cmd_db_get_header(const char *id, struct entry_header *eh,
 u32 cmd_db_read_addr(const char *id)
 {
 	int ret;
-	struct entry_header ent;
-	struct rsc_hdr rsc_hdr;
+	const struct entry_header *ent;
 
-	ret = cmd_db_get_header(id, &ent, &rsc_hdr);
+	ret = cmd_db_get_header(id, &ent, NULL);
 
-	return ret < 0 ? 0 : le32_to_cpu(ent.addr);
+	return ret < 0 ? 0 : le32_to_cpu(ent->addr);
 }
-EXPORT_SYMBOL(cmd_db_read_addr);
+EXPORT_SYMBOL_GPL(cmd_db_read_addr);
 
 /**
  * cmd_db_read_aux_data() - Query command db for aux data.
  *
- *  @id: Resource to retrieve AUX Data on.
- *  @data: Data buffer to copy returned aux data to. Returns size on NULL
- *  @len: Caller provides size of data buffer passed in.
+ *  @id: Resource to retrieve AUX Data on
+ *  @len: size of data buffer returned
  *
- *  Return: size of data on success, errno otherwise
+ *  Return: pointer to data on success, error pointer otherwise
  */
-int cmd_db_read_aux_data(const char *id, u8 *data, size_t len)
+const void *cmd_db_read_aux_data(const char *id, size_t *len)
 {
 	int ret;
-	struct entry_header ent;
-	struct rsc_hdr rsc_hdr;
-	u16 ent_len;
-
-	if (!data)
-		return -EINVAL;
+	const struct entry_header *ent;
+	const struct rsc_hdr *rsc_hdr;
 
 	ret = cmd_db_get_header(id, &ent, &rsc_hdr);
 	if (ret)
-		return ret;
+		return ERR_PTR(ret);
 
-	ent_len = le16_to_cpu(ent.len);
-	if (len < ent_len)
-		return -EINVAL;
+	if (len)
+		*len = le16_to_cpu(ent->len);
 
-	len = min_t(u16, ent_len, len);
-	memcpy(data, rsc_offset(&rsc_hdr, &ent), len);
-
-	return len;
+	return rsc_offset(rsc_hdr, ent);
 }
-EXPORT_SYMBOL(cmd_db_read_aux_data);
+EXPORT_SYMBOL_GPL(cmd_db_read_aux_data);
 
 /**
- * cmd_db_read_aux_data_len - Get the length of the auxiliary data stored in DB.
+ * cmd_db_match_resource_addr() - Compare if both Resource addresses are same
  *
- * @id: Resource to retrieve AUX Data.
+ * @addr1: Resource address to compare
+ * @addr2: Resource address to compare
  *
- * Return: size on success, 0 on error
+ * Return: true if two addresses refer to the same resource, false otherwise
  */
-size_t cmd_db_read_aux_data_len(const char *id)
+bool cmd_db_match_resource_addr(u32 addr1, u32 addr2)
 {
-	int ret;
-	struct entry_header ent;
-	struct rsc_hdr rsc_hdr;
+	/*
+	 * Each RPMh VRM accelerator resource has 3 or 4 contiguous 4-byte
+	 * aligned addresses associated with it. Ignore the offset to check
+	 * for VRM requests.
+	 */
+	if (addr1 == addr2)
+		return true;
+	else if (SLAVE_ID(addr1) == CMD_DB_HW_VRM && VRM_ADDR(addr1) == VRM_ADDR(addr2))
+		return true;
 
-	ret = cmd_db_get_header(id, &ent, &rsc_hdr);
-
-	return ret < 0 ? 0 : le16_to_cpu(ent.len);
+	return false;
 }
-EXPORT_SYMBOL(cmd_db_read_aux_data_len);
+EXPORT_SYMBOL_GPL(cmd_db_match_resource_addr);
 
 /**
  * cmd_db_read_slave_id - Get the slave ID for a given resource address
@@ -263,129 +255,87 @@ EXPORT_SYMBOL(cmd_db_read_aux_data_len);
 enum cmd_db_hw_type cmd_db_read_slave_id(const char *id)
 {
 	int ret;
-	struct entry_header ent;
-	struct rsc_hdr rsc_hdr;
+	const struct entry_header *ent;
 	u32 addr;
 
-	ret = cmd_db_get_header(id, &ent, &rsc_hdr);
+	ret = cmd_db_get_header(id, &ent, NULL);
 	if (ret < 0)
 		return CMD_DB_HW_INVALID;
 
-	addr = le32_to_cpu(ent.addr);
+	addr = le32_to_cpu(ent->addr);
 	return (addr >> SLAVE_ID_SHIFT) & SLAVE_ID_MASK;
 }
-EXPORT_SYMBOL(cmd_db_read_slave_id);
+EXPORT_SYMBOL_GPL(cmd_db_read_slave_id);
 
-int cmd_db_is_standalone(void)
+#ifdef CONFIG_DEBUG_FS
+static int cmd_db_debugfs_dump(struct seq_file *seq, void *p)
 {
-	int ret = cmd_db_ready();
+	int i, j;
+	const struct rsc_hdr *rsc;
+	const struct entry_header *ent;
+	const char *name;
+	u16 len, version;
+	u8 major, minor;
 
-	if (!ret)
-		return !!(cmd_db_header->reserved & CMD_DB_STANDALONE_MASK);
+	seq_puts(seq, "Command DB DUMP\n");
 
-	return ret;
-}
-EXPORT_SYMBOL(cmd_db_is_standalone);
-
-static void *cmd_db_start(struct seq_file *m, loff_t *pos)
-{
-	int slv_idx, ent_idx, cnt;
-	struct entry_header *ent;
-	int total = 0;
-
-	for (slv_idx = 0; slv_idx < MAX_SLV_ID; slv_idx++) {
-		cnt = le16_to_cpu(cmd_db_header->header[slv_idx].cnt);
-		if (!cnt)
-			continue;
-		ent_idx = *pos - total;
-		if (ent_idx < cnt)
+	for (i = 0; i < MAX_SLV_ID; i++) {
+		rsc = &cmd_db_header->header[i];
+		if (!rsc->slv_id)
 			break;
-		total += cnt;
-	}
 
-	if (slv_idx == MAX_SLV_ID)
-		return NULL;
-
-	ent = (void *)cmd_db_header->data +
-	      le16_to_cpu(cmd_db_header->header[slv_idx].header_offset);
-
-	return &ent[ent_idx];
-}
-
-static void cmd_db_stop(struct seq_file *m, void *v)
-{
-}
-
-static void *cmd_db_next(struct seq_file *m, void *v, loff_t *pos)
-{
-	(*pos)++;
-	return cmd_db_start(m, pos);
-}
-
-static int cmd_db_seq_show(struct seq_file *m, void *v)
-{
-	struct entry_header *eh = v;
-	char buf[9] = {0};
-	int eh_addr, eh_len, eh_offset;
-
-	if (!eh)
-		return 0;
-
-	memcpy(buf, &eh->id, sizeof(eh->id));
-	eh_addr = le32_to_cpu(eh->addr);
-	eh_len = le16_to_cpu(eh->len);
-	eh_offset = le16_to_cpu(eh->offset);
-	seq_printf(m, "Address: 0x%05x, id: %s", eh_addr, buf);
-
-	if (eh_len) {
-		int slv_id = (eh_addr >> SLAVE_ID_SHIFT) & SLAVE_ID_MASK;
-		u8 aux[32] = {0};
-		int len, offset;
-		int k;
-
-		len = min_t(u32, eh_len, sizeof(aux));
-		for (k = 0; k < MAX_SLV_ID; k++) {
-			struct rsc_hdr *hdr  = &cmd_db_header->header[k];
-
-			if (le16_to_cpu(hdr->slv_id) == slv_id)
-				break;
+		switch (le16_to_cpu(rsc->slv_id)) {
+		case CMD_DB_HW_ARC:
+			name = "ARC";
+			break;
+		case CMD_DB_HW_VRM:
+			name = "VRM";
+			break;
+		case CMD_DB_HW_BCM:
+			name = "BCM";
+			break;
+		default:
+			name = "Unknown";
+			break;
 		}
 
-		if (k == MAX_SLV_ID)
-			return -EINVAL;
+		version = le16_to_cpu(rsc->version);
+		major = version >> 8;
+		minor = version;
 
-		offset = le16_to_cpu(cmd_db_header->header[k].data_offset);
-		memcpy(aux, cmd_db_header->data + offset + eh_offset, len);
+		seq_printf(seq, "Slave %s (v%u.%u)\n", name, major, minor);
+		seq_puts(seq, "-------------------------\n");
 
-		seq_puts(m, ", aux data: ");
+		ent = rsc_to_entry_header(rsc);
+		for (j = 0; j < le16_to_cpu(rsc->cnt); j++, ent++) {
+			seq_printf(seq, "0x%05x: %*pEp", le32_to_cpu(ent->addr),
+				   (int)strnlen(ent->id, sizeof(ent->id)), ent->id);
 
-		for (k = 0; k < len; k++)
-			seq_printf(m, "%02x ", aux[k]);
-
+			len = le16_to_cpu(ent->len);
+			if (len) {
+				seq_printf(seq, " [%*ph]",
+					   len, rsc_offset(rsc, ent));
+			}
+			seq_putc(seq, '\n');
+		}
 	}
-	seq_puts(m, "\n");
 
 	return 0;
 }
 
-static const struct seq_operations cmd_db_seq_ops = {
-	.start = cmd_db_start,
-	.stop = cmd_db_stop,
-	.next = cmd_db_next,
-	.show = cmd_db_seq_show,
-};
-
-static int cmd_db_file_open(struct inode *inode, struct file *file)
+static int open_cmd_db_debugfs(struct inode *inode, struct file *file)
 {
-	return seq_open(file, &cmd_db_seq_ops);
+	return single_open(file, cmd_db_debugfs_dump, inode->i_private);
 }
+#endif
 
-static const struct file_operations cmd_db_fops = {
-	.owner = THIS_MODULE,
-	.open = cmd_db_file_open,
+static const struct file_operations cmd_db_debugfs_ops = {
+#ifdef CONFIG_DEBUG_FS
+	.open = open_cmd_db_debugfs,
+#endif
 	.read = seq_read,
-	.release = seq_release,
-	.llseek = no_llseek,
+	.llseek = seq_lseek,
+	.release = single_release,
 };
 
 static int cmd_db_dev_probe(struct platform_device *pdev)
@@ -399,37 +349,38 @@ static int cmd_db_dev_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	cmd_db_header = memremap(rmem->base, rmem->size, MEMREMAP_WB);
-	if (!cmd_db_header) {
-		ret = -ENOMEM;
+	cmd_db_header = devm_memremap(&pdev->dev, rmem->base, rmem->size, MEMREMAP_WC);
+	if (IS_ERR(cmd_db_header)) {
+		ret = PTR_ERR(cmd_db_header);
 		cmd_db_header = NULL;
 		return ret;
 	}
 
 	if (!cmd_db_magic_matches(cmd_db_header)) {
 		dev_err(&pdev->dev, "Invalid Command DB Magic\n");
+		cmd_db_header = NULL;
 		return -EINVAL;
 	}
 
-	if (cmd_db_is_standalone() == 1)
-		pr_info("Command DB is initialized in standalone mode.\n");
+	debugfs_create_file("cmd-db", 0400, NULL, NULL, &cmd_db_debugfs_ops);
 
-	if (!debugfs_create_file("cmd_db", 0444, NULL, NULL, &cmd_db_fops))
-		pr_err("Couldn't create debugfs\n");
+	device_set_pm_not_required(&pdev->dev);
 
 	return 0;
 }
 
 static const struct of_device_id cmd_db_match_table[] = {
 	{ .compatible = "qcom,cmd-db" },
-	{ },
+	{ }
 };
+MODULE_DEVICE_TABLE(of, cmd_db_match_table);
 
 static struct platform_driver cmd_db_dev_driver = {
 	.probe  = cmd_db_dev_probe,
 	.driver = {
 		   .name = "cmd-db",
 		   .of_match_table = cmd_db_match_table,
+		   .suppress_bind_attrs = true,
 	},
 };
 
@@ -437,6 +388,7 @@ static int __init cmd_db_device_init(void)
 {
 	return platform_driver_register(&cmd_db_dev_driver);
 }
-arch_initcall(cmd_db_device_init);
-MODULE_DESCRIPTION("Qualcomm Command DB");
+core_initcall(cmd_db_device_init);
+
+MODULE_DESCRIPTION("Qualcomm Technologies, Inc. Command DB Driver");
 MODULE_LICENSE("GPL v2");

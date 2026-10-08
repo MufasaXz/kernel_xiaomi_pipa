@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2016 Anders K. Pedersen <akp@cohaesio.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
@@ -53,9 +50,9 @@ static u16 get_tcpmss(const struct nft_pktinfo *pkt, const struct dst_entry *skb
 	return mtu - minlen;
 }
 
-static void nft_rt_get_eval(const struct nft_expr *expr,
-			    struct nft_regs *regs,
-			    const struct nft_pktinfo *pkt)
+void nft_rt_get_eval(const struct nft_expr *expr,
+		     struct nft_regs *regs,
+		     const struct nft_pktinfo *pkt)
 {
 	const struct nft_rt *priv = nft_expr_priv(expr);
 	const struct sk_buff *skb = pkt->skb;
@@ -76,20 +73,25 @@ static void nft_rt_get_eval(const struct nft_expr *expr,
 		if (nft_pf(pkt) != NFPROTO_IPV4)
 			goto err;
 
-		*dest = (__force u32)rt_nexthop((const struct rtable *)dst,
+		*dest = (__force u32)rt_nexthop(dst_rtable(dst),
 						ip_hdr(skb)->daddr);
 		break;
 	case NFT_RT_NEXTHOP6:
 		if (nft_pf(pkt) != NFPROTO_IPV6)
 			goto err;
 
-		memcpy(dest, rt6_nexthop((struct rt6_info *)dst,
+		memcpy(dest, rt6_nexthop(dst_rt6_info(dst),
 					 &ipv6_hdr(skb)->daddr),
 		       sizeof(struct in6_addr));
 		break;
 	case NFT_RT_TCPMSS:
 		nft_reg_store16(dest, get_tcpmss(pkt, dst));
 		break;
+#ifdef CONFIG_XFRM
+	case NFT_RT_XFRM:
+		nft_reg_store8(dest, !!dst->xfrm);
+		break;
+#endif
 	default:
 		WARN_ON(1);
 		goto err;
@@ -102,7 +104,7 @@ err:
 
 static const struct nla_policy nft_rt_policy[NFTA_RT_MAX + 1] = {
 	[NFTA_RT_DREG]		= { .type = NLA_U32 },
-	[NFTA_RT_KEY]		= { .type = NLA_U32 },
+	[NFTA_RT_KEY]		= NLA_POLICY_MAX(NLA_BE32, 255),
 };
 
 static int nft_rt_get_init(const struct nft_ctx *ctx,
@@ -130,6 +132,11 @@ static int nft_rt_get_init(const struct nft_ctx *ctx,
 	case NFT_RT_TCPMSS:
 		len = sizeof(u16);
 		break;
+#ifdef CONFIG_XFRM
+	case NFT_RT_XFRM:
+		len = sizeof(u8);
+		break;
+#endif
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -139,7 +146,7 @@ static int nft_rt_get_init(const struct nft_ctx *ctx,
 }
 
 static int nft_rt_get_dump(struct sk_buff *skb,
-			   const struct nft_expr *expr)
+			   const struct nft_expr *expr, bool reset)
 {
 	const struct nft_rt *priv = nft_expr_priv(expr);
 
@@ -153,8 +160,7 @@ nla_put_failure:
 	return -1;
 }
 
-static int nft_rt_validate(const struct nft_ctx *ctx, const struct nft_expr *expr,
-			   const struct nft_data **data)
+static int nft_rt_validate(const struct nft_ctx *ctx, const struct nft_expr *expr)
 {
 	const struct nft_rt *priv = nft_expr_priv(expr);
 	unsigned int hooks;
@@ -168,6 +174,7 @@ static int nft_rt_validate(const struct nft_ctx *ctx, const struct nft_expr *exp
 	case NFT_RT_NEXTHOP4:
 	case NFT_RT_NEXTHOP6:
 	case NFT_RT_CLASSID:
+	case NFT_RT_XFRM:
 		return 0;
 	case NFT_RT_TCPMSS:
 		hooks = (1 << NF_INET_FORWARD) |
@@ -188,6 +195,7 @@ static const struct nft_expr_ops nft_rt_get_ops = {
 	.init		= nft_rt_get_init,
 	.dump		= nft_rt_get_dump,
 	.validate	= nft_rt_validate,
+	.reduce		= NFT_REDUCE_READONLY,
 };
 
 struct nft_expr_type nft_rt_type __read_mostly = {

@@ -1,20 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * HID Sensors Driver
  * Copyright (c) 2012, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
- *
  */
 #ifndef _HID_SENSORS_HUB_H
 #define _HID_SENSORS_HUB_H
@@ -30,7 +17,7 @@
  * @attrib_id:		Attribute id for this attribute.
  * @report_id:		Report id in which this information resides.
  * @index:		Field index in the report.
- * @units:		Measurment unit for this attribute.
+ * @units:		Measurement unit for this attribute.
  * @unit_expo:		Exponent used in the data.
  * @size:		Size in bytes for data size.
  * @logical_minimum:	Logical minimum value for this attribute.
@@ -52,8 +39,8 @@ struct hid_sensor_hub_attribute_info {
  * struct sensor_hub_pending - Synchronous read pending information
  * @status:		Pending status true/false.
  * @ready:		Completion synchronization data.
- * @usage_id:		Usage id for physical device, E.g. Gyro usage id.
- * @attr_usage_id:	Usage Id of a field, E.g. X-AXIS for a gyro.
+ * @usage_id:		Usage id for physical device, e.g. gyro usage id.
+ * @attr_usage_id:	Usage Id of a field, e.g. X-axis for a gyro.
  * @raw_size:		Response size for a read request.
  * @raw_data:		Place holder for received response.
  */
@@ -117,10 +104,10 @@ struct hid_sensor_hub_callbacks {
 int sensor_hub_device_open(struct hid_sensor_hub_device *hsdev);
 
 /**
-* sensor_hub_device_clode() - Close hub device
+* sensor_hub_device_close() - Close hub device
 * @hsdev:	Hub device instance.
 *
-* Used to clode hid device for sensor hub.
+* Used to close hid device for sensor hub.
 */
 void sensor_hub_device_close(struct hid_sensor_hub_device *hsdev);
 
@@ -141,12 +128,13 @@ int sensor_hub_register_callback(struct hid_sensor_hub_device *hsdev,
 			struct hid_sensor_hub_callbacks *usage_callback);
 
 /**
-* sensor_hub_remove_callback() - Remove client callbacks
+* sensor_hub_remove_callback() - Remove client callback
 * @hsdev:	Hub device instance.
-* @usage_id:	Usage id of the client (E.g. 0x200076 for Gyro).
+* @usage_id:	Usage id of the client (e.g. 0x200076 for gyro).
 *
-* If there is a callback registred, this call will remove that
-* callbacks, so that it will stop data and event notifications.
+* Removes a previously registered callback for the given usage_id
+* and hsdev. Once removed, the client will no longer receive data or
+* event notifications.
 */
 int sensor_hub_remove_callback(struct hid_sensor_hub_device *hsdev,
 			u32 usage_id);
@@ -163,7 +151,7 @@ int sensor_hub_remove_callback(struct hid_sensor_hub_device *hsdev,
 * @info:	return information about attribute after parsing report
 *
 * Parses report and returns the attribute information such as report id,
-* field index, units and exponet etc.
+* field index, units and exponent etc.
 */
 int sensor_hub_input_get_attribute_info(struct hid_sensor_hub_device *hsdev,
 			u8 type,
@@ -180,7 +168,7 @@ int sensor_hub_input_get_attribute_info(struct hid_sensor_hub_device *hsdev,
 * @is_signed:   If true then fields < 32 bits will be sign-extended
 *
 * Issues a synchronous or asynchronous read request for an input attribute.
-* Returns data upto 32 bits.
+* Return: data up to 32 bits.
 */
 
 enum sensor_hub_read_flags {
@@ -218,8 +206,9 @@ int sensor_hub_set_feature(struct hid_sensor_hub_device *hsdev, u32 report_id,
 * @buffer:	buffer to copy output
 *
 * Used to get a field in feature report. For example this can get polling
-* interval, sensitivity, activate/deactivate state. On success it returns
-* number of bytes copied to buffer. On failure, it returns value < 0.
+* interval, sensitivity, activate/deactivate state.
+* Return: On success, it returns the number of bytes copied to buffer.
+* On failure, it returns value < 0.
 */
 int sensor_hub_get_feature(struct hid_sensor_hub_device *hsdev, u32 report_id,
 			   u32 field_index, int buffer_size, void *buffer);
@@ -243,6 +232,7 @@ struct hid_sensor_common {
 	struct hid_sensor_hub_attribute_info report_state;
 	struct hid_sensor_hub_attribute_info power_state;
 	struct hid_sensor_hub_attribute_info sensitivity;
+	struct hid_sensor_hub_attribute_info sensitivity_rel;
 	struct hid_sensor_hub_attribute_info report_latency;
 	struct work_struct work;
 };
@@ -260,11 +250,17 @@ static inline int hid_sensor_convert_exponent(int unit_expo)
 
 int hid_sensor_parse_common_attributes(struct hid_sensor_hub_device *hsdev,
 					u32 usage_id,
-					struct hid_sensor_common *st);
+					struct hid_sensor_common *st,
+					const u32 *sensitivity_addresses,
+					u32 sensitivity_addresses_len);
 int hid_sensor_write_raw_hyst_value(struct hid_sensor_common *st,
 					int val1, int val2);
+int hid_sensor_write_raw_hyst_rel_value(struct hid_sensor_common *st, int val1,
+					int val2);
 int hid_sensor_read_raw_hyst_value(struct hid_sensor_common *st,
 					int *val1, int *val2);
+int hid_sensor_read_raw_hyst_rel_value(struct hid_sensor_common *st,
+				       int *val1, int *val2);
 int hid_sensor_write_samp_freq_value(struct hid_sensor_common *st,
 					int val1, int val2);
 int hid_sensor_read_samp_freq_value(struct hid_sensor_common *st,

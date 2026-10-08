@@ -7,10 +7,10 @@
 
 #include <linux/compiler.h>
 #include <linux/types.h>
-#include <linux/time64.h>
 
+struct __kernel_timespec;
 struct timespec;
-struct compat_timespec;
+struct old_timespec32;
 struct pollfd;
 
 enum timespec_type {
@@ -23,9 +23,10 @@ enum timespec_type {
  * System call restart block.
  */
 struct restart_block {
+	unsigned long arch_data;
 	long (*fn)(struct restart_block *);
 	union {
-		/* For futex_wait and futex_wait_requeue_pi */
+		/* For futex_wait() */
 		struct {
 			u32 __user *uaddr;
 			u32 val;
@@ -40,7 +41,7 @@ struct restart_block {
 			enum timespec_type type;
 			union {
 				struct __kernel_timespec __user *rmtp;
-				struct compat_timespec __user *compat_rmtp;
+				struct old_timespec32 __user *compat_rmtp;
 			};
 			u64 expires;
 		} nanosleep;

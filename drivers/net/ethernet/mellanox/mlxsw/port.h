@@ -6,7 +6,8 @@
 
 #include <linux/types.h>
 
-#define MLXSW_PORT_MAX_MTU		10000
+#define MLXSW_PORT_MAX_MTU		(10 * 1024)
+#define MLXSW_PORT_ETH_FRAME_HDR	(ETH_HLEN + VLAN_HLEN + ETH_FCS_LEN)
 
 #define MLXSW_PORT_DEFAULT_VID		1
 
@@ -15,16 +16,12 @@
 #define MLXSW_PORT_SWID_TYPE_IB		1
 #define MLXSW_PORT_SWID_TYPE_ETH	2
 
-#define MLXSW_PORT_MID			0xd000
-
 #define MLXSW_PORT_MAX_IB_PHY_PORTS	36
 #define MLXSW_PORT_MAX_IB_PORTS		(MLXSW_PORT_MAX_IB_PHY_PORTS + 1)
 
 #define MLXSW_PORT_CPU_PORT		0x0
 
 #define MLXSW_PORT_DONT_CARE		0xFF
-
-#define MLXSW_PORT_MODULE_MAX_WIDTH	4
 
 enum mlxsw_port_admin_status {
 	MLXSW_PORT_ADMIN_STATUS_UP = 1,

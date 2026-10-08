@@ -1,13 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2011-2013 Freescale Semiconductor, Inc.
  * Copyright 2011 Linaro Ltd.
- *
- * The code contained herein is licensed under the GNU General Public
- * License. You may obtain a copy of the GNU General Public License
- * Version 2 or later at the following locations:
- *
- * http://www.opensource.org/licenses/gpl-license.html
- * http://www.gnu.org/copyleft/gpl.html
  */
 
 #include <linux/io.h>
@@ -16,7 +10,7 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
-#include <linux/irqchip/arm-gic.h>
+
 #include "common.h"
 #include "hardware.h"
 
@@ -117,7 +111,6 @@ void imx_gpc_mask_all(void)
 		gpc_saved_imrs[i] = readl_relaxed(reg_imr1 + i * 4);
 		writel_relaxed(~0, reg_imr1 + i * 4);
 	}
-
 }
 
 void imx_gpc_restore_all(void)
@@ -252,9 +245,8 @@ static int __init imx_gpc_init(struct device_node *node,
 	if (WARN_ON(!gpc_base))
 	        return -ENOMEM;
 
-	domain = irq_domain_add_hierarchy(parent_domain, 0, GPC_MAX_IRQS,
-					  node, &imx_gpc_domain_ops,
-					  NULL);
+	domain = irq_domain_create_hierarchy(parent_domain, 0, GPC_MAX_IRQS, of_fwnode_handle(node),
+					     &imx_gpc_domain_ops, NULL);
 	if (!domain) {
 		iounmap(gpc_base);
 		return -ENOMEM;
@@ -282,10 +274,11 @@ void __init imx_gpc_check_dt(void)
 	if (WARN_ON(!np))
 		return;
 
-	if (WARN_ON(!of_find_property(np, "interrupt-controller", NULL))) {
+	if (WARN_ON(!of_property_read_bool(np, "interrupt-controller"))) {
 		pr_warn("Outdated DT detected, suspend/resume will NOT work\n");
 
 		/* map GPC, so that at least CPUidle and WARs keep working */
 		gpc_base = of_iomap(np, 0);
 	}
+	of_node_put(np);
 }

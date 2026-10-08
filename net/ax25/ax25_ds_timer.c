@@ -1,8 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * Copyright (C) Jonathan Naylor G4KLX (g4klx@g4klx.demon.co.uk)
  * Copyright (C) Joerg Reuter DL1BKE (jreuter@yaina.de)
@@ -47,7 +44,7 @@ void ax25_ds_setup_timer(ax25_dev *ax25_dev)
 void ax25_ds_del_timer(ax25_dev *ax25_dev)
 {
 	if (ax25_dev)
-		del_timer(&ax25_dev->dama.slave_timer);
+		timer_delete(&ax25_dev->dama.slave_timer);
 }
 
 void ax25_ds_set_timer(ax25_dev *ax25_dev)
@@ -67,7 +64,7 @@ void ax25_ds_set_timer(ax25_dev *ax25_dev)
 
 static void ax25_ds_timeout(struct timer_list *t)
 {
-	ax25_dev *ax25_dev = from_timer(ax25_dev, t, dama.slave_timer);
+	ax25_dev *ax25_dev = timer_container_of(ax25_dev, t, dama.slave_timer);
 	ax25_cb *ax25;
 
 	if (ax25_dev == NULL || !ax25_dev->dama.slave)

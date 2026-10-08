@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Stream Parser
  *
  * Copyright (c) 2016 Tom Herbert <tom@herbertland.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2
- * as published by the Free Software Foundation.
  */
 
 #include <linux/bpf.h>
@@ -14,7 +11,8 @@
 #include <linux/file.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/module.h>
+#include <linux/export.h>
+#include <linux/init.h>
 #include <linux/net.h>
 #include <linux/netdevice.h>
 #include <linux/poll.h>
@@ -47,12 +45,20 @@ static void strp_abort_strp(struct strparser *strp, int err)
 
 	strp->stopped = 1;
 
+	if (strp->skb_head) {
+		kfree_skb(strp->skb_head);
+		strp->skb_head = NULL;
+	}
+
+	strp->skb_nextp = NULL;
+	strp->need_bytes = 0;
+
 	if (strp->sk) {
 		struct sock *sk = strp->sk;
 
 		/* Report an error on the lower socket */
 		sk->sk_err = -err;
-		sk->sk_error_report(sk);
+		sk_error_report(sk);
 	}
 }
 
@@ -151,18 +157,14 @@ static int __strp_recv(read_descriptor_t *desc, struct sk_buff *orig_skb,
 					return 0;
 				}
 
-				skb = alloc_skb(0, GFP_ATOMIC);
+				skb = alloc_skb_for_msg(head);
 				if (!skb) {
 					STRP_STATS_INCR(strp->stats.mem_fail);
 					desc->error = -ENOMEM;
 					return 0;
 				}
-				skb->len = head->len;
-				skb->data_len = head->len;
-				skb->truesize = head->truesize;
-				*_strp_msg(skb) = *_strp_msg(head);
+
 				strp->skb_nextp = &head->next;
-				skb_shinfo(skb)->frag_list = head;
 				strp->skb_head = skb;
 				head = skb;
 			} else {
@@ -244,7 +246,7 @@ static int __strp_recv(read_descriptor_t *desc, struct sk_buff *orig_skb,
 				strp_parser_err(strp, -EMSGSIZE, desc);
 				break;
 			} else if (len <= (ssize_t)head->len -
-					  skb->len - stm->strp.offset) {
+					  (ssize_t)skb->len - stm->strp.offset) {
 				/* Length must be into new skb (and also
 				 * greater than zero)
 				 */
@@ -289,7 +291,7 @@ static int __strp_recv(read_descriptor_t *desc, struct sk_buff *orig_skb,
 			break;
 		}
 
-		/* Positive extra indicates ore bytes than needed for the
+		/* Positive extra indicates more bytes than needed for the
 		 * message
 		 */
 
@@ -339,7 +341,7 @@ static int strp_recv(read_descriptor_t *desc, struct sk_buff *orig_skb,
 	struct strparser *strp = (struct strparser *)desc->arg.data;
 
 	return __strp_recv(desc, orig_skb, orig_offset, orig_len,
-			   strp->sk->sk_rcvbuf, strp->sk->sk_rcvtimeo);
+			   strp->sk->sk_rcvbuf, READ_ONCE(strp->sk->sk_rcvtimeo));
 }
 
 static int default_read_sock_done(struct strparser *strp, int err)
@@ -353,7 +355,10 @@ static int strp_read_sock(struct strparser *strp)
 	struct socket *sock = strp->sk->sk_socket;
 	read_descriptor_t desc;
 
-	if (unlikely(!sock || !sock->ops || !sock->ops->read_sock))
+	if (unlikely(!sock || !sock->ops))
+		return -EBUSY;
+
+	if (unlikely(!strp->cb.read_sock && !sock->ops->read_sock))
 		return -EBUSY;
 
 	desc.arg.data = strp;
@@ -361,7 +366,10 @@ static int strp_read_sock(struct strparser *strp)
 	desc.count = 1; /* give more than one skb per call */
 
 	/* sk should be locked here, so okay to do read_sock */
-	sock->ops->read_sock(strp->sk, &desc, strp_recv);
+	if (strp->cb.read_sock)
+		strp->cb.read_sock(strp, &desc, strp_recv);
+	else
+		sock->ops->read_sock(strp->sk, &desc, strp_recv);
 
 	desc.error = strp->cb.read_sock_done(strp, desc.error);
 
@@ -474,6 +482,7 @@ int strp_init(struct strparser *strp, struct sock *sk,
 	strp->cb.unlock = cb->unlock ? : strp_sock_unlock;
 	strp->cb.rcv_msg = cb->rcv_msg;
 	strp->cb.parse_msg = cb->parse_msg;
+	strp->cb.read_sock = cb->read_sock;
 	strp->cb.read_sock_done = cb->read_sock_done ? : default_read_sock_done;
 	strp->cb.abort_parser = cb->abort_parser ? : strp_abort_strp;
 
@@ -483,19 +492,6 @@ int strp_init(struct strparser *strp, struct sock *sk,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(strp_init);
-
-/* Sock process lock held (lock_sock) */
-void __strp_unpause(struct strparser *strp)
-{
-	strp->paused = 0;
-
-	if (strp->need_bytes) {
-		if (strp_peek_len(strp) < strp->need_bytes)
-			return;
-	}
-	strp_read_sock(strp);
-}
-EXPORT_SYMBOL_GPL(__strp_unpause);
 
 void strp_unpause(struct strparser *strp)
 {
@@ -537,17 +533,15 @@ void strp_check_rcv(struct strparser *strp)
 }
 EXPORT_SYMBOL_GPL(strp_check_rcv);
 
-static int __init strp_mod_init(void)
+static int __init strp_dev_init(void)
 {
+	BUILD_BUG_ON(sizeof(struct sk_skb_cb) >
+		     sizeof_field(struct sk_buff, cb));
+
 	strp_wq = create_singlethread_workqueue("kstrp");
+	if (unlikely(!strp_wq))
+		return -ENOMEM;
 
 	return 0;
 }
-
-static void __exit strp_mod_exit(void)
-{
-	destroy_workqueue(strp_wq);
-}
-module_init(strp_mod_init);
-module_exit(strp_mod_exit);
-MODULE_LICENSE("GPL");
+device_initcall(strp_dev_init);

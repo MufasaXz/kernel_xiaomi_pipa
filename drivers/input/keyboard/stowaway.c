@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Stowaway keyboard driver for Linux
  */
@@ -7,22 +8,6 @@
  *
  *  Based on Newton keyboard driver for Linux
  *  by Justin Cormack
- */
-
-/*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 #include <linux/slab.h>
@@ -87,7 +72,7 @@ static int skbd_connect(struct serio *serio, struct serio_driver *drv)
 	int err = -ENOMEM;
 	int i;
 
-	skbd = kzalloc(sizeof(struct skbd), GFP_KERNEL);
+	skbd = kzalloc(sizeof(*skbd), GFP_KERNEL);
 	input_dev = input_allocate_device();
 	if (!skbd || !input_dev)
 		goto fail1;

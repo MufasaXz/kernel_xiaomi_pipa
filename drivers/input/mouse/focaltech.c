@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Focaltech TouchPad PS/2 mouse driver
  *
  * Copyright (c) 2014 Red Hat Inc.
  * Copyright (c) 2014 Mathias Gottschlag <mgottschlag@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * Red Hat authors:
  *
@@ -412,8 +408,7 @@ int focaltech_init(struct psmouse *psmouse)
 	struct focaltech_data *priv;
 	int error;
 
-	psmouse->private = priv = kzalloc(sizeof(struct focaltech_data),
-					  GFP_KERNEL);
+	psmouse->private = priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 

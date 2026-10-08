@@ -1,19 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2015 Hisilicon Limited, All Rights Reserved.
+ * Copyright (C) 2015 HiSilicon Limited, All Rights Reserved.
  * Author: Jun Ma <majun258@huawei.com>
  * Author: Yun Wu <wuyun.wu@huawei.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/acpi.h>
@@ -36,7 +25,7 @@
 /* The maximum IRQ pin number of mbigen chip(start from 0) */
 #define MAXIMUM_IRQ_PIN_NUM		1407
 
-/**
+/*
  * In mbigen vector register
  * bit[21:12]:	event id value
  * bit[11:0]:	device id
@@ -50,14 +39,14 @@
 /* offset of vector register in mbigen node */
 #define REG_MBIGEN_VEC_OFFSET		0x200
 
-/**
+/*
  * offset of clear register in mbigen node
  * This register is used to clear the status
  * of interrupt
  */
 #define REG_MBIGEN_CLEAR_OFFSET		0xa000
 
-/**
+/*
  * offset of interrupt type register
  * This register is used to configure interrupt
  * trigger type
@@ -158,24 +147,14 @@ static int mbigen_set_type(struct irq_data *data, unsigned int type)
 	return 0;
 }
 
-static struct irq_chip mbigen_irq_chip = {
-	.name =			"mbigen-v2",
-	.irq_mask =		irq_chip_mask_parent,
-	.irq_unmask =		irq_chip_unmask_parent,
-	.irq_eoi =		mbigen_eoi_irq,
-	.irq_set_type =		mbigen_set_type,
-	.irq_set_affinity =	irq_chip_set_affinity_parent,
-};
-
-static void mbigen_write_msg(struct msi_desc *desc, struct msi_msg *msg)
+static void mbigen_write_msi_msg(struct irq_data *d, struct msi_msg *msg)
 {
-	struct irq_data *d = irq_get_irq_data(desc->irq);
 	void __iomem *base = d->chip_data;
 	u32 val;
 
 	if (!msg->address_lo && !msg->address_hi)
 		return;
- 
+
 	base += get_mbigen_vec_reg(d->hwirq);
 	val = readl_relaxed(base);
 
@@ -188,10 +167,8 @@ static void mbigen_write_msg(struct msi_desc *desc, struct msi_msg *msg)
 	writel_relaxed(val, base);
 }
 
-static int mbigen_domain_translate(struct irq_domain *d,
-				    struct irq_fwspec *fwspec,
-				    unsigned long *hwirq,
-				    unsigned int *type)
+static int mbigen_domain_translate(struct irq_domain *d, struct irq_fwspec *fwspec,
+				   unsigned long *hwirq, unsigned int *type)
 {
 	if (is_of_node(fwspec->fwnode) || is_acpi_device_node(fwspec->fwnode)) {
 		if (fwspec->param_count != 2)
@@ -215,61 +192,55 @@ static int mbigen_domain_translate(struct irq_domain *d,
 	return -EINVAL;
 }
 
-static int mbigen_irq_domain_alloc(struct irq_domain *domain,
-					unsigned int virq,
-					unsigned int nr_irqs,
-					void *args)
+static void mbigen_domain_set_desc(msi_alloc_info_t *arg, struct msi_desc *desc)
 {
-	struct irq_fwspec *fwspec = args;
-	irq_hw_number_t hwirq;
-	unsigned int type;
-	struct mbigen_device *mgn_chip;
-	int i, err;
-
-	err = mbigen_domain_translate(domain, fwspec, &hwirq, &type);
-	if (err)
-		return err;
-
-	err = platform_msi_domain_alloc(domain, virq, nr_irqs);
-	if (err)
-		return err;
-
-	mgn_chip = platform_msi_get_host_data(domain);
-
-	for (i = 0; i < nr_irqs; i++)
-		irq_domain_set_hwirq_and_chip(domain, virq + i, hwirq + i,
-				      &mbigen_irq_chip, mgn_chip->base);
-
-	return 0;
+	arg->desc = desc;
+	arg->hwirq = (u32)desc->data.icookie.value;
 }
 
-static void mbigen_irq_domain_free(struct irq_domain *domain, unsigned int virq,
-				   unsigned int nr_irqs)
-{
-	platform_msi_domain_free(domain, virq, nr_irqs);
-}
+static const struct msi_domain_template mbigen_msi_template = {
+	.chip = {
+		.name			= "mbigen-v2",
+		.irq_mask		= irq_chip_mask_parent,
+		.irq_unmask		= irq_chip_unmask_parent,
+		.irq_eoi		= mbigen_eoi_irq,
+		.irq_set_type		= mbigen_set_type,
+		.irq_write_msi_msg	= mbigen_write_msi_msg,
+	},
 
-static const struct irq_domain_ops mbigen_domain_ops = {
-	.translate	= mbigen_domain_translate,
-	.alloc		= mbigen_irq_domain_alloc,
-	.free		= mbigen_irq_domain_free,
+	.ops = {
+		.set_desc		= mbigen_domain_set_desc,
+		.msi_translate		= mbigen_domain_translate,
+	},
+
+	.info = {
+		.bus_token		= DOMAIN_BUS_WIRED_TO_MSI,
+		.flags			= MSI_FLAG_USE_DEV_FWNODE,
+	},
 };
+
+static bool mbigen_create_device_domain(struct device *dev, unsigned int size,
+					struct mbigen_device *mgn_chip)
+{
+	if (WARN_ON_ONCE(!dev->msi.domain))
+		return false;
+
+	return msi_create_device_irq_domain(dev, MSI_DEFAULT_DOMAIN,
+					    &mbigen_msi_template, size,
+					    NULL, mgn_chip->base);
+}
 
 static int mbigen_of_create_domain(struct platform_device *pdev,
 				   struct mbigen_device *mgn_chip)
 {
-	struct device *parent;
 	struct platform_device *child;
-	struct irq_domain *domain;
-	struct device_node *np;
 	u32 num_pins;
 
-	for_each_child_of_node(pdev->dev.of_node, np) {
+	for_each_child_of_node_scoped(pdev->dev.of_node, np) {
 		if (!of_property_read_bool(np, "interrupt-controller"))
 			continue;
 
-		parent = platform_bus_type.dev_root;
-		child = of_platform_device_create(np, NULL, parent);
+		child = of_platform_device_create(np, NULL, NULL);
 		if (!child)
 			return -ENOMEM;
 
@@ -279,11 +250,7 @@ static int mbigen_of_create_domain(struct platform_device *pdev,
 			return -EINVAL;
 		}
 
-		domain = platform_msi_create_device_domain(&child->dev, num_pins,
-							   mbigen_write_msg,
-							   &mbigen_domain_ops,
-							   mgn_chip);
-		if (!domain)
+		if (!mbigen_create_device_domain(&child->dev, num_pins, mgn_chip))
 			return -ENOMEM;
 	}
 
@@ -291,10 +258,15 @@ static int mbigen_of_create_domain(struct platform_device *pdev,
 }
 
 #ifdef CONFIG_ACPI
+static const struct acpi_device_id mbigen_acpi_match[] = {
+	{ "HISI0152", 0 },
+	{}
+};
+MODULE_DEVICE_TABLE(acpi, mbigen_acpi_match);
+
 static int mbigen_acpi_create_domain(struct platform_device *pdev,
 				     struct mbigen_device *mgn_chip)
 {
-	struct irq_domain *domain;
 	u32 num_pins = 0;
 	int ret;
 
@@ -325,11 +297,7 @@ static int mbigen_acpi_create_domain(struct platform_device *pdev,
 	if (ret || num_pins == 0)
 		return -EINVAL;
 
-	domain = platform_msi_create_device_domain(&pdev->dev, num_pins,
-						   mbigen_write_msg,
-						   &mbigen_domain_ops,
-						   mgn_chip);
-	if (!domain)
+	if (!mbigen_create_device_domain(&pdev->dev, num_pins, mgn_chip))
 		return -ENOMEM;
 
 	return 0;
@@ -373,8 +341,7 @@ static int mbigen_device_probe(struct platform_device *pdev)
 		err = -EINVAL;
 
 	if (err) {
-		dev_err(&pdev->dev, "Failed to create mbi-gen@%p irqdomain",
-			mgn_chip->base);
+		dev_err(&pdev->dev, "Failed to create mbi-gen irqdomain\n");
 		return err;
 	}
 
@@ -387,12 +354,6 @@ static const struct of_device_id mbigen_of_match[] = {
 	{ /* END */ }
 };
 MODULE_DEVICE_TABLE(of, mbigen_of_match);
-
-static const struct acpi_device_id mbigen_acpi_match[] = {
-	{ "HISI0152", 0 },
-	{}
-};
-MODULE_DEVICE_TABLE(acpi, mbigen_acpi_match);
 
 static struct platform_driver mbigen_platform_driver = {
 	.driver = {
@@ -408,5 +369,4 @@ module_platform_driver(mbigen_platform_driver);
 
 MODULE_AUTHOR("Jun Ma <majun258@huawei.com>");
 MODULE_AUTHOR("Yun Wu <wuyun.wu@huawei.com>");
-MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Hisilicon MBI Generator driver");
+MODULE_DESCRIPTION("HiSilicon MBI Generator driver");

@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Frontend part of the Linux driver for the WideView/ Yakumo/ Hama/
  * Typhoon/ Yuan DVB-T USB2.0 receiver.
  *
  * Copyright (C) 2005 Patrick Boettcher <patrick.boettcher@posteo.de>
  *
- *	This program is free software; you can redistribute it and/or modify it
- *	under the terms of the GNU General Public License as published by the Free
- *	Software Foundation, version 2.
- *
- * see Documentation/media/dvb-drivers/dvb-usb.rst for more information
+ * see Documentation/driver-api/media/drivers/dvb-usb.rst for more information
  */
 #include "dtt200u.h"
 
@@ -198,7 +195,7 @@ static int dtt200u_fe_get_frontend(struct dvb_frontend* fe,
 
 static void dtt200u_fe_release(struct dvb_frontend* fe)
 {
-	struct dtt200u_fe_state *state = (struct dtt200u_fe_state*) fe->demodulator_priv;
+	struct dtt200u_fe_state *state = fe->demodulator_priv;
 	kfree(state);
 }
 

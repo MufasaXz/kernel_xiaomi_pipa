@@ -1,23 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Virtual Raw MIDI client on Sequencer
  *
  *  Copyright (c) 2000 by Takashi Iwai <tiwai@suse.de>,
  *                        Jaroslav Kysela <perex@perex.cz>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
 /*
@@ -157,9 +143,7 @@ static void snd_vmidi_output_work(struct work_struct *work)
 	/* discard the outputs in dispatch mode unless subscribed */
 	if (vmidi->seq_mode == SNDRV_VIRMIDI_SEQ_DISPATCH &&
 	    !(vmidi->rdev->flags & SNDRV_VIRMIDI_SUBSCRIBE)) {
-		char buf[32];
-		while (snd_rawmidi_transmit(substream, buf, sizeof(buf)) > 0)
-			; /* ignored */
+		snd_rawmidi_proceed(substream);
 		return;
 	}
 
@@ -215,11 +199,10 @@ static int snd_virmidi_input_open(struct snd_rawmidi_substream *substream)
 	vmidi->client = rdev->client;
 	vmidi->port = rdev->port;	
 	runtime->private_data = vmidi;
-	down_write(&rdev->filelist_sem);
-	write_lock_irq(&rdev->filelist_lock);
-	list_add_tail(&vmidi->list, &rdev->filelist);
-	write_unlock_irq(&rdev->filelist_lock);
-	up_write(&rdev->filelist_sem);
+	scoped_guard(rwsem_write, &rdev->filelist_sem) {
+		guard(write_lock_irq)(&rdev->filelist_lock);
+		list_add_tail(&vmidi->list, &rdev->filelist);
+	}
 	vmidi->rdev = rdev;
 	return 0;
 }
@@ -259,11 +242,10 @@ static int snd_virmidi_input_close(struct snd_rawmidi_substream *substream)
 	struct snd_virmidi_dev *rdev = substream->rmidi->private_data;
 	struct snd_virmidi *vmidi = substream->runtime->private_data;
 
-	down_write(&rdev->filelist_sem);
-	write_lock_irq(&rdev->filelist_lock);
-	list_del(&vmidi->list);
-	write_unlock_irq(&rdev->filelist_lock);
-	up_write(&rdev->filelist_sem);
+	scoped_guard(rwsem_write, &rdev->filelist_sem) {
+		guard(write_lock_irq)(&rdev->filelist_lock);
+		list_del(&vmidi->list);
+	}
 	snd_midi_event_free(vmidi->parser);
 	substream->runtime->private_data = NULL;
 	kfree(vmidi);
@@ -283,6 +265,16 @@ static int snd_virmidi_output_close(struct snd_rawmidi_substream *substream)
 	substream->runtime->private_data = NULL;
 	kfree(vmidi);
 	return 0;
+}
+
+/*
+ * drain output work queue
+ */
+static void snd_virmidi_output_drain(struct snd_rawmidi_substream *substream)
+{
+	struct snd_virmidi *vmidi = substream->runtime->private_data;
+
+	flush_work(&vmidi->output_work);
 }
 
 /*
@@ -359,6 +351,7 @@ static const struct snd_rawmidi_ops snd_virmidi_output_ops = {
 	.open = snd_virmidi_output_open,
 	.close = snd_virmidi_output_close,
 	.trigger = snd_virmidi_output_trigger,
+	.drain = snd_virmidi_output_drain,
 };
 
 /*
@@ -368,26 +361,22 @@ static int snd_virmidi_dev_attach_seq(struct snd_virmidi_dev *rdev)
 {
 	int client;
 	struct snd_seq_port_callback pcallbacks;
-	struct snd_seq_port_info *pinfo;
+	struct snd_seq_port_info *pinfo __free(kfree) = NULL;
 	int err;
 
 	if (rdev->client >= 0)
 		return 0;
 
 	pinfo = kzalloc(sizeof(*pinfo), GFP_KERNEL);
-	if (!pinfo) {
-		err = -ENOMEM;
-		goto __error;
-	}
+	if (!pinfo)
+		return -ENOMEM;
 
 	client = snd_seq_create_kernel_client(rdev->card, rdev->device,
 					      "%s %d-%d", rdev->rmidi->name,
 					      rdev->card->number,
 					      rdev->device);
-	if (client < 0) {
-		err = client;
-		goto __error;
-	}
+	if (client < 0)
+		return client;
 	rdev->client = client;
 
 	/* create a port */
@@ -397,6 +386,7 @@ static int snd_virmidi_dev_attach_seq(struct snd_virmidi_dev *rdev)
 	pinfo->capability |= SNDRV_SEQ_PORT_CAP_WRITE | SNDRV_SEQ_PORT_CAP_SYNC_WRITE | SNDRV_SEQ_PORT_CAP_SUBS_WRITE;
 	pinfo->capability |= SNDRV_SEQ_PORT_CAP_READ | SNDRV_SEQ_PORT_CAP_SYNC_READ | SNDRV_SEQ_PORT_CAP_SUBS_READ;
 	pinfo->capability |= SNDRV_SEQ_PORT_CAP_DUPLEX;
+	pinfo->direction = SNDRV_SEQ_PORT_DIR_BIDIRECTION;
 	pinfo->type = SNDRV_SEQ_PORT_TYPE_MIDI_GENERIC
 		| SNDRV_SEQ_PORT_TYPE_SOFTWARE
 		| SNDRV_SEQ_PORT_TYPE_PORT;
@@ -414,15 +404,11 @@ static int snd_virmidi_dev_attach_seq(struct snd_virmidi_dev *rdev)
 	if (err < 0) {
 		snd_seq_delete_kernel_client(client);
 		rdev->client = -1;
-		goto __error;
+		return err;
 	}
 
 	rdev->port = pinfo->addr.port;
-	err = 0; /* success */
-
- __error:
-	kfree(pinfo);
-	return err;
+	return 0; /* success */
 }
 
 
@@ -505,12 +491,13 @@ int snd_virmidi_new(struct snd_card *card, int device, struct snd_rawmidi **rrmi
 	int err;
 	
 	*rrmidi = NULL;
-	if ((err = snd_rawmidi_new(card, "VirMidi", device,
-				   16,	/* may be configurable */
-				   16,	/* may be configurable */
-				   &rmidi)) < 0)
+	err = snd_rawmidi_new(card, "VirMidi", device,
+			      16,	/* may be configurable */
+			      16,	/* may be configurable */
+			      &rmidi);
+	if (err < 0)
 		return err;
-	strcpy(rmidi->name, rmidi->id);
+	strscpy(rmidi->name, rmidi->id);
 	rdev = kzalloc(sizeof(*rdev), GFP_KERNEL);
 	if (rdev == NULL) {
 		snd_device_free(card, rmidi);

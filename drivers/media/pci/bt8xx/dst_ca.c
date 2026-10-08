@@ -1,21 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
 	CA-driver for TwinHan DST Frontend/Card
 
 	Copyright (C) 2004, 2005 Manu Abraham (manu@kromtek.com)
 
-	This program is free software; you can redistribute it and/or modify
-	it under the terms of the GNU General Public License as published by
-	the Free Software Foundation; either version 2 of the License, or
-	(at your option) any later version.
-
-	This program is distributed in the hope that it will be useful,
-	but WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-	GNU General Public License for more details.
-
-	You should have received a copy of the GNU General Public License
-	along with this program; if not, write to the Free Software
-	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
 #include <linux/kernel.h>
@@ -546,7 +534,7 @@ static long dst_ca_ioctl(struct file *file, unsigned int cmd, unsigned long ioct
 
 	mutex_lock(&dst_ca_mutex);
 	dvbdev = file->private_data;
-	state = (struct dst_state *)dvbdev->priv;
+	state = dvbdev->priv;
 	p_ca_message = kmalloc(sizeof (struct ca_msg), GFP_KERNEL);
 	p_ca_slot_info = kmalloc(sizeof (struct ca_slot_info), GFP_KERNEL);
 	p_ca_caps = kmalloc(sizeof (struct ca_caps), GFP_KERNEL);

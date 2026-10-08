@@ -35,11 +35,11 @@ type loff_t;
 // a function that blocks
 @ blocks @
 identifier block_f;
-identifier wait_event =~ "^wait_event_.*";
+identifier wait =~ "^wait_.*";
 @@
   block_f(...) {
     ... when exists
-    wait_event(...)
+    wait(...)
     ... when exists
   }
 
@@ -49,12 +49,12 @@ identifier wait_event =~ "^wait_event_.*";
 // XXX currently reader_blocks supports only direct and 1-level indirect cases.
 @ reader_blocks_direct @
 identifier stream_reader.readstream;
-identifier wait_event =~ "^wait_event_.*";
+identifier wait =~ "^wait_.*";
 @@
   readstream(...)
   {
     ... when exists
-    wait_event(...)
+    wait(...)
     ... when exists
   }
 
@@ -131,7 +131,13 @@ identifier llseek_f;
 identifier fops0.fops;
 @@
   struct file_operations fops = {
-    .llseek = no_llseek,
+  };
+
+@ has_noop_llseek @
+identifier fops0.fops;
+@@
+  struct file_operations fops = {
+    .llseek = noop_llseek,
   };
 
 @ has_mmap @
@@ -180,7 +186,7 @@ identifier splice_write_f;
 //
 // XXX for simplicity require no .{read/write}_iter and no .splice_{read/write} for now.
 // XXX maybe_steam.fops cannot be used in other rules - it gives "bad rule maybe_stream or bad variable fops".
-@ maybe_stream depends on (!has_llseek || has_no_llseek) && !has_mmap && !has_copy_file_range && !has_remap_file_range && !has_read_iter && !has_write_iter && !has_splice_read && !has_splice_write @
+@ maybe_stream depends on (!has_llseek || has_no_llseek || has_noop_llseek) && !has_mmap && !has_copy_file_range && !has_remap_file_range && !has_read_iter && !has_write_iter && !has_splice_read && !has_splice_write @
 identifier fops0.fops;
 @@
   struct file_operations fops = {

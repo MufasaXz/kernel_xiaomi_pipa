@@ -33,6 +33,12 @@ enum mlxsw_afk_element {
 	MLXSW_AFK_ELEMENT_IP_TTL_,
 	MLXSW_AFK_ELEMENT_IP_ECN,
 	MLXSW_AFK_ELEMENT_IP_DSCP,
+	MLXSW_AFK_ELEMENT_VIRT_ROUTER,
+	MLXSW_AFK_ELEMENT_FDB_MISS,
+	MLXSW_AFK_ELEMENT_L4_PORT_RANGE,
+	MLXSW_AFK_ELEMENT_VIRT_ROUTER_0_3,
+	MLXSW_AFK_ELEMENT_VIRT_ROUTER_4_7,
+	MLXSW_AFK_ELEMENT_VIRT_ROUTER_MSB,
 	MLXSW_AFK_ELEMENT_MAX,
 };
 
@@ -67,47 +73,22 @@ struct mlxsw_afk_element_info {
 	MLXSW_AFK_ELEMENT_INFO(MLXSW_AFK_ELEMENT_TYPE_BUF,			\
 			       _element, _offset, 0, _size)
 
-/* For the purpose of the driver, define an internal storage scratchpad
- * that will be used to store key/mask values. For each defined element type
- * define an internal storage geometry.
- */
-static const struct mlxsw_afk_element_info mlxsw_afk_element_infos[] = {
-	MLXSW_AFK_ELEMENT_INFO_U32(SRC_SYS_PORT, 0x00, 16, 8),
-	MLXSW_AFK_ELEMENT_INFO_BUF(DMAC_32_47, 0x04, 2),
-	MLXSW_AFK_ELEMENT_INFO_BUF(DMAC_0_31, 0x06, 4),
-	MLXSW_AFK_ELEMENT_INFO_BUF(SMAC_32_47, 0x0A, 2),
-	MLXSW_AFK_ELEMENT_INFO_BUF(SMAC_0_31, 0x0C, 4),
-	MLXSW_AFK_ELEMENT_INFO_U32(ETHERTYPE, 0x00, 0, 16),
-	MLXSW_AFK_ELEMENT_INFO_U32(IP_PROTO, 0x10, 0, 8),
-	MLXSW_AFK_ELEMENT_INFO_U32(VID, 0x10, 8, 12),
-	MLXSW_AFK_ELEMENT_INFO_U32(PCP, 0x10, 20, 3),
-	MLXSW_AFK_ELEMENT_INFO_U32(TCP_FLAGS, 0x10, 23, 9),
-	MLXSW_AFK_ELEMENT_INFO_U32(DST_L4_PORT, 0x14, 0, 16),
-	MLXSW_AFK_ELEMENT_INFO_U32(SRC_L4_PORT, 0x14, 16, 16),
-	MLXSW_AFK_ELEMENT_INFO_U32(IP_TTL_, 0x18, 0, 8),
-	MLXSW_AFK_ELEMENT_INFO_U32(IP_ECN, 0x18, 9, 2),
-	MLXSW_AFK_ELEMENT_INFO_U32(IP_DSCP, 0x18, 11, 6),
-	MLXSW_AFK_ELEMENT_INFO_BUF(SRC_IP_96_127, 0x20, 4),
-	MLXSW_AFK_ELEMENT_INFO_BUF(SRC_IP_64_95, 0x24, 4),
-	MLXSW_AFK_ELEMENT_INFO_BUF(SRC_IP_32_63, 0x28, 4),
-	MLXSW_AFK_ELEMENT_INFO_BUF(SRC_IP_0_31, 0x2C, 4),
-	MLXSW_AFK_ELEMENT_INFO_BUF(DST_IP_96_127, 0x30, 4),
-	MLXSW_AFK_ELEMENT_INFO_BUF(DST_IP_64_95, 0x34, 4),
-	MLXSW_AFK_ELEMENT_INFO_BUF(DST_IP_32_63, 0x38, 4),
-	MLXSW_AFK_ELEMENT_INFO_BUF(DST_IP_0_31, 0x3C, 4),
-};
-
-#define MLXSW_AFK_ELEMENT_STORAGE_SIZE 0x40
+#define MLXSW_AFK_ELEMENT_STORAGE_SIZE 0x44
 
 struct mlxsw_afk_element_inst { /* element instance in actual block */
-	const struct mlxsw_afk_element_info *info;
+	enum mlxsw_afk_element element;
 	enum mlxsw_afk_element_type type;
 	struct mlxsw_item item; /* element geometry in block */
+	int u32_key_diff; /* in case value needs to be adjusted before write
+			   * this diff is here to handle that
+			   */
+	bool avoid_size_check;
 };
 
-#define MLXSW_AFK_ELEMENT_INST(_type, _element, _offset, _shift, _size)		\
+#define MLXSW_AFK_ELEMENT_INST(_type, _element, _offset,			\
+			       _shift, _size, _u32_key_diff, _avoid_size_check)	\
 	{									\
-		.info = &mlxsw_afk_element_infos[MLXSW_AFK_ELEMENT_##_element],	\
+		.element = MLXSW_AFK_ELEMENT_##_element,			\
 		.type = _type,							\
 		.item = {							\
 			.offset = _offset,					\
@@ -115,20 +96,30 @@ struct mlxsw_afk_element_inst { /* element instance in actual block */
 			.size = {.bits = _size},				\
 			.name = #_element,					\
 		},								\
+		.u32_key_diff = _u32_key_diff,					\
+		.avoid_size_check = _avoid_size_check,				\
 	}
 
 #define MLXSW_AFK_ELEMENT_INST_U32(_element, _offset, _shift, _size)		\
 	MLXSW_AFK_ELEMENT_INST(MLXSW_AFK_ELEMENT_TYPE_U32,			\
-			       _element, _offset, _shift, _size)
+			       _element, _offset, _shift, _size, 0, false)
+
+#define MLXSW_AFK_ELEMENT_INST_EXT_U32(_element, _offset,			\
+				       _shift, _size, _key_diff,		\
+				       _avoid_size_check)			\
+	MLXSW_AFK_ELEMENT_INST(MLXSW_AFK_ELEMENT_TYPE_U32,			\
+			       _element, _offset, _shift, _size,		\
+			       _key_diff, _avoid_size_check)
 
 #define MLXSW_AFK_ELEMENT_INST_BUF(_element, _offset, _size)			\
 	MLXSW_AFK_ELEMENT_INST(MLXSW_AFK_ELEMENT_TYPE_BUF,			\
-			       _element, _offset, 0, _size)
+			       _element, _offset, 0, _size, 0, false)
 
 struct mlxsw_afk_block {
 	u16 encoding; /* block ID */
-	struct mlxsw_afk_element_inst *instances;
+	const struct mlxsw_afk_element_inst *instances;
 	unsigned int instances_count;
+	bool high_entropy;
 };
 
 #define MLXSW_AFK_BLOCK(_encoding, _instances)					\
@@ -136,6 +127,14 @@ struct mlxsw_afk_block {
 		.encoding = _encoding,						\
 		.instances = _instances,					\
 		.instances_count = ARRAY_SIZE(_instances),			\
+	}
+
+#define MLXSW_AFK_BLOCK_HIGH_ENTROPY(_encoding, _instances)			\
+	{									\
+		.encoding = _encoding,						\
+		.instances = _instances,					\
+		.instances_count = ARRAY_SIZE(_instances),			\
+		.high_entropy = true,						\
 	}
 
 struct mlxsw_afk_element_usage {
@@ -188,7 +187,8 @@ struct mlxsw_afk;
 struct mlxsw_afk_ops {
 	const struct mlxsw_afk_block *blocks;
 	unsigned int blocks_count;
-	void (*encode_block)(char *block, int block_index, char *output);
+	void (*encode_block)(char *output, int block_index, char *block);
+	void (*clear_block)(char *output, int block_index);
 };
 
 struct mlxsw_afk *mlxsw_afk_create(unsigned int max_blocks,
@@ -228,6 +228,8 @@ void mlxsw_afk_values_add_buf(struct mlxsw_afk_element_values *values,
 void mlxsw_afk_encode(struct mlxsw_afk *mlxsw_afk,
 		      struct mlxsw_afk_key_info *key_info,
 		      struct mlxsw_afk_element_values *values,
-		      char *key, char *mask, int block_start, int block_end);
+		      char *key, char *mask);
+void mlxsw_afk_clear(struct mlxsw_afk *mlxsw_afk, char *key,
+		     int block_start, int block_end);
 
 #endif

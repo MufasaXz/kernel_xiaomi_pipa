@@ -1,13 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * net/sched/sch_cbs.c	Credit Based Shaper
  *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
- *
  * Authors:	Vinicius Costa Gomes <vinicius.gomes@intel.com>
- *
  */
 
 /* Credit Based Shaper (CBS)
@@ -55,12 +50,15 @@
  *	locredit = max_frame_size * (sendslope / port_transmit_rate)
  */
 
+#include <linux/ethtool.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/skbuff.h>
+#include <linux/units.h>
+
 #include <net/netevent.h>
 #include <net/netlink.h>
 #include <net/sch_generic.h>
@@ -68,8 +66,6 @@
 
 static LIST_HEAD(cbs_list);
 static DEFINE_SPINLOCK(cbs_list_lock);
-
-#define BYTES_PER_KBIT (1000LL / 8)
 
 struct cbs_sched_data {
 	bool offload;
@@ -93,13 +89,14 @@ static int cbs_child_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 			     struct Qdisc *child,
 			     struct sk_buff **to_free)
 {
+	unsigned int len = qdisc_pkt_len(skb);
 	int err;
 
 	err = child->ops->enqueue(skb, child, to_free);
 	if (err != NET_XMIT_SUCCESS)
 		return err;
 
-	qdisc_qstats_backlog_inc(sch, skb);
+	sch->qstats.backlog += len;
 	sch->q.qlen++;
 
 	return NET_XMIT_SUCCESS;
@@ -313,7 +310,7 @@ static void cbs_set_port_rate(struct net_device *dev, struct cbs_sched_data *q)
 {
 	struct ethtool_link_ksettings ecmd;
 	int speed = SPEED_10;
-	s64 port_rate = -1;
+	s64 port_rate;
 	int err;
 
 	err = __ethtool_get_link_ksettings(dev, &ecmd);
@@ -370,7 +367,8 @@ static int cbs_change(struct Qdisc *sch, struct nlattr *opt,
 	struct tc_cbs_qopt *qopt;
 	int err;
 
-	err = nla_parse_nested(tb, TCA_CBS_MAX, opt, cbs_policy, extack);
+	err = nla_parse_nested_deprecated(tb, TCA_CBS_MAX, opt, cbs_policy,
+					  extack);
 	if (err < 0)
 		return err;
 
@@ -391,11 +389,11 @@ static int cbs_change(struct Qdisc *sch, struct nlattr *opt,
 	}
 
 	/* Everything went OK, save the parameters used. */
-	q->hicredit = qopt->hicredit;
-	q->locredit = qopt->locredit;
-	q->idleslope = qopt->idleslope * BYTES_PER_KBIT;
-	q->sendslope = qopt->sendslope * BYTES_PER_KBIT;
-	q->offload = qopt->offload;
+	WRITE_ONCE(q->hicredit, qopt->hicredit);
+	WRITE_ONCE(q->locredit, qopt->locredit);
+	WRITE_ONCE(q->idleslope, qopt->idleslope * BYTES_PER_KBIT);
+	WRITE_ONCE(q->sendslope, qopt->sendslope * BYTES_PER_KBIT);
+	WRITE_ONCE(q->offload, qopt->offload);
 
 	return 0;
 }
@@ -457,15 +455,15 @@ static int cbs_dump(struct Qdisc *sch, struct sk_buff *skb)
 	struct tc_cbs_qopt opt = { };
 	struct nlattr *nest;
 
-	nest = nla_nest_start(skb, TCA_OPTIONS);
+	nest = nla_nest_start_noflag(skb, TCA_OPTIONS);
 	if (!nest)
 		goto nla_put_failure;
 
-	opt.hicredit = q->hicredit;
-	opt.locredit = q->locredit;
-	opt.sendslope = div64_s64(q->sendslope, BYTES_PER_KBIT);
-	opt.idleslope = div64_s64(q->idleslope, BYTES_PER_KBIT);
-	opt.offload = q->offload;
+	opt.hicredit = READ_ONCE(q->hicredit);
+	opt.locredit = READ_ONCE(q->locredit);
+	opt.sendslope = div64_s64(READ_ONCE(q->sendslope), BYTES_PER_KBIT);
+	opt.idleslope = div64_s64(READ_ONCE(q->idleslope), BYTES_PER_KBIT);
+	opt.offload = READ_ONCE(q->offload);
 
 	if (nla_put(skb, TCA_CBS_PARMS, sizeof(opt), &opt))
 		goto nla_put_failure;
@@ -522,13 +520,7 @@ static unsigned long cbs_find(struct Qdisc *sch, u32 classid)
 static void cbs_walk(struct Qdisc *sch, struct qdisc_walker *walker)
 {
 	if (!walker->stop) {
-		if (walker->count >= walker->skip) {
-			if (walker->fn(sch, 1, walker) < 0) {
-				walker->stop = 1;
-				return;
-			}
-		}
-		walker->count++;
+		tc_qdisc_stats_dump(sch, 1, walker);
 	}
 }
 
@@ -554,6 +546,7 @@ static struct Qdisc_ops cbs_qdisc_ops __read_mostly = {
 	.dump		=	cbs_dump,
 	.owner		=	THIS_MODULE,
 };
+MODULE_ALIAS_NET_SCH("cbs");
 
 static struct notifier_block cbs_device_notifier = {
 	.notifier_call = cbs_dev_notifier,
@@ -582,3 +575,4 @@ static void __exit cbs_module_exit(void)
 module_init(cbs_module_init)
 module_exit(cbs_module_exit)
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Credit Based shaper");

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) 1999-2001 Vojtech Pavlik
  *  Copyright (c) 1999 Brian Gerst
@@ -5,22 +6,6 @@
 
 /*
  * NS558 based standard IBM game port driver for Linux
- */
-
-/*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 #include <asm/io.h>
@@ -135,7 +120,7 @@ static int ns558_isa_probe(int io)
 			return -EBUSY;
 	}
 
-	ns558 = kzalloc(sizeof(struct ns558), GFP_KERNEL);
+	ns558 = kzalloc(sizeof(*ns558), GFP_KERNEL);
 	port = gameport_allocate_port();
 	if (!ns558 || !port) {
 		printk(KERN_ERR "ns558: Memory allocation failed.\n");
@@ -207,7 +192,7 @@ static int ns558_pnp_probe(struct pnp_dev *dev, const struct pnp_device_id *did)
 	if (!request_region(ioport, iolen, "ns558-pnp"))
 		return -EBUSY;
 
-	ns558 = kzalloc(sizeof(struct ns558), GFP_KERNEL);
+	ns558 = kzalloc(sizeof(*ns558), GFP_KERNEL);
 	port = gameport_allocate_port();
 	if (!ns558 || !port) {
 		printk(KERN_ERR "ns558: Memory allocation failed\n");

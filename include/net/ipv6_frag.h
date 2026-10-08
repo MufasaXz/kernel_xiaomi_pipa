@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _IPV6_FRAG_H
 #define _IPV6_FRAG_H
+#include <linux/icmpv6.h>
 #include <linux/kernel.h>
 #include <net/addrconf.h>
 #include <net/ipv6.h>
@@ -65,6 +66,7 @@ ip6frag_expire_frag_queue(struct net *net, struct frag_queue *fq)
 {
 	struct net_device *dev = NULL;
 	struct sk_buff *head;
+	int refs = 1;
 
 	rcu_read_lock();
 	spin_lock(&fq->q.lock);
@@ -72,7 +74,14 @@ ip6frag_expire_frag_queue(struct net *net, struct frag_queue *fq)
 	if (fq->q.flags & INET_FRAG_COMPLETE)
 		goto out;
 
-	inet_frag_kill(&fq->q);
+	fq->q.flags |= INET_FRAG_DROP;
+	inet_frag_kill(&fq->q, &refs);
+
+	/* Paired with the WRITE_ONCE() in fqdir_pre_exit(). */
+	if (READ_ONCE(fq->q.fqdir->dead)) {
+		inet_frag_queue_flush(&fq->q, 0);
+		goto out;
+	}
 
 	dev = dev_get_by_index_rcu(net, fq->iif);
 	if (!dev)
@@ -97,14 +106,44 @@ ip6frag_expire_frag_queue(struct net *net, struct frag_queue *fq)
 	spin_unlock(&fq->q.lock);
 
 	icmpv6_send(head, ICMPV6_TIME_EXCEED, ICMPV6_EXC_FRAGTIME, 0);
-	kfree_skb(head);
+	kfree_skb_reason(head, SKB_DROP_REASON_FRAG_REASM_TIMEOUT);
 	goto out_rcu_unlock;
 
 out:
 	spin_unlock(&fq->q.lock);
 out_rcu_unlock:
 	rcu_read_unlock();
-	inet_frag_put(&fq->q);
+	inet_frag_putn(&fq->q, refs);
 }
+
+/* Check if the upper layer header is truncated in the first fragment. */
+static inline bool
+ipv6frag_thdr_truncated(struct sk_buff *skb, int start, u8 *nexthdrp)
+{
+	u8 nexthdr = *nexthdrp;
+	__be16 frag_off;
+	int offset;
+
+	offset = ipv6_skip_exthdr(skb, start, &nexthdr, &frag_off);
+	if (offset < 0 || (frag_off & htons(IP6_OFFSET)))
+		return false;
+	switch (nexthdr) {
+	case NEXTHDR_TCP:
+		offset += sizeof(struct tcphdr);
+		break;
+	case NEXTHDR_UDP:
+		offset += sizeof(struct udphdr);
+		break;
+	case NEXTHDR_ICMP:
+		offset += sizeof(struct icmp6hdr);
+		break;
+	default:
+		offset += 1;
+	}
+	if (offset > skb->len)
+		return true;
+	return false;
+}
+
 #endif
 #endif

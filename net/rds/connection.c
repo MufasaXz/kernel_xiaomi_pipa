@@ -57,16 +57,17 @@ static struct hlist_head *rds_conn_bucket(const struct in6_addr *laddr,
 	static u32 rds6_hash_secret __read_mostly;
 	static u32 rds_hash_secret __read_mostly;
 
-	u32 lhash, fhash, hash;
+	__be32 lhash, fhash;
+	u32 hash;
 
 	net_get_random_once(&rds_hash_secret, sizeof(rds_hash_secret));
 	net_get_random_once(&rds6_hash_secret, sizeof(rds6_hash_secret));
 
-	lhash = (__force u32)laddr->s6_addr32[3];
+	lhash = laddr->s6_addr32[3];
 #if IS_ENABLED(CONFIG_IPV6)
-	fhash = __ipv6_addr_jhash(faddr, rds6_hash_secret);
+	fhash = (__force __be32)__ipv6_addr_jhash(faddr, rds6_hash_secret);
 #else
-	fhash = (__force u32)faddr->s6_addr32[3];
+	fhash = faddr->s6_addr32[3];
 #endif
 	hash = __inet_ehashfn(lhash, 0, fhash, 0, rds_hash_secret);
 
@@ -84,7 +85,7 @@ static struct rds_connection *rds_conn_lookup(struct net *net,
 					      const struct in6_addr *laddr,
 					      const struct in6_addr *faddr,
 					      struct rds_transport *trans,
-					      int dev_if)
+					      u8 tos, int dev_if)
 {
 	struct rds_connection *conn, *ret = NULL;
 
@@ -92,6 +93,7 @@ static struct rds_connection *rds_conn_lookup(struct net *net,
 		if (ipv6_addr_equal(&conn->c_faddr, faddr) &&
 		    ipv6_addr_equal(&conn->c_laddr, laddr) &&
 		    conn->c_trans == trans &&
+		    conn->c_tos == tos &&
 		    net == rds_conn_net(conn) &&
 		    conn->c_dev_if == dev_if) {
 			ret = conn;
@@ -139,6 +141,7 @@ static void __rds_conn_path_init(struct rds_connection *conn,
 	atomic_set(&cp->cp_state, RDS_CONN_DOWN);
 	cp->cp_send_gen = 0;
 	cp->cp_reconnect_jiffies = 0;
+	cp->cp_conn->c_proposed_version = RDS_PROTOCOL_VERSION;
 	INIT_DELAYED_WORK(&cp->cp_send_w, rds_send_worker);
 	INIT_DELAYED_WORK(&cp->cp_recv_w, rds_recv_worker);
 	INIT_DELAYED_WORK(&cp->cp_conn_w, rds_connect_worker);
@@ -159,7 +162,7 @@ static struct rds_connection *__rds_conn_create(struct net *net,
 						const struct in6_addr *laddr,
 						const struct in6_addr *faddr,
 						struct rds_transport *trans,
-						gfp_t gfp,
+						gfp_t gfp, u8 tos,
 						int is_outgoing,
 						int dev_if)
 {
@@ -171,7 +174,7 @@ static struct rds_connection *__rds_conn_create(struct net *net,
 	int npaths = (trans->t_mp_capable ? RDS_MPATH_WORKERS : 1);
 
 	rcu_read_lock();
-	conn = rds_conn_lookup(net, head, laddr, faddr, trans, dev_if);
+	conn = rds_conn_lookup(net, head, laddr, faddr, trans, tos, dev_if);
 	if (conn &&
 	    conn->c_loopback &&
 	    conn->c_trans != &rds_loop_transport &&
@@ -205,6 +208,7 @@ static struct rds_connection *__rds_conn_create(struct net *net,
 	conn->c_isv6 = !ipv6_addr_v4mapped(laddr);
 	conn->c_faddr = *faddr;
 	conn->c_dev_if = dev_if;
+	conn->c_tos = tos;
 
 #if IS_ENABLED(CONFIG_IPV6)
 	/* If the local address is link local, set c_bound_if to be the
@@ -309,7 +313,7 @@ static struct rds_connection *__rds_conn_create(struct net *net,
 		struct rds_connection *found;
 
 		found = rds_conn_lookup(net, head, laddr, faddr, trans,
-					dev_if);
+					tos, dev_if);
 		if (found) {
 			struct rds_conn_path *cp;
 			int i;
@@ -344,10 +348,10 @@ out:
 struct rds_connection *rds_conn_create(struct net *net,
 				       const struct in6_addr *laddr,
 				       const struct in6_addr *faddr,
-				       struct rds_transport *trans, gfp_t gfp,
-				       int dev_if)
+				       struct rds_transport *trans, u8 tos,
+				       gfp_t gfp, int dev_if)
 {
-	return __rds_conn_create(net, laddr, faddr, trans, gfp, 0, dev_if);
+	return __rds_conn_create(net, laddr, faddr, trans, gfp, tos, 0, dev_if);
 }
 EXPORT_SYMBOL_GPL(rds_conn_create);
 
@@ -355,9 +359,9 @@ struct rds_connection *rds_conn_create_outgoing(struct net *net,
 						const struct in6_addr *laddr,
 						const struct in6_addr *faddr,
 						struct rds_transport *trans,
-						gfp_t gfp, int dev_if)
+						u8 tos, gfp_t gfp, int dev_if)
 {
-	return __rds_conn_create(net, laddr, faddr, trans, gfp, 1, dev_if);
+	return __rds_conn_create(net, laddr, faddr, trans, gfp, tos, 1, dev_if);
 }
 EXPORT_SYMBOL_GPL(rds_conn_create_outgoing);
 
@@ -378,6 +382,8 @@ void rds_conn_shutdown(struct rds_conn_path *cp)
 		if (!rds_conn_path_transition(cp, RDS_CONN_UP,
 					      RDS_CONN_DISCONNECTING) &&
 		    !rds_conn_path_transition(cp, RDS_CONN_ERROR,
+					      RDS_CONN_DISCONNECTING) &&
+		    !rds_conn_path_transition(cp, RDS_CONN_RESETTING,
 					      RDS_CONN_DISCONNECTING)) {
 			rds_conn_path_error(cp,
 					    "shutdown called in state %d\n",
@@ -423,6 +429,8 @@ void rds_conn_shutdown(struct rds_conn_path *cp)
 	 * to the conn hash, so we never trigger a reconnect on this
 	 * conn - the reconnect is always triggered by the active peer. */
 	cancel_delayed_work_sync(&cp->cp_conn_w);
+
+	clear_bit(RDS_RECONNECT_PENDING, &cp->cp_flags);
 	rcu_read_lock();
 	if (!hlist_unhashed(&conn->c_hash_node)) {
 		rcu_read_unlock();
@@ -745,8 +753,8 @@ static int rds_conn_info_visitor(struct rds_conn_path *cp, void *buffer)
 	cinfo->next_rx_seq = cp->cp_next_rx_seq;
 	cinfo->laddr = conn->c_laddr.s6_addr32[3];
 	cinfo->faddr = conn->c_faddr.s6_addr32[3];
-	strncpy(cinfo->transport, conn->c_trans->t_name,
-		sizeof(cinfo->transport));
+	cinfo->tos = conn->c_tos;
+	strscpy_pad(cinfo->transport, conn->c_trans->t_name);
 	cinfo->flags = 0;
 
 	rds_conn_info_set(cinfo->flags, test_bit(RDS_IN_XMIT, &cp->cp_flags),
@@ -771,8 +779,7 @@ static int rds6_conn_info_visitor(struct rds_conn_path *cp, void *buffer)
 	cinfo6->next_rx_seq = cp->cp_next_rx_seq;
 	cinfo6->laddr = conn->c_laddr;
 	cinfo6->faddr = conn->c_faddr;
-	strncpy(cinfo6->transport, conn->c_trans->t_name,
-		sizeof(cinfo6->transport));
+	strscpy_pad(cinfo6->transport, conn->c_trans->t_name);
 	cinfo6->flags = 0;
 
 	rds_conn_info_set(cinfo6->flags, test_bit(RDS_IN_XMIT, &cp->cp_flags),
@@ -825,9 +832,7 @@ int rds_conn_init(void)
 	if (ret)
 		return ret;
 
-	rds_conn_slab = kmem_cache_create("rds_connection",
-					  sizeof(struct rds_connection),
-					  0, 0, NULL);
+	rds_conn_slab = KMEM_CACHE(rds_connection, 0);
 	if (!rds_conn_slab) {
 		rds_loop_net_exit();
 		return -ENOMEM;
@@ -912,6 +917,17 @@ void rds_conn_path_connect_if_down(struct rds_conn_path *cp)
 	rcu_read_unlock();
 }
 EXPORT_SYMBOL_GPL(rds_conn_path_connect_if_down);
+
+/* Check connectivity of all paths
+ */
+void rds_check_all_paths(struct rds_connection *conn)
+{
+	int i = 0;
+
+	do {
+		rds_conn_path_connect_if_down(&conn->c_path[i]);
+	} while (++i < conn->c_npaths);
+}
 
 void rds_conn_connect_if_down(struct rds_connection *conn)
 {

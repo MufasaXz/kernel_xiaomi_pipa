@@ -20,7 +20,7 @@
 # | SW |                                                                |     |
 # |  +-|----------------------------------------------------------------|-+   |
 # |  | + $swp1                       BR                           $swp2 + |   |
-# |  |   APP=0,5,10 .. 7,5,17                      APP=0,5,20 .. 7,5,27   |   |
+# |  |   dcb dscp-prio 10:0...17:7            dcb dscp-prio 20:0...27:7   |   |
 # |  +--------------------------------------------------------------------+   |
 # +---------------------------------------------------------------------------+
 
@@ -36,8 +36,6 @@ source $lib_dir/lib.sh
 
 h1_create()
 {
-	local dscp;
-
 	simple_if_init $h1 192.0.2.1/28
 	tc qdisc add dev $h1 clsact
 	dscp_capture_install $h1 10
@@ -64,37 +62,28 @@ h2_destroy()
 	simple_if_fini $h2 192.0.2.2/28
 }
 
-dscp_map()
-{
-	local base=$1; shift
-
-	for prio in {0..7}; do
-		echo app=$prio,5,$((base + prio))
-	done
-}
-
 switch_create()
 {
 	ip link add name br1 type bridge vlan_filtering 1
+	ip link set dev br1 addrgenmode none
 	ip link set dev br1 up
 	ip link set dev $swp1 master br1
 	ip link set dev $swp1 up
 	ip link set dev $swp2 master br1
 	ip link set dev $swp2 up
 
-	lldptool -T -i $swp1 -V APP $(dscp_map 10) >/dev/null
-	lldptool -T -i $swp2 -V APP $(dscp_map 20) >/dev/null
-	lldpad_app_wait_set $swp1
-	lldpad_app_wait_set $swp2
+	dcb app add dev $swp1 dscp-prio 10:0 11:1 12:2 13:3 14:4 15:5 16:6 17:7
+	dcb app add dev $swp2 dscp-prio 20:0 21:1 22:2 23:3 24:4 25:5 26:6 27:7
 }
 
 switch_destroy()
 {
-	lldptool -T -i $swp2 -V APP -d $(dscp_map 20) >/dev/null
-	lldptool -T -i $swp1 -V APP -d $(dscp_map 10) >/dev/null
-	lldpad_app_wait_del
+	dcb app del dev $swp2 dscp-prio 20:0 21:1 22:2 23:3 24:4 25:5 26:6 27:7
+	dcb app del dev $swp1 dscp-prio 10:0 11:1 12:2 13:3 14:4 15:5 16:6 17:7
 
+	ip link set dev $swp2 down
 	ip link set dev $swp2 nomaster
+	ip link set dev $swp1 down
 	ip link set dev $swp1 nomaster
 	ip link del dev br1
 }
@@ -138,6 +127,7 @@ dscp_ping_test()
 	local prio=$1; shift
 	local dev_10=$1; shift
 	local dev_20=$1; shift
+	local key
 
 	local dscp_10=$(((prio + 10) << 2))
 	local dscp_20=$(((prio + 20) << 2))
@@ -148,9 +138,10 @@ dscp_ping_test()
 	eval "t0s=($(dscp_fetch_stats $dev_10 10)
 		   $(dscp_fetch_stats $dev_20 20))"
 
+	local ping_timeout=$((PING_TIMEOUT * 5))
 	ip vrf exec $vrf_name \
 	   ${PING} -Q $dscp_10 ${sip:+-I $sip} $dip \
-		   -c 10 -i 0.1 -w 2 &> /dev/null
+		   -c 10 -i 0.5 -w $ping_timeout &> /dev/null
 
 	local -A t1s
 	eval "t1s=($(dscp_fetch_stats $dev_10 10)
@@ -174,6 +165,8 @@ dscp_ping_test()
 
 test_dscp()
 {
+	local prio
+
 	for prio in {0..7}; do
 		dscp_ping_test v$h1 192.0.2.1 192.0.2.2 $prio $h1 $h2
 	done

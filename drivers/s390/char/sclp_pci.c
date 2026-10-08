@@ -24,27 +24,10 @@
 
 #define SCLP_ATYPE_PCI				2
 
-#define SCLP_ERRNOTIFY_AQ_REPAIR		1
-#define SCLP_ERRNOTIFY_AQ_INFO_LOG		2
-
 static DEFINE_MUTEX(sclp_pci_mutex);
 static struct sclp_register sclp_pci_event = {
 	.send_mask = EVTYP_ERRNOTIFY_MASK,
 };
-
-struct err_notify_evbuf {
-	struct evbuf_header header;
-	u8 action;
-	u8 atype;
-	u32 fh;
-	u32 fid;
-	u8 data[0];
-} __packed;
-
-struct err_notify_sccb {
-	struct sccb_header header;
-	struct err_notify_evbuf evbuf;
-} __packed;
 
 struct pci_cfg_sccb {
 	struct sccb_header header;
@@ -111,9 +94,15 @@ static int sclp_pci_check_report(struct zpci_report_error_header *report)
 	if (report->version != 1)
 		return -EINVAL;
 
-	if (report->action != SCLP_ERRNOTIFY_AQ_REPAIR &&
-	    report->action != SCLP_ERRNOTIFY_AQ_INFO_LOG)
+	switch (report->action) {
+	case SCLP_ERRNOTIFY_AQ_RESET:
+	case SCLP_ERRNOTIFY_AQ_REPAIR:
+	case SCLP_ERRNOTIFY_AQ_INFO_LOG:
+	case SCLP_ERRNOTIFY_AQ_OPTICS_DATA:
+		break;
+	default:
 		return -EINVAL;
+	}
 
 	if (report->length > (PAGE_SIZE - sizeof(struct err_notify_sccb)))
 		return -EINVAL;

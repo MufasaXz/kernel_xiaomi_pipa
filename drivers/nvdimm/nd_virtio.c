@@ -44,7 +44,17 @@ static int virtio_pmem_flush(struct nd_region *nd_region)
 	unsigned long flags;
 	int err, err1;
 
-	might_sleep();
+	guard(mutex)(&vpmem->flush_lock);
+
+	/*
+	 * Don't bother to submit the request to the device if the device is
+	 * not activated.
+	 */
+	if (vdev->config->get_status(vdev) & VIRTIO_CONFIG_S_NEEDS_RESET) {
+		dev_info(&vdev->dev, "virtio pmem device needs a reset\n");
+		return -EIO;
+	}
+
 	req_data = kmalloc(sizeof(*req_data), GFP_KERNEL);
 	if (!req_data)
 		return -ENOMEM;
@@ -53,7 +63,7 @@ static int virtio_pmem_flush(struct nd_region *nd_region)
 	init_waitqueue_head(&req_data->host_acked);
 	init_waitqueue_head(&req_data->wq_buf);
 	INIT_LIST_HEAD(&req_data->list);
-	req_data->req.type = cpu_to_virtio32(vdev, VIRTIO_PMEM_REQ_TYPE_FLUSH);
+	req_data->req.type = cpu_to_le32(VIRTIO_PMEM_REQ_TYPE_FLUSH);
 	sg_init_one(&sg, &req_data->req, sizeof(req_data->req));
 	sgs[0] = &sg;
 	sg_init_one(&ret, &req_data->resp.ret, sizeof(req_data->resp));
@@ -88,9 +98,9 @@ static int virtio_pmem_flush(struct nd_region *nd_region)
 		dev_info(&vdev->dev, "failed to send command to virtio pmem device\n");
 		err = -EIO;
 	} else {
-		/* A host repsonse results in "host_ack" getting called */
+		/* A host response results in "host_ack" getting called */
 		wait_event(req_data->host_acked, req_data->done);
-		err = virtio32_to_cpu(vdev, req_data->resp.ret);
+		err = le32_to_cpu(req_data->resp.ret);
 	}
 
 	kfree(req_data);
@@ -105,12 +115,13 @@ int async_pmem_flush(struct nd_region *nd_region, struct bio *bio)
 	 * parent bio. Otherwise directly call nd_region flush.
 	 */
 	if (bio && bio->bi_iter.bi_sector != -1) {
-		struct bio *child = bio_alloc(GFP_ATOMIC, 0);
+		struct bio *child = bio_alloc(bio->bi_bdev, 0,
+					      REQ_OP_WRITE | REQ_PREFLUSH,
+					      GFP_ATOMIC);
 
 		if (!child)
 			return -ENOMEM;
-		bio_copy_dev(child, bio);
-		child->bi_opf = REQ_PREFLUSH;
+		bio_clone_blkg_association(child, bio);
 		child->bi_iter.bi_sector = -1;
 		bio_chain(child, bio);
 		submit_bio(child);
@@ -122,4 +133,5 @@ int async_pmem_flush(struct nd_region *nd_region, struct bio *bio)
 	return 0;
 };
 EXPORT_SYMBOL_GPL(async_pmem_flush);
+MODULE_DESCRIPTION("Virtio Persistent Memory Driver");
 MODULE_LICENSE("GPL");

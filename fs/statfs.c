@@ -29,6 +29,8 @@ static int flags_by_mnt(int mnt_flags)
 		flags |= ST_NODIRATIME;
 	if (mnt_flags & MNT_RELATIME)
 		flags |= ST_RELATIME;
+	if (mnt_flags & MNT_NOSYMFOLLOW)
+		flags |= ST_NOSYMFOLLOW;
 	return flags;
 }
 
@@ -67,6 +69,20 @@ static int statfs_by_dentry(struct dentry *dentry, struct kstatfs *buf)
 	return retval;
 }
 
+int vfs_get_fsid(struct dentry *dentry, __kernel_fsid_t *fsid)
+{
+	struct kstatfs st;
+	int error;
+
+	error = statfs_by_dentry(dentry, &st);
+	if (error)
+		return error;
+
+	*fsid = st.f_fsid;
+	return 0;
+}
+EXPORT_SYMBOL(vfs_get_fsid);
+
 int vfs_statfs(const struct path *path, struct kstatfs *buf)
 {
 	int error;
@@ -98,13 +114,11 @@ retry:
 
 int fd_statfs(int fd, struct kstatfs *st)
 {
-	struct fd f = fdget_raw(fd);
-	int error = -EBADF;
-	if (f.file) {
-		error = vfs_statfs(&f.file->f_path, st);
-		fdput(f);
-	}
-	return error;
+	CLASS(fd_raw, f)(fd);
+
+	if (fd_empty(f))
+		return -EBADF;
+	return vfs_statfs(&fd_file(f)->f_path, st);
 }
 
 static int do_statfs_native(struct kstatfs *st, struct statfs __user *p)
@@ -219,7 +233,7 @@ SYSCALL_DEFINE3(fstatfs64, unsigned int, fd, size_t, sz, struct statfs64 __user 
 
 static int vfs_ustat(dev_t dev, struct kstatfs *sbuf)
 {
-	struct super_block *s = user_get_super(dev);
+	struct super_block *s = user_get_super(dev, false);
 	int err;
 	if (!s)
 		return -EINVAL;
@@ -239,7 +253,10 @@ SYSCALL_DEFINE2(ustat, unsigned, dev, struct ustat __user *, ubuf)
 
 	memset(&tmp,0,sizeof(struct ustat));
 	tmp.f_tfree = sbuf.f_bfree;
-	tmp.f_tinode = sbuf.f_ffree;
+	if (IS_ENABLED(CONFIG_ARCH_32BIT_USTAT_F_TINODE))
+		tmp.f_tinode = min_t(u64, sbuf.f_ffree, UINT_MAX);
+	else
+		tmp.f_tinode = sbuf.f_ffree;
 
 	return copy_to_user(ubuf, &tmp, sizeof(struct ustat)) ? -EFAULT : 0;
 }

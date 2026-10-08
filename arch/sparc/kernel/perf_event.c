@@ -979,7 +979,7 @@ out:
 
 static void sparc_pmu_start(struct perf_event *event, int flags);
 
-/* On this PMU each PIC has it's own PCR control register.  */
+/* On this PMU each PIC has its own PCR control register.  */
 static void calculate_multiple_pcrs(struct cpu_hw_events *cpuc)
 {
 	int i;
@@ -1668,8 +1668,7 @@ static int __kprobes perf_event_nmi_handler(struct notifier_block *self,
 		if (!sparc_perf_event_set_period(event, hwc, idx))
 			continue;
 
-		if (perf_event_overflow(event, &data, regs))
-			sparc_pmu_stop(event, 0);
+		perf_event_overflow(event, &data, regs);
 	}
 
 	finish_clock = sched_clock();
@@ -1771,9 +1770,11 @@ void perf_callchain_kernel(struct perf_callchain_entry_ctx *entry,
 		perf_callchain_store(entry, pc);
 #ifdef CONFIG_FUNCTION_GRAPH_TRACER
 		if ((pc + 8UL) == (unsigned long) &return_to_handler) {
-			int index = current->curr_ret_stack;
-			if (current->ret_stack && index >= graph) {
-				pc = current->ret_stack[index - graph].ret;
+			struct ftrace_ret_stack *ret_stack;
+			ret_stack = ftrace_graph_get_ret_stack(current,
+							       graph);
+			if (ret_stack) {
+				pc = ret_stack->ret;
 				perf_callchain_store(entry, pc);
 				graph++;
 			}
@@ -1853,15 +1854,11 @@ perf_callchain_user(struct perf_callchain_entry_ctx *entry, struct pt_regs *regs
 {
 	u64 saved_fault_address = current_thread_info()->fault_address;
 	u8 saved_fault_code = get_thread_fault_code();
-	mm_segment_t old_fs;
 
 	perf_callchain_store(entry, regs->tpc);
 
 	if (!current->mm)
 		return;
-
-	old_fs = get_fs();
-	set_fs(USER_DS);
 
 	flushw_user();
 
@@ -1874,7 +1871,6 @@ perf_callchain_user(struct perf_callchain_entry_ctx *entry, struct pt_regs *regs
 
 	pagefault_enable();
 
-	set_fs(old_fs);
 	set_thread_fault_code(saved_fault_code);
 	current_thread_info()->fault_address = saved_fault_address;
 }

@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * AMD CS5535/CS5536 GPIO driver
  * Copyright (C) 2006  Advanced Micro Devices, Inc.
  * Copyright (C) 2007-2009  Andres Salomon <dilinger@collabora.co.uk>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of version 2 of the GNU General Public License
- * as published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
@@ -44,7 +41,7 @@ MODULE_PARM_DESC(mask, "GPIO channel mask.");
 
 /*
  * FIXME: convert this singleton driver to use the state container
- * design pattern, see Documentation/driver-model/design-patterns.txt
+ * design pattern, see Documentation/driver-api/driver-model/design-patterns.rst
  */
 static struct cs5535_gpio_chip {
 	struct gpio_chip chip;
@@ -235,12 +232,14 @@ static int chip_gpio_get(struct gpio_chip *chip, unsigned offset)
 	return cs5535_gpio_isset(offset, GPIO_READ_BACK);
 }
 
-static void chip_gpio_set(struct gpio_chip *chip, unsigned offset, int val)
+static int chip_gpio_set(struct gpio_chip *chip, unsigned int offset, int val)
 {
 	if (val)
 		cs5535_gpio_set(offset, GPIO_OUTPUT_VAL);
 	else
 		cs5535_gpio_clear(offset, GPIO_OUTPUT_VAL);
+
+	return 0;
 }
 
 static int chip_direction_input(struct gpio_chip *c, unsigned offset)
@@ -348,12 +347,8 @@ static int cs5535_gpio_probe(struct platform_device *pdev)
 				mask_orig, mask);
 
 	/* finally, register with the generic GPIO API */
-	err = devm_gpiochip_add_data(&pdev->dev, &cs5535_gpio_chip.chip,
-				     &cs5535_gpio_chip);
-	if (err)
-		return err;
-
-	return 0;
+	return devm_gpiochip_add_data(&pdev->dev, &cs5535_gpio_chip.chip,
+				      &cs5535_gpio_chip);
 }
 
 static struct platform_driver cs5535_gpio_driver = {

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* SCTP kernel implementation
  * (C) Copyright IBM Corp. 2001, 2004
  * Copyright (c) 1999-2000 Cisco, Inc.
@@ -5,22 +6,6 @@
  * Copyright (c) 2001 Intel Corp.
  *
  * This file is part of the SCTP kernel implementation
- *
- * This SCTP implementation is free software;
- * you can redistribute it and/or modify it under the terms of
- * the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This SCTP implementation is distributed in the hope that it
- * will be useful, but WITHOUT ANY WARRANTY; without even the implied
- *                 ************************
- * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
@@ -71,7 +56,7 @@ enum { SCTP_DEFAULT_INSTREAMS = SCTP_MAX_STREAM };
 					 SCTP_NUM_AUTH_CHUNK_TYPES)
 
 /* These are the different flavours of event.  */
-enum sctp_event {
+enum sctp_event_type {
 	SCTP_EVENT_T_CHUNK = 1,
 	SCTP_EVENT_T_TIMEOUT,
 	SCTP_EVENT_T_OTHER,
@@ -92,6 +77,7 @@ enum sctp_event_timeout {
 	SCTP_EVENT_TIMEOUT_T5_SHUTDOWN_GUARD,
 	SCTP_EVENT_TIMEOUT_HEARTBEAT,
 	SCTP_EVENT_TIMEOUT_RECONF,
+	SCTP_EVENT_TIMEOUT_PROBE,
 	SCTP_EVENT_TIMEOUT_SACK,
 	SCTP_EVENT_TIMEOUT_AUTOCLOSE,
 };
@@ -147,11 +133,6 @@ SCTP_SUBTYPE_CONSTRUCTOR(PRIMITIVE,	enum sctp_event_primitive, primitive)
 
 #define sctp_chunk_is_data(a) (a->chunk_hdr->type == SCTP_CID_DATA || \
 			       a->chunk_hdr->type == SCTP_CID_I_DATA)
-
-/* Calculate the actual data size in a data chunk */
-#define SCTP_DATA_SNDSIZE(c) ((int)((unsigned long)(c->chunk_end) - \
-				    (unsigned long)(c->chunk_hdr) - \
-				    sctp_datachk_len(&c->asoc->stream)))
 
 /* Internal error codes */
 enum sctp_ierror {
@@ -219,6 +200,23 @@ enum sctp_sock_state {
 	SCTP_SS_ESTABLISHED    = TCP_ESTABLISHED,
 	SCTP_SS_CLOSING        = TCP_CLOSE_WAIT,
 };
+
+enum sctp_plpmtud_state {
+	SCTP_PL_DISABLED,
+	SCTP_PL_BASE,
+	SCTP_PL_SEARCH,
+	SCTP_PL_COMPLETE,
+	SCTP_PL_ERROR,
+};
+
+#define	SCTP_BASE_PLPMTU	1200
+#define	SCTP_MAX_PLPMTU		9000
+#define	SCTP_MIN_PLPMTU		512
+
+#define	SCTP_MAX_PROBES		3
+
+#define SCTP_PL_BIG_STEP	32
+#define SCTP_PL_MIN_STEP	4
 
 /* These functions map various type to printable names.  */
 const char *sctp_cname(const union sctp_subtype id);	/* chunk types */
@@ -298,13 +296,26 @@ enum { SCTP_MAX_GABS = 16 };
 					 */
 #define SCTP_DEFAULT_MINSEGMENT 512	/* MTU size ... if no mtu disc */
 
-#define SCTP_SECRET_SIZE 32		/* Number of octets in a 256 bits. */
-
-#define SCTP_SIGNATURE_SIZE 20	        /* size of a SLA-1 signature */
+#define SCTP_COOKIE_KEY_SIZE 32	/* size of cookie HMAC key */
+#define SCTP_COOKIE_MAC_SIZE 32	/* size of HMAC field in cookies */
 
 #define SCTP_COOKIE_MULTIPLE 32 /* Pad out our cookie to make our hash
 				 * functions simpler to write.
 				 */
+
+#define SCTP_DEFAULT_UDP_PORT 9899	/* default UDP tunneling port */
+
+/* These are the values for pf exposure, UNUSED is to keep compatible with old
+ * applications by default.
+ */
+enum {
+	SCTP_PF_EXPOSE_UNSET,
+	SCTP_PF_EXPOSE_DISABLE,
+	SCTP_PF_EXPOSE_ENABLE,
+};
+#define SCTP_PF_EXPOSE_MAX	SCTP_PF_EXPOSE_ENABLE
+
+#define SCTP_PS_RETRANS_MAX	0xffff
 
 /* These return values describe the success or failure of a number of
  * routines which form the lower interface to SCTP_outqueue.
@@ -405,16 +416,12 @@ enum {
 	SCTP_AUTH_HMAC_ID_RESERVED_0,
 	SCTP_AUTH_HMAC_ID_SHA1,
 	SCTP_AUTH_HMAC_ID_RESERVED_2,
-#if defined (CONFIG_CRYPTO_SHA256) || defined (CONFIG_CRYPTO_SHA256_MODULE)
 	SCTP_AUTH_HMAC_ID_SHA256,
-#endif
 	__SCTP_AUTH_HMAC_MAX
 };
 
 #define SCTP_AUTH_HMAC_ID_MAX	__SCTP_AUTH_HMAC_MAX - 1
 #define SCTP_AUTH_NUM_HMACS 	__SCTP_AUTH_HMAC_MAX
-#define SCTP_SHA1_SIG_SIZE 20
-#define SCTP_SHA256_SIG_SIZE 32
 
 /*  SCTP-AUTH, Section 3.2
  *     The chunk types for INIT, INIT-ACK, SHUTDOWN-COMPLETE and AUTH chunks
@@ -427,5 +434,7 @@ enum {
  * The RANDOM parameter MUST contain a 32 byte random number.
  */
 #define SCTP_AUTH_RANDOM_LENGTH 32
+
+#define SCTP_PROBE_TIMER_MIN	5000
 
 #endif /* __sctp_constants_h__ */

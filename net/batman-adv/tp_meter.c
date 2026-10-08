@@ -1,19 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Copyright (C) 2012-2018  B.A.T.M.A.N. contributors:
+/* Copyright (C) B.A.T.M.A.N. contributors:
  *
  * Edo Monticelli, Antonio Quartulli
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of version 2 of the GNU General Public
- * License as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 #include "tp_meter.h"
@@ -24,16 +12,18 @@
 #include <linux/byteorder/generic.h>
 #include <linux/cache.h>
 #include <linux/compiler.h>
+#include <linux/container_of.h>
 #include <linux/err.h>
 #include <linux/etherdevice.h>
 #include <linux/gfp.h>
 #include <linux/if_ether.h>
 #include <linux/init.h>
 #include <linux/jiffies.h>
-#include <linux/kernel.h>
 #include <linux/kref.h>
 #include <linux/kthread.h>
+#include <linux/limits.h>
 #include <linux/list.h>
+#include <linux/minmax.h>
 #include <linux/netdevice.h>
 #include <linux/param.h>
 #include <linux/printk.h>
@@ -77,7 +67,7 @@
 
 /**
  * BATADV_TP_MAX_RTO - Maximum sender timeout. If the sender RTO gets beyond
- * such amound of milliseconds, the receiver is considered unreachable and the
+ * such amount of milliseconds, the receiver is considered unreachable and the
  * connection is killed
  */
 #define BATADV_TP_MAX_RTO 30000
@@ -119,10 +109,10 @@ static u32 batadv_tp_session_cookie(const u8 session[2], u8 icmp_uid)
  * batadv_tp_cwnd() - compute the new cwnd size
  * @base: base cwnd size value
  * @increment: the value to add to base to get the new size
- * @min: minumim cwnd value (usually MSS)
+ * @min: minimum cwnd value (usually MSS)
  *
- * Return the new cwnd size and ensures it does not exceed the Advertised
- * Receiver Window size. It is wrap around safe.
+ * Return the new cwnd size and ensure it does not exceed the Advertised
+ * Receiver Window size. It is wrapped around safely.
  * For details refer to Section 3.1 of RFC5681
  *
  * Return: new congestion window size in bytes
@@ -141,7 +131,7 @@ static u32 batadv_tp_cwnd(u32 base, u32 increment, u32 min)
 }
 
 /**
- * batadv_tp_updated_cwnd() - update the Congestion Windows
+ * batadv_tp_update_cwnd() - update the Congestion Windows
  * @tp_vars: the private data of the current TP meter session
  * @mss: maximum segment size of transmission
  *
@@ -216,7 +206,7 @@ static void batadv_tp_update_rto(struct batadv_tp_vars *tp_vars,
  * batadv_tp_batctl_notify() - send client status result to client
  * @reason: reason for tp meter session stop
  * @dst: destination of tp_meter session
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @start_time: start of transmission in jiffies
  * @total_sent: bytes acked to the receiver
  * @cookie: cookie of tp_meter session
@@ -248,7 +238,7 @@ static void batadv_tp_batctl_notify(enum batadv_tp_meter_reason reason,
  * batadv_tp_batctl_error_notify() - send client error result to client
  * @reason: reason for tp meter session stop
  * @dst: destination of tp_meter session
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @cookie: cookie of tp_meter session
  */
 static void batadv_tp_batctl_error_notify(enum batadv_tp_meter_reason reason,
@@ -261,11 +251,11 @@ static void batadv_tp_batctl_error_notify(enum batadv_tp_meter_reason reason,
 
 /**
  * batadv_tp_list_find() - find a tp_vars object in the global list
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @dst: the other endpoint MAC address to look for
  *
  * Look for a tp_vars object matching dst as end_point and return it after
- * having incremented the refcounter. Return NULL is not found
+ * having increment the refcounter. Return NULL is not found
  *
  * Return: matching tp_vars or NULL when no tp_vars with @dst was found
  */
@@ -297,12 +287,12 @@ static struct batadv_tp_vars *batadv_tp_list_find(struct batadv_priv *bat_priv,
 /**
  * batadv_tp_list_find_session() - find tp_vars session object in the global
  *  list
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @dst: the other endpoint MAC address to look for
  * @session: session identifier
  *
  * Look for a tp_vars object matching dst as end_point, session as tp meter
- * session and return it after having incremented the refcounter. Return NULL
+ * session and return it after having increment the refcounter. Return NULL
  * is not found
  *
  * Return: matching tp_vars or NULL when no tp_vars was found
@@ -368,12 +358,15 @@ static void batadv_tp_vars_release(struct kref *ref)
  */
 static void batadv_tp_vars_put(struct batadv_tp_vars *tp_vars)
 {
+	if (!tp_vars)
+		return;
+
 	kref_put(&tp_vars->refcount, batadv_tp_vars_release);
 }
 
 /**
  * batadv_tp_sender_cleanup() - cleanup sender data and drop and timer
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @tp_vars: the private data of the current TP meter session to cleanup
  */
 static void batadv_tp_sender_cleanup(struct batadv_priv *bat_priv,
@@ -391,19 +384,19 @@ static void batadv_tp_sender_cleanup(struct batadv_priv *bat_priv,
 	atomic_dec(&tp_vars->bat_priv->tp_num);
 
 	/* kill the timer and remove its reference */
-	del_timer_sync(&tp_vars->timer);
+	timer_delete_sync(&tp_vars->timer);
 	/* the worker might have rearmed itself therefore we kill it again. Note
 	 * that if the worker should run again before invoking the following
-	 * del_timer(), it would not re-arm itself once again because the status
+	 * timer_delete(), it would not re-arm itself once again because the status
 	 * is OFF now
 	 */
-	del_timer(&tp_vars->timer);
+	timer_delete(&tp_vars->timer);
 	batadv_tp_vars_put(tp_vars);
 }
 
 /**
  * batadv_tp_sender_end() - print info about ended session and inform client
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @tp_vars: the private data of the current TP meter session
  */
 static void batadv_tp_sender_end(struct batadv_priv *bat_priv,
@@ -492,7 +485,7 @@ static void batadv_tp_reset_sender_timer(struct batadv_tp_vars *tp_vars)
  */
 static void batadv_tp_sender_timeout(struct timer_list *t)
 {
-	struct batadv_tp_vars *tp_vars = from_timer(tp_vars, t, timer);
+	struct batadv_tp_vars *tp_vars = timer_container_of(tp_vars, t, timer);
 	struct batadv_priv *bat_priv = tp_vars->bat_priv;
 
 	if (atomic_read(&tp_vars->sending) == 0)
@@ -626,7 +619,7 @@ static int batadv_tp_send_msg(struct batadv_tp_vars *tp_vars, const u8 *src,
 
 /**
  * batadv_tp_recv_ack() - ACK receiving function
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @skb: the buffer containing the received packet
  *
  * Process a received TP ACK packet
@@ -638,9 +631,9 @@ static void batadv_tp_recv_ack(struct batadv_priv *bat_priv,
 	struct batadv_orig_node *orig_node = NULL;
 	const struct batadv_icmp_tp_packet *icmp;
 	struct batadv_tp_vars *tp_vars;
+	const unsigned char *dev_addr;
 	size_t packet_len, mss;
 	u32 rtt, recv_ack, cwnd;
-	unsigned char *dev_addr;
 
 	packet_len = BATADV_TP_PLEN;
 	mss = BATADV_TP_PLEN;
@@ -758,12 +751,9 @@ move_twnd:
 
 	wake_up(&tp_vars->more_bytes);
 out:
-	if (likely(primary_if))
-		batadv_hardif_put(primary_if);
-	if (likely(orig_node))
-		batadv_orig_node_put(orig_node);
-	if (likely(tp_vars))
-		batadv_tp_vars_put(tp_vars);
+	batadv_hardif_put(primary_if);
+	batadv_orig_node_put(orig_node);
+	batadv_tp_vars_put(tp_vars);
 }
 
 /**
@@ -842,7 +832,7 @@ static int batadv_tp_send(void *arg)
 	}
 
 	/* assume that all the hard_interfaces have a correctly
-	 * configured MTU, so use the soft_iface MTU as MSS.
+	 * configured MTU, so use the mesh_iface MTU as MSS.
 	 * This might not be true and in that case the fragmentation
 	 * should be used.
 	 * Now, try to send the packet as it is
@@ -892,17 +882,15 @@ static int batadv_tp_send(void *arg)
 	}
 
 out:
-	if (likely(primary_if))
-		batadv_hardif_put(primary_if);
-	if (likely(orig_node))
-		batadv_orig_node_put(orig_node);
+	batadv_hardif_put(primary_if);
+	batadv_orig_node_put(orig_node);
 
 	batadv_tp_sender_end(bat_priv, tp_vars);
 	batadv_tp_sender_cleanup(bat_priv, tp_vars);
 
 	batadv_tp_vars_put(tp_vars);
 
-	do_exit(0);
+	return 0;
 }
 
 /**
@@ -939,7 +927,7 @@ static void batadv_tp_start_kthread(struct batadv_tp_vars *tp_vars)
 
 /**
  * batadv_tp_start() - start a new tp meter session
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @dst: the receiver MAC address
  * @test_length: test length in milliseconds
  * @cookie: session cookie
@@ -1005,7 +993,7 @@ void batadv_tp_start(struct batadv_priv *bat_priv, const u8 *dst,
 
 	/* initialise the CWND to 3*MSS (Section 3.1 in RFC5681).
 	 * For batman-adv the MSS is the size of the payload received by the
-	 * soft_interface, hence its MTU
+	 * mesh_interface, hence its MTU
 	 */
 	tp_vars->cwnd = BATADV_TP_PLEN * 3;
 	/* at the beginning initialise the SS threshold to the biggest possible
@@ -1064,7 +1052,7 @@ void batadv_tp_start(struct batadv_priv *bat_priv, const u8 *dst,
 
 /**
  * batadv_tp_stop() - stop currently running tp meter session
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @dst: the receiver MAC address
  * @return_value: reason for tp meter session stop
  */
@@ -1113,7 +1101,7 @@ static void batadv_tp_reset_receiver_timer(struct batadv_tp_vars *tp_vars)
  */
 static void batadv_tp_receiver_shutdown(struct timer_list *t)
 {
-	struct batadv_tp_vars *tp_vars = from_timer(tp_vars, t, timer);
+	struct batadv_tp_vars *tp_vars = timer_container_of(tp_vars, t, timer);
 	struct batadv_tp_unacked *un, *safe;
 	struct batadv_priv *bat_priv;
 
@@ -1153,7 +1141,7 @@ static void batadv_tp_receiver_shutdown(struct timer_list *t)
 
 /**
  * batadv_tp_send_ack() - send an ACK packet
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @dst: the mac address of the destination originator
  * @seq: the sequence number to ACK
  * @timestamp: the timestamp to echo back in the ACK
@@ -1215,10 +1203,8 @@ static int batadv_tp_send_ack(struct batadv_priv *bat_priv, const u8 *dst,
 	ret = 0;
 
 out:
-	if (likely(orig_node))
-		batadv_orig_node_put(orig_node);
-	if (likely(primary_if))
-		batadv_hardif_put(primary_if);
+	batadv_orig_node_put(orig_node);
+	batadv_hardif_put(primary_if);
 
 	return ret;
 }
@@ -1334,7 +1320,7 @@ static void batadv_tp_ack_unordered(struct batadv_tp_vars *tp_vars)
 
 /**
  * batadv_tp_init_recv() - return matching or create new receiver tp_vars
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @icmp: received icmp tp msg
  *
  * Return: corresponding tp_vars or NULL on errors
@@ -1387,7 +1373,7 @@ out_unlock:
 
 /**
  * batadv_tp_recv_msg() - process a single data message
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @skb: the buffer containing the received packet
  *
  * Process a received TP MSG packet
@@ -1466,13 +1452,12 @@ send_ack:
 	batadv_tp_send_ack(bat_priv, icmp->orig, tp_vars->last_recv,
 			   icmp->timestamp, icmp->session, icmp->uid);
 out:
-	if (likely(tp_vars))
-		batadv_tp_vars_put(tp_vars);
+	batadv_tp_vars_put(tp_vars);
 }
 
 /**
  * batadv_tp_meter_recv() - main TP Meter receiving function
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @skb: the buffer containing the received packet
  */
 void batadv_tp_meter_recv(struct batadv_priv *bat_priv, struct sk_buff *skb)

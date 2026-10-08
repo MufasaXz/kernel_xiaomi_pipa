@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * OPAL IMC interface detection driver
  * Supported on POWERNV platform
@@ -5,23 +6,17 @@
  * Copyright	(C) 2017 Madhavan Srinivasan, IBM Corporation.
  *		(C) 2017 Anju T Sudhakar, IBM Corporation.
  *		(C) 2017 Hemant K Shaw, IBM Corporation.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or later version.
  */
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
-#include <linux/of_platform.h>
 #include <linux/crash_dump.h>
+#include <linux/debugfs.h>
 #include <asm/opal.h>
 #include <asm/io.h>
 #include <asm/imc-pmu.h>
 #include <asm/cputhreads.h>
-#include <asm/debugfs.h>
 
 static struct dentry *imc_debugfs_parent;
 
@@ -39,11 +34,10 @@ static int imc_mem_set(void *data, u64 val)
 }
 DEFINE_DEBUGFS_ATTRIBUTE(fops_imc_x64, imc_mem_get, imc_mem_set, "0x%016llx\n");
 
-static struct dentry *imc_debugfs_create_x64(const char *name, umode_t mode,
-					     struct dentry *parent, u64  *value)
+static void imc_debugfs_create_x64(const char *name, umode_t mode,
+				   struct dentry *parent, u64  *value)
 {
-	return debugfs_create_file_unsafe(name, mode, parent,
-					  value, &fops_imc_x64);
+	debugfs_create_file_unsafe(name, mode, parent, value, &fops_imc_x64);
 }
 
 /*
@@ -61,10 +55,7 @@ static void export_imc_mode_and_cmd(struct device_node *node,
 	u32 cb_offset;
 	struct imc_mem_info *ptr = pmu_ptr->mem_info;
 
-	imc_debugfs_parent = debugfs_create_dir("imc", powerpc_debugfs_root);
-
-	if (!imc_debugfs_parent)
-		return;
+	imc_debugfs_parent = debugfs_create_dir("imc", arch_debugfs_dir);
 
 	if (of_property_read_u32(node, "cb_offset", &cb_offset))
 		cb_offset = IMC_CNTL_BLK_OFFSET;
@@ -73,21 +64,15 @@ static void export_imc_mode_and_cmd(struct device_node *node,
 		loc = (u64)(ptr->vbase) + cb_offset;
 		imc_mode_addr = (u64 *)(loc + IMC_CNTL_BLK_MODE_OFFSET);
 		sprintf(mode, "imc_mode_%d", (u32)(ptr->id));
-		if (!imc_debugfs_create_x64(mode, 0600, imc_debugfs_parent,
-					    imc_mode_addr))
-			goto err;
+		imc_debugfs_create_x64(mode, 0600, imc_debugfs_parent,
+				       imc_mode_addr);
 
 		imc_cmd_addr = (u64 *)(loc + IMC_CNTL_BLK_CMD_OFFSET);
 		sprintf(cmd, "imc_cmd_%d", (u32)(ptr->id));
-		if (!imc_debugfs_create_x64(cmd, 0600, imc_debugfs_parent,
-					    imc_cmd_addr))
-			goto err;
+		imc_debugfs_create_x64(cmd, 0600, imc_debugfs_parent,
+				       imc_cmd_addr);
 		ptr++;
 	}
-	return;
-
-err:
-	debugfs_remove_recursive(imc_debugfs_parent);
 }
 
 /*
@@ -200,7 +185,7 @@ static void disable_nest_pmu_counters(void)
 	int nid, cpu;
 	const struct cpumask *l_cpumask;
 
-	get_online_cpus();
+	cpus_read_lock();
 	for_each_node_with_cpus(nid) {
 		l_cpumask = cpumask_of_node(nid);
 		cpu = cpumask_first_and(l_cpumask, cpu_online_mask);
@@ -209,25 +194,25 @@ static void disable_nest_pmu_counters(void)
 		opal_imc_counters_stop(OPAL_IMC_COUNTERS_NEST,
 				       get_hard_smp_processor_id(cpu));
 	}
-	put_online_cpus();
+	cpus_read_unlock();
 }
 
 static void disable_core_pmu_counters(void)
 {
-	cpumask_t cores_map;
 	int cpu, rc;
 
-	get_online_cpus();
+	cpus_read_lock();
 	/* Disable the IMC Core functions */
-	cores_map = cpu_online_cores_map();
-	for_each_cpu(cpu, &cores_map) {
+	for_each_online_cpu(cpu) {
+		if (cpu_first_thread_sibling(cpu) != cpu)
+			continue;
 		rc = opal_imc_counters_stop(OPAL_IMC_COUNTERS_CORE,
 					    get_hard_smp_processor_id(cpu));
 		if (rc)
 			pr_err("%s: Failed to stop Core (cpu = %d)\n",
-				__FUNCTION__, cpu);
+				__func__, cpu);
 	}
-	put_online_cpus();
+	cpus_read_unlock();
 }
 
 int get_max_nest_dev(void)
@@ -280,6 +265,9 @@ static int opal_imc_counters_probe(struct platform_device *pdev)
 			break;
 		case IMC_TYPE_THREAD:
 			domain = IMC_DOMAIN_THREAD;
+			break;
+		case IMC_TYPE_TRACE:
+			domain = IMC_DOMAIN_TRACE;
 			break;
 		default:
 			pr_warn("IMC Unknown Device type \n");

@@ -1,54 +1,16 @@
-/******************************************************************************
- *
- * Copyright(c) 2009-2012  Realtek Corporation.
- *
- * Tmis program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * Tmis program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * Tme full GNU General Public License is included in this distribution in the
- * file called LICENSE.
- *
- * Contact Information:
- * wlanfae <wlanfae@realtek.com>
- * Realtek Corporation, No. 2, Innovation Road II, Hsinchu Science Park,
- * Hsinchu 300, Taiwan.
- *
- * Larry Finger <Larry.Finger@lwfinger.net>
- *
- *****************************************************************************/
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright(c) 2009-2012  Realtek Corporation.*/
+
 #include "wifi.h"
 #include "efuse.h"
 #include "pci.h"
 #include <linux/export.h>
 
-static const u8 MAX_PGPKT_SIZE = 9;
 static const u8 PGPKT_DATA_SIZE = 8;
 static const int EFUSE_MAX_SIZE = 512;
 
 #define START_ADDRESS		0x1000
 #define REG_MCUFWDL		0x0080
-
-static const struct efuse_map RTL8712_SDIO_EFUSE_TABLE[] = {
-	{0, 0, 0, 2},
-	{0, 1, 0, 2},
-	{0, 2, 0, 2},
-	{1, 0, 0, 1},
-	{1, 0, 1, 1},
-	{1, 1, 0, 1},
-	{1, 1, 1, 3},
-	{1, 3, 0, 17},
-	{3, 3, 1, 48},
-	{10, 0, 0, 6},
-	{10, 3, 0, 1},
-	{10, 3, 1, 1},
-	{11, 0, 0, 28}
-};
 
 static const struct rtl_efuse_ops efuse_ops = {
 	.efuse_onebyte_read = efuse_one_byte_read,
@@ -138,10 +100,8 @@ u8 efuse_read_1byte(struct ieee80211_hw *hw, u16 address)
 						 rtlpriv->cfg->
 						 maps[EFUSE_CTRL] + 3);
 			k++;
-			if (k == 1000) {
-				k = 0;
+			if (k == 1000)
 				break;
-			}
 		}
 		data = rtl_read_byte(rtlpriv, rtlpriv->cfg->maps[EFUSE_CTRL]);
 		return data;
@@ -202,9 +162,18 @@ void efuse_write_1byte(struct ieee80211_hw *hw, u16 address, u8 value)
 void read_efuse_byte(struct ieee80211_hw *hw, u16 _offset, u8 *pbuf)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	u16 max_attempts = 10000;
 	u32 value32;
 	u8 readbyte;
 	u16 retry;
+
+	/*
+	 * In case of USB devices, transfer speeds are limited, hence
+	 * efuse I/O reads could be (way) slower. So, decrease (a lot)
+	 * the read attempts in case of failures.
+	 */
+	if (rtlpriv->rtlhal.interface == INTF_USB)
+		max_attempts = 10;
 
 	rtl_write_byte(rtlpriv, rtlpriv->cfg->maps[EFUSE_CTRL] + 1,
 		       (_offset & 0xff));
@@ -218,7 +187,7 @@ void read_efuse_byte(struct ieee80211_hw *hw, u16 _offset, u8 *pbuf)
 
 	retry = 0;
 	value32 = rtl_read_dword(rtlpriv, rtlpriv->cfg->maps[EFUSE_CTRL]);
-	while (!(((value32 >> 24) & 0xff) & 0x80) && (retry < 10000)) {
+	while (!(((value32 >> 24) & 0xff) & 0x80) && (retry < max_attempts)) {
 		value32 = rtl_read_dword(rtlpriv,
 					 rtlpriv->cfg->maps[EFUSE_CTRL]);
 		retry++;
@@ -386,20 +355,20 @@ bool efuse_shadow_update_chk(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_efuse *rtlefuse = rtl_efuse(rtl_priv(hw));
-	u8 section_idx, i, Base;
+	u8 section_idx, i, base;
 	u16 words_need = 0, hdr_num = 0, totalbytes, efuse_used;
 	bool wordchanged, result = true;
 
 	for (section_idx = 0; section_idx < 16; section_idx++) {
-		Base = section_idx * 8;
+		base = section_idx * 8;
 		wordchanged = false;
 
 		for (i = 0; i < 8; i = i + 2) {
-			if ((rtlefuse->efuse_map[EFUSE_INIT_MAP][Base + i] !=
-			     rtlefuse->efuse_map[EFUSE_MODIFY_MAP][Base + i]) ||
-			    (rtlefuse->efuse_map[EFUSE_INIT_MAP][Base + i + 1] !=
-			     rtlefuse->efuse_map[EFUSE_MODIFY_MAP][Base + i +
-								   1])) {
+			if (rtlefuse->efuse_map[EFUSE_INIT_MAP][base + i] !=
+			    rtlefuse->efuse_map[EFUSE_MODIFY_MAP][base + i] ||
+			    rtlefuse->efuse_map[EFUSE_INIT_MAP][base + i + 1] !=
+			    rtlefuse->efuse_map[EFUSE_MODIFY_MAP][base + i +
+								   1]) {
 				words_need++;
 				wordchanged = true;
 			}
@@ -495,6 +464,7 @@ bool efuse_shadow_update(struct ieee80211_hw *hw)
 
 		if (word_en != 0x0F) {
 			u8 tmpdata[8];
+
 			memcpy(tmpdata,
 			       &rtlefuse->efuse_map[EFUSE_MODIFY_MAP][base],
 			       8);
@@ -508,7 +478,6 @@ bool efuse_shadow_update(struct ieee80211_hw *hw)
 				break;
 			}
 		}
-
 	}
 
 	efuse_power_switch(hw, true, false);
@@ -540,7 +509,7 @@ void rtl_efuse_shadow_map_update(struct ieee80211_hw *hw)
 }
 EXPORT_SYMBOL(rtl_efuse_shadow_map_update);
 
-void efuse_force_write_vendor_Id(struct ieee80211_hw *hw)
+void efuse_force_write_vendor_id(struct ieee80211_hw *hw)
 {
 	u8 tmpdata[8] = { 0xFF, 0xFF, 0xEC, 0x10, 0xFF, 0xFF, 0xFF, 0xFF };
 
@@ -683,6 +652,7 @@ static int efuse_one_byte_write(struct ieee80211_hw *hw, u16 addr, u8 data)
 static void efuse_read_all_map(struct ieee80211_hw *hw, u8 *efuse)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
+
 	efuse_power_switch(hw, false, true);
 	read_efuse(hw, 0, rtlpriv->cfg->maps[EFUSE_HWSET_MAX_SIZE], efuse);
 	efuse_power_switch(hw, false, false);
@@ -833,6 +803,7 @@ static void efuse_write_data_case1(struct ieee80211_hw *hw, u16 *efuse_addr,
 				if (0x0F != (badworden & 0x0F))	{
 					u8 reorg_offset = offset;
 					u8 reorg_worden = badworden;
+
 					efuse_pg_packet_write(hw, reorg_offset,
 							      reorg_worden,
 							      originaldata);
@@ -922,6 +893,7 @@ static void efuse_write_data_case2(struct ieee80211_hw *hw, u16 *efuse_addr,
 			if (0x0F != (badworden & 0x0F)) {
 				u8 reorg_offset = tmp_pkt.offset;
 				u8 reorg_worden = badworden;
+
 				efuse_pg_packet_write(hw, reorg_offset,
 						      reorg_worden,
 						      originaldata);
@@ -952,7 +924,7 @@ static int efuse_pg_packet_write(struct ieee80211_hw *hw,
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct pgpkt_struct target_pkt;
 	u8 write_state = PG_STATE_HEADER;
-	int continual = true, dataempty = true, result = true;
+	int continual = true, result = true;
 	u16 efuse_addr = 0;
 	u8 efuse_data;
 	u8 target_word_cnts = 0;
@@ -978,9 +950,7 @@ static int efuse_pg_packet_write(struct ieee80211_hw *hw,
 
 	while (continual && (efuse_addr < (EFUSE_MAX_SIZE -
 		rtlpriv->cfg->maps[EFUSE_OOB_PROTECT_BYTES_LEN]))) {
-
 		if (write_state == PG_STATE_HEADER) {
-			dataempty = true;
 			badworden = 0x0F;
 			RTPRINT(rtlpriv, FEEPROM, EFUSE_PG,
 				"efuse PG_STATE_HEADER\n");
@@ -1005,7 +975,6 @@ static int efuse_pg_packet_write(struct ieee80211_hw *hw,
 		} else if (write_state == PG_STATE_DATA) {
 			RTPRINT(rtlpriv, FEEPROM, EFUSE_PG,
 				"efuse PG_STATE_DATA\n");
-			badworden = 0x0f;
 			badworden =
 			    enable_efuse_data_write(hw, efuse_addr + 1,
 						    target_pkt.word_en,
@@ -1132,40 +1101,39 @@ void efuse_power_switch(struct ieee80211_hw *hw, u8 write, u8 pwrstate)
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_hal *rtlhal = rtl_hal(rtl_priv(hw));
 	u8 tempval;
-	u16 tmpV16;
+	u16 tmpv16;
 
 	if (pwrstate && (rtlhal->hw_type != HARDWARE_TYPE_RTL8192SE)) {
-
 		if (rtlhal->hw_type != HARDWARE_TYPE_RTL8192CE &&
 		    rtlhal->hw_type != HARDWARE_TYPE_RTL8192DE) {
 			rtl_write_byte(rtlpriv,
 				       rtlpriv->cfg->maps[EFUSE_ACCESS], 0x69);
 		} else {
-			tmpV16 =
+			tmpv16 =
 			  rtl_read_word(rtlpriv,
 					rtlpriv->cfg->maps[SYS_ISO_CTRL]);
-			if (!(tmpV16 & rtlpriv->cfg->maps[EFUSE_PWC_EV12V])) {
-				tmpV16 |= rtlpriv->cfg->maps[EFUSE_PWC_EV12V];
+			if (!(tmpv16 & rtlpriv->cfg->maps[EFUSE_PWC_EV12V])) {
+				tmpv16 |= rtlpriv->cfg->maps[EFUSE_PWC_EV12V];
 				rtl_write_word(rtlpriv,
 					       rtlpriv->cfg->maps[SYS_ISO_CTRL],
-					       tmpV16);
+					       tmpv16);
 			}
 		}
-		tmpV16 = rtl_read_word(rtlpriv,
+		tmpv16 = rtl_read_word(rtlpriv,
 				       rtlpriv->cfg->maps[SYS_FUNC_EN]);
-		if (!(tmpV16 & rtlpriv->cfg->maps[EFUSE_FEN_ELDR])) {
-			tmpV16 |= rtlpriv->cfg->maps[EFUSE_FEN_ELDR];
+		if (!(tmpv16 & rtlpriv->cfg->maps[EFUSE_FEN_ELDR])) {
+			tmpv16 |= rtlpriv->cfg->maps[EFUSE_FEN_ELDR];
 			rtl_write_word(rtlpriv,
-				       rtlpriv->cfg->maps[SYS_FUNC_EN], tmpV16);
+				       rtlpriv->cfg->maps[SYS_FUNC_EN], tmpv16);
 		}
 
-		tmpV16 = rtl_read_word(rtlpriv, rtlpriv->cfg->maps[SYS_CLK]);
-		if ((!(tmpV16 & rtlpriv->cfg->maps[EFUSE_LOADER_CLK_EN])) ||
-		    (!(tmpV16 & rtlpriv->cfg->maps[EFUSE_ANA8M]))) {
-			tmpV16 |= (rtlpriv->cfg->maps[EFUSE_LOADER_CLK_EN] |
+		tmpv16 = rtl_read_word(rtlpriv, rtlpriv->cfg->maps[SYS_CLK]);
+		if ((!(tmpv16 & rtlpriv->cfg->maps[EFUSE_LOADER_CLK_EN])) ||
+		    (!(tmpv16 & rtlpriv->cfg->maps[EFUSE_ANA8M]))) {
+			tmpv16 |= (rtlpriv->cfg->maps[EFUSE_LOADER_CLK_EN] |
 				   rtlpriv->cfg->maps[EFUSE_ANA8M]);
 			rtl_write_word(rtlpriv,
-				       rtlpriv->cfg->maps[SYS_CLK], tmpV16);
+				       rtlpriv->cfg->maps[SYS_CLK], tmpv16);
 		}
 	}
 
@@ -1219,13 +1187,12 @@ static u16 efuse_get_current_size(struct ieee80211_hw *hw)
 {
 	int continual = true;
 	u16 efuse_addr = 0;
-	u8 hoffset, hworden;
+	u8 hworden;
 	u8 efuse_data, word_cnts;
 
 	while (continual && efuse_one_byte_read(hw, efuse_addr, &efuse_data) &&
 	       (efuse_addr < EFUSE_MAX_SIZE)) {
 		if (efuse_data != 0xFF) {
-			hoffset = (efuse_data >> 4) & 0x0F;
 			hworden = efuse_data & 0x0F;
 			word_cnts = efuse_calculate_word_cnts(hworden);
 			efuse_addr = efuse_addr + (word_cnts * 2) + 1;
@@ -1240,6 +1207,7 @@ static u16 efuse_get_current_size(struct ieee80211_hw *hw)
 static u8 efuse_calculate_word_cnts(u8 word_en)
 {
 	u8 word_cnts = 0;
+
 	if (!(word_en & BIT(0)))
 		word_cnts++;
 	if (!(word_en & BIT(1)))
@@ -1252,7 +1220,7 @@ static u8 efuse_calculate_word_cnts(u8 word_en)
 }
 
 int rtl_get_hwinfo(struct ieee80211_hw *hw, struct rtl_priv *rtlpriv,
-		   int max_size, u8 *hwinfo, int *params)
+		   int max_size, u8 *hwinfo, const int *params)
 {
 	struct rtl_efuse *rtlefuse = rtl_efuse(rtl_priv(hw));
 	struct rtl_pci_priv *rtlpcipriv = rtl_pcipriv(hw);
@@ -1328,18 +1296,44 @@ int rtl_get_hwinfo(struct ieee80211_hw *hw, struct rtl_priv *rtlpriv,
 }
 EXPORT_SYMBOL_GPL(rtl_get_hwinfo);
 
-void rtl_fw_block_write(struct ieee80211_hw *hw, const u8 *buffer, u32 size)
+static void _rtl_fw_block_write_usb(struct ieee80211_hw *hw, u8 *buffer, u32 size)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
-	u8 *pu4byteptr = (u8 *)buffer;
+	u32 start = START_ADDRESS;
+	u32 n;
+
+	while (size > 0) {
+		if (size >= 64)
+			n = 64;
+		else if (size >= 8)
+			n = 8;
+		else
+			n = 1;
+
+		rtl_write_chunk(rtlpriv, start, n, buffer);
+
+		start += n;
+		buffer += n;
+		size -= n;
+	}
+}
+
+void rtl_fw_block_write(struct ieee80211_hw *hw, u8 *buffer, u32 size)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	u32 i;
 
-	for (i = 0; i < size; i++)
-		rtl_write_byte(rtlpriv, (START_ADDRESS + i), *(pu4byteptr + i));
+	if (rtlpriv->rtlhal.interface == INTF_PCI) {
+		for (i = 0; i < size; i++)
+			rtl_write_byte(rtlpriv, (START_ADDRESS + i),
+				       *(buffer + i));
+	} else if (rtlpriv->rtlhal.interface == INTF_USB) {
+		_rtl_fw_block_write_usb(hw, buffer, size);
+	}
 }
 EXPORT_SYMBOL_GPL(rtl_fw_block_write);
 
-void rtl_fw_page_write(struct ieee80211_hw *hw, u32 page, const u8 *buffer,
+void rtl_fw_page_write(struct ieee80211_hw *hw, u32 page, u8 *buffer,
 		       u32 size)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * f71805f.c - driver for the Fintek F71805F/FG and F71872F/FG Super-I/O
  *             chips integrated hardware monitoring features
@@ -12,20 +13,6 @@
  *
  * The F71806F/FG is essentially the same as the F71872F/FG. It even has
  * the same chip ID, so the driver can't differentiate between.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -178,7 +165,7 @@ struct f71805f_data {
 	struct device *hwmon_dev;
 
 	struct mutex update_lock;
-	char valid;		/* !=0 if following fields are valid */
+	bool valid;		/* true if following fields are valid */
 	unsigned long last_updated;	/* In jiffies */
 	unsigned long last_limits;	/* In jiffies */
 
@@ -417,7 +404,7 @@ static struct f71805f_data *f71805f_update_device(struct device *dev)
 			+ (f71805f_read8(data, F71805F_REG_STATUS(2)) << 16);
 
 		data->last_updated = jiffies;
-		data->valid = 1;
+		data->valid = true;
 	}
 
 	mutex_unlock(&data->update_lock);
@@ -1493,7 +1480,7 @@ exit_remove_files:
 	return err;
 }
 
-static int f71805f_remove(struct platform_device *pdev)
+static void f71805f_remove(struct platform_device *pdev)
 {
 	struct f71805f_data *data = platform_get_drvdata(pdev);
 	int i;
@@ -1503,8 +1490,6 @@ static int f71805f_remove(struct platform_device *pdev)
 	for (i = 0; i < 4; i++)
 		sysfs_remove_group(&pdev->dev.kobj, &f71805f_group_optin[i]);
 	sysfs_remove_group(&pdev->dev.kobj, &f71805f_group_pwm_freq);
-
-	return 0;
 }
 
 static struct platform_driver f71805f_driver = {

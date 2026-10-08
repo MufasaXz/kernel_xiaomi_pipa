@@ -12,8 +12,9 @@
 #include "xfs_sysfs.h"
 #include "xfs_log.h"
 #include "xfs_log_priv.h"
-#include "xfs_stats.h"
 #include "xfs_mount.h"
+#include "xfs_zones.h"
+#include "xfs_zone_alloc.h"
 
 struct xfs_sysfs_attr {
 	struct attribute attr;
@@ -65,27 +66,15 @@ static const struct sysfs_ops xfs_sysfs_ops = {
 	.store = xfs_sysfs_object_store,
 };
 
-/*
- * xfs_mount kobject. The mp kobject also serves as the per-mount parent object
- * that is identified by the fsname under sysfs.
- */
-
-static inline struct xfs_mount *
-to_mp(struct kobject *kobject)
-{
-	struct xfs_kobj *kobj = to_kobj(kobject);
-
-	return container_of(kobj, struct xfs_mount, m_kobj);
-}
-
 static struct attribute *xfs_mp_attrs[] = {
 	NULL,
 };
+ATTRIBUTE_GROUPS(xfs_mp);
 
-struct kobj_type xfs_mp_ktype = {
+static const struct kobj_type xfs_mp_ktype = {
 	.release = xfs_sysfs_release,
 	.sysfs_ops = &xfs_sysfs_ops,
-	.default_attrs = xfs_mp_attrs,
+	.default_groups = xfs_mp_groups,
 };
 
 #ifdef DEBUG
@@ -119,7 +108,7 @@ bug_on_assert_show(
 	struct kobject		*kobject,
 	char			*buf)
 {
-	return snprintf(buf, PAGE_SIZE, "%d\n", xfs_globals.bug_on_assert ? 1 : 0);
+	return sysfs_emit(buf, "%d\n", xfs_globals.bug_on_assert);
 }
 XFS_SYSFS_ATTR_RW(bug_on_assert);
 
@@ -149,7 +138,7 @@ log_recovery_delay_show(
 	struct kobject	*kobject,
 	char		*buf)
 {
-	return snprintf(buf, PAGE_SIZE, "%d\n", xfs_globals.log_recovery_delay);
+	return sysfs_emit(buf, "%d\n", xfs_globals.log_recovery_delay);
 }
 XFS_SYSFS_ATTR_RW(log_recovery_delay);
 
@@ -179,21 +168,169 @@ mount_delay_show(
 	struct kobject	*kobject,
 	char		*buf)
 {
-	return snprintf(buf, PAGE_SIZE, "%d\n", xfs_globals.mount_delay);
+	return sysfs_emit(buf, "%d\n", xfs_globals.mount_delay);
 }
 XFS_SYSFS_ATTR_RW(mount_delay);
+
+static ssize_t
+always_cow_store(
+	struct kobject	*kobject,
+	const char	*buf,
+	size_t		count)
+{
+	ssize_t		ret;
+
+	ret = kstrtobool(buf, &xfs_globals.always_cow);
+	if (ret < 0)
+		return ret;
+	return count;
+}
+
+static ssize_t
+always_cow_show(
+	struct kobject	*kobject,
+	char		*buf)
+{
+	return sysfs_emit(buf, "%d\n", xfs_globals.always_cow);
+}
+XFS_SYSFS_ATTR_RW(always_cow);
+
+/*
+ * Override how many threads the parallel work queue is allowed to create.
+ * This has to be a debug-only global (instead of an errortag) because one of
+ * the main users of parallel workqueues is mount time quotacheck.
+ */
+STATIC ssize_t
+pwork_threads_store(
+	struct kobject	*kobject,
+	const char	*buf,
+	size_t		count)
+{
+	int		ret;
+	int		val;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	if (val < -1 || val > num_possible_cpus())
+		return -EINVAL;
+
+	xfs_globals.pwork_threads = val;
+
+	return count;
+}
+
+STATIC ssize_t
+pwork_threads_show(
+	struct kobject	*kobject,
+	char		*buf)
+{
+	return sysfs_emit(buf, "%d\n", xfs_globals.pwork_threads);
+}
+XFS_SYSFS_ATTR_RW(pwork_threads);
+
+/*
+ * The "LARP" (Logged extended Attribute Recovery Persistence) debugging knob
+ * sets the XFS_DA_OP_LOGGED flag on all xfs_attr_set operations performed on
+ * V5 filesystems.  As a result, the intermediate progress of all setxattr and
+ * removexattr operations are tracked via the log and can be restarted during
+ * recovery.  This is useful for testing xattr recovery prior to merging of the
+ * parent pointer feature which requires it to maintain consistency, and may be
+ * enabled for userspace xattrs in the future.
+ */
+static ssize_t
+larp_store(
+	struct kobject	*kobject,
+	const char	*buf,
+	size_t		count)
+{
+	ssize_t		ret;
+
+	ret = kstrtobool(buf, &xfs_globals.larp);
+	if (ret < 0)
+		return ret;
+	return count;
+}
+
+STATIC ssize_t
+larp_show(
+	struct kobject	*kobject,
+	char		*buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%d\n", xfs_globals.larp);
+}
+XFS_SYSFS_ATTR_RW(larp);
+
+STATIC ssize_t
+bload_leaf_slack_store(
+	struct kobject	*kobject,
+	const char	*buf,
+	size_t		count)
+{
+	int		ret;
+	int		val;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	xfs_globals.bload_leaf_slack = val;
+	return count;
+}
+
+STATIC ssize_t
+bload_leaf_slack_show(
+	struct kobject	*kobject,
+	char		*buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%d\n", xfs_globals.bload_leaf_slack);
+}
+XFS_SYSFS_ATTR_RW(bload_leaf_slack);
+
+STATIC ssize_t
+bload_node_slack_store(
+	struct kobject	*kobject,
+	const char	*buf,
+	size_t		count)
+{
+	int		ret;
+	int		val;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	xfs_globals.bload_node_slack = val;
+	return count;
+}
+
+STATIC ssize_t
+bload_node_slack_show(
+	struct kobject	*kobject,
+	char		*buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%d\n", xfs_globals.bload_node_slack);
+}
+XFS_SYSFS_ATTR_RW(bload_node_slack);
 
 static struct attribute *xfs_dbg_attrs[] = {
 	ATTR_LIST(bug_on_assert),
 	ATTR_LIST(log_recovery_delay),
 	ATTR_LIST(mount_delay),
+	ATTR_LIST(always_cow),
+	ATTR_LIST(pwork_threads),
+	ATTR_LIST(larp),
+	ATTR_LIST(bload_leaf_slack),
+	ATTR_LIST(bload_node_slack),
 	NULL,
 };
+ATTRIBUTE_GROUPS(xfs_dbg);
 
-struct kobj_type xfs_dbg_ktype = {
+const struct kobj_type xfs_dbg_ktype = {
 	.release = xfs_sysfs_release,
 	.sysfs_ops = &xfs_sysfs_ops,
-	.default_attrs = xfs_dbg_attrs,
+	.default_groups = xfs_dbg_groups,
 };
 
 #endif /* DEBUG */
@@ -246,11 +383,12 @@ static struct attribute *xfs_stats_attrs[] = {
 	ATTR_LIST(stats_clear),
 	NULL,
 };
+ATTRIBUTE_GROUPS(xfs_stats);
 
-struct kobj_type xfs_stats_ktype = {
+const struct kobj_type xfs_stats_ktype = {
 	.release = xfs_sysfs_release,
 	.sysfs_ops = &xfs_sysfs_ops,
-	.default_attrs = xfs_stats_attrs,
+	.default_groups = xfs_stats_groups,
 };
 
 /* xlog */
@@ -277,7 +415,7 @@ log_head_lsn_show(
 	block = log->l_curr_block;
 	spin_unlock(&log->l_icloglock);
 
-	return snprintf(buf, PAGE_SIZE, "%d:%d\n", cycle, block);
+	return sysfs_emit(buf, "%d:%d\n", cycle, block);
 }
 XFS_SYSFS_ATTR_RO(log_head_lsn);
 
@@ -291,51 +429,43 @@ log_tail_lsn_show(
 	struct xlog *log = to_xlog(kobject);
 
 	xlog_crack_atomic_lsn(&log->l_tail_lsn, &cycle, &block);
-	return snprintf(buf, PAGE_SIZE, "%d:%d\n", cycle, block);
+	return sysfs_emit(buf, "%d:%d\n", cycle, block);
 }
 XFS_SYSFS_ATTR_RO(log_tail_lsn);
 
 STATIC ssize_t
-reserve_grant_head_show(
+reserve_grant_head_bytes_show(
 	struct kobject	*kobject,
 	char		*buf)
-
 {
-	int cycle;
-	int bytes;
-	struct xlog *log = to_xlog(kobject);
-
-	xlog_crack_grant_head(&log->l_reserve_head.grant, &cycle, &bytes);
-	return snprintf(buf, PAGE_SIZE, "%d:%d\n", cycle, bytes);
+	return sysfs_emit(buf, "%lld\n",
+			atomic64_read(&to_xlog(kobject)->l_reserve_head.grant));
 }
-XFS_SYSFS_ATTR_RO(reserve_grant_head);
+XFS_SYSFS_ATTR_RO(reserve_grant_head_bytes);
 
 STATIC ssize_t
-write_grant_head_show(
+write_grant_head_bytes_show(
 	struct kobject	*kobject,
 	char		*buf)
 {
-	int cycle;
-	int bytes;
-	struct xlog *log = to_xlog(kobject);
-
-	xlog_crack_grant_head(&log->l_write_head.grant, &cycle, &bytes);
-	return snprintf(buf, PAGE_SIZE, "%d:%d\n", cycle, bytes);
+	return sysfs_emit(buf, "%lld\n",
+			atomic64_read(&to_xlog(kobject)->l_write_head.grant));
 }
-XFS_SYSFS_ATTR_RO(write_grant_head);
+XFS_SYSFS_ATTR_RO(write_grant_head_bytes);
 
 static struct attribute *xfs_log_attrs[] = {
 	ATTR_LIST(log_head_lsn),
 	ATTR_LIST(log_tail_lsn),
-	ATTR_LIST(reserve_grant_head),
-	ATTR_LIST(write_grant_head),
+	ATTR_LIST(reserve_grant_head_bytes),
+	ATTR_LIST(write_grant_head_bytes),
 	NULL,
 };
+ATTRIBUTE_GROUPS(xfs_log);
 
-struct kobj_type xfs_log_ktype = {
+const struct kobj_type xfs_log_ktype = {
 	.release = xfs_sysfs_release,
 	.sysfs_ops = &xfs_sysfs_ops,
-	.default_attrs = xfs_log_attrs,
+	.default_groups = xfs_log_groups,
 };
 
 /*
@@ -375,7 +505,7 @@ max_retries_show(
 	else
 		retries = cfg->max_retries;
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", retries);
+	return sysfs_emit(buf, "%d\n", retries);
 }
 
 static ssize_t
@@ -416,7 +546,7 @@ retry_timeout_seconds_show(
 	else
 		timeout = jiffies_to_msecs(cfg->retry_timeout) / MSEC_PER_SEC;
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", timeout);
+	return sysfs_emit(buf, "%d\n", timeout);
 }
 
 static ssize_t
@@ -440,8 +570,8 @@ retry_timeout_seconds_store(
 	if (val == -1)
 		cfg->retry_timeout = XFS_ERR_RETRY_FOREVER;
 	else {
-		cfg->retry_timeout = msecs_to_jiffies(val * MSEC_PER_SEC);
-		ASSERT(msecs_to_jiffies(val * MSEC_PER_SEC) < LONG_MAX);
+		cfg->retry_timeout = secs_to_jiffies(val);
+		ASSERT(secs_to_jiffies(val) < LONG_MAX);
 	}
 	return count;
 }
@@ -454,7 +584,7 @@ fail_at_unmount_show(
 {
 	struct xfs_mount	*mp = err_to_mp(kobject);
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", mp->m_fail_unmount);
+	return sysfs_emit(buf, "%d\n", mp->m_fail_unmount);
 }
 
 static ssize_t
@@ -484,15 +614,15 @@ static struct attribute *xfs_error_attrs[] = {
 	ATTR_LIST(retry_timeout_seconds),
 	NULL,
 };
+ATTRIBUTE_GROUPS(xfs_error);
 
-
-static struct kobj_type xfs_error_cfg_ktype = {
+static const struct kobj_type xfs_error_cfg_ktype = {
 	.release = xfs_sysfs_release,
 	.sysfs_ops = &xfs_sysfs_ops,
-	.default_attrs = xfs_error_attrs,
+	.default_groups = xfs_error_groups,
 };
 
-static struct kobj_type xfs_error_ktype = {
+static const struct kobj_type xfs_error_ktype = {
 	.release = xfs_sysfs_release,
 	.sysfs_ops = &xfs_sysfs_ops,
 };
@@ -558,8 +688,8 @@ xfs_error_sysfs_init_class(
 		if (init[i].retry_timeout == XFS_ERR_RETRY_FOREVER)
 			cfg->retry_timeout = XFS_ERR_RETRY_FOREVER;
 		else
-			cfg->retry_timeout = msecs_to_jiffies(
-					init[i].retry_timeout * MSEC_PER_SEC);
+			cfg->retry_timeout =
+					secs_to_jiffies(init[i].retry_timeout);
 	}
 	return 0;
 
@@ -573,44 +703,138 @@ out_error:
 	return error;
 }
 
+static inline struct xfs_mount *zoned_to_mp(struct kobject *kobj)
+{
+	return container_of(to_kobj(kobj), struct xfs_mount, m_zoned_kobj);
+}
+
+static ssize_t
+max_open_zones_show(
+	struct kobject		*kobj,
+	char			*buf)
+{
+	/* only report the open zones available for user data */
+	return sysfs_emit(buf, "%u\n",
+		zoned_to_mp(kobj)->m_max_open_zones - XFS_OPEN_GC_ZONES);
+}
+XFS_SYSFS_ATTR_RO(max_open_zones);
+
+static ssize_t
+zonegc_low_space_store(
+	struct kobject		*kobj,
+	const char		*buf,
+	size_t			count)
+{
+	struct xfs_mount	*mp = zoned_to_mp(kobj);
+	int			ret;
+	unsigned int		val;
+
+	ret = kstrtouint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	if (val > 100)
+		return -EINVAL;
+
+	if (mp->m_zonegc_low_space != val) {
+		mp->m_zonegc_low_space = val;
+		xfs_zone_gc_wakeup(mp);
+	}
+
+	return count;
+}
+
+static ssize_t
+zonegc_low_space_show(
+	struct kobject		*kobj,
+	char			*buf)
+{
+	return sysfs_emit(buf, "%u\n",
+			zoned_to_mp(kobj)->m_zonegc_low_space);
+}
+XFS_SYSFS_ATTR_RW(zonegc_low_space);
+
+static struct attribute *xfs_zoned_attrs[] = {
+	ATTR_LIST(max_open_zones),
+	ATTR_LIST(zonegc_low_space),
+	NULL,
+};
+ATTRIBUTE_GROUPS(xfs_zoned);
+
+static const struct kobj_type xfs_zoned_ktype = {
+	.release = xfs_sysfs_release,
+	.sysfs_ops = &xfs_sysfs_ops,
+	.default_groups = xfs_zoned_groups,
+};
+
 int
-xfs_error_sysfs_init(
+xfs_mount_sysfs_init(
 	struct xfs_mount	*mp)
 {
 	int			error;
+
+	super_set_sysfs_name_id(mp->m_super);
+
+	/* .../xfs/<dev>/ */
+	error = xfs_sysfs_init(&mp->m_kobj, &xfs_mp_ktype,
+			       NULL, mp->m_super->s_id);
+	if (error)
+		return error;
+
+	/* .../xfs/<dev>/stats/ */
+	error = xfs_sysfs_init(&mp->m_stats.xs_kobj, &xfs_stats_ktype,
+			       &mp->m_kobj, "stats");
+	if (error)
+		goto out_remove_fsdir;
 
 	/* .../xfs/<dev>/error/ */
 	error = xfs_sysfs_init(&mp->m_error_kobj, &xfs_error_ktype,
 				&mp->m_kobj, "error");
 	if (error)
-		return error;
+		goto out_remove_stats_dir;
 
+	/* .../xfs/<dev>/error/fail_at_unmount */
 	error = sysfs_create_file(&mp->m_error_kobj.kobject,
 				  ATTR_LIST(fail_at_unmount));
 
 	if (error)
-		goto out_error;
+		goto out_remove_error_dir;
 
 	/* .../xfs/<dev>/error/metadata/ */
 	error = xfs_error_sysfs_init_class(mp, XFS_ERR_METADATA,
 				"metadata", &mp->m_error_meta_kobj,
 				xfs_error_meta_init);
 	if (error)
-		goto out_error;
+		goto out_remove_error_dir;
+
+	if (IS_ENABLED(CONFIG_XFS_RT) && xfs_has_zoned(mp)) {
+		/* .../xfs/<dev>/zoned/ */
+		error = xfs_sysfs_init(&mp->m_zoned_kobj, &xfs_zoned_ktype,
+					&mp->m_kobj, "zoned");
+		if (error)
+			goto out_remove_error_dir;
+	}
 
 	return 0;
 
-out_error:
+out_remove_error_dir:
 	xfs_sysfs_del(&mp->m_error_kobj);
+out_remove_stats_dir:
+	xfs_sysfs_del(&mp->m_stats.xs_kobj);
+out_remove_fsdir:
+	xfs_sysfs_del(&mp->m_kobj);
 	return error;
 }
 
 void
-xfs_error_sysfs_del(
+xfs_mount_sysfs_del(
 	struct xfs_mount	*mp)
 {
 	struct xfs_error_cfg	*cfg;
 	int			i, j;
+
+	if (IS_ENABLED(CONFIG_XFS_RT) && xfs_has_zoned(mp))
+		xfs_sysfs_del(&mp->m_zoned_kobj);
 
 	for (i = 0; i < XFS_ERR_CLASS_MAX; i++) {
 		for (j = 0; j < XFS_ERR_ERRNO_MAX; j++) {
@@ -621,6 +845,8 @@ xfs_error_sysfs_del(
 	}
 	xfs_sysfs_del(&mp->m_error_meta_kobj);
 	xfs_sysfs_del(&mp->m_error_kobj);
+	xfs_sysfs_del(&mp->m_stats.xs_kobj);
+	xfs_sysfs_del(&mp->m_kobj);
 }
 
 struct xfs_error_cfg *

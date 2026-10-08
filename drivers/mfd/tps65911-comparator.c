@@ -1,15 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * tps65910.c  --  TI TPS6591x
  *
  * Copyright 2010 Texas Instruments Inc.
  *
  * Author: Jorge Eduardo Candelaria <jedu@slimlogic.co.uk>
- *
- *  This program is free software; you can redistribute it and/or modify it
- *  under  the terms of the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the License, or (at your
- *  option) any later version.
- *
  */
 
 #include <linux/kernel.h>
@@ -74,7 +69,7 @@ static int comp_threshold_set(struct tps65910 *tps65910, int id, int voltage)
 		return -EINVAL;
 
 	val = index << 1;
-	ret = tps65910_reg_write(tps65910, tps_comp.reg, val);
+	ret = regmap_write(tps65910->regmap, tps_comp.reg, val);
 
 	return ret;
 }
@@ -85,7 +80,7 @@ static int comp_threshold_get(struct tps65910 *tps65910, int id)
 	unsigned int val;
 	int ret;
 
-	ret = tps65910_reg_read(tps65910, tps_comp.reg, &val);
+	ret = regmap_read(tps65910->regmap, tps_comp.reg, &val);
 	if (ret < 0)
 		return ret;
 
@@ -145,15 +140,13 @@ static int tps65911_comparator_probe(struct platform_device *pdev)
 	return ret;
 }
 
-static int tps65911_comparator_remove(struct platform_device *pdev)
+static void tps65911_comparator_remove(struct platform_device *pdev)
 {
 	struct tps65910 *tps65910;
 
 	tps65910 = dev_get_drvdata(pdev->dev.parent);
 	device_remove_file(&pdev->dev, &dev_attr_comp2_threshold);
 	device_remove_file(&pdev->dev, &dev_attr_comp1_threshold);
-
-	return 0;
 }
 
 static struct platform_driver tps65911_comparator_driver = {

@@ -1,3 +1,6 @@
+
+.. _addsyscalls:
+
 Adding a New System Call
 ========================
 
@@ -30,7 +33,7 @@ interface.
        to a somewhat opaque API.
 
  - If you're just exposing runtime system information, a new node in sysfs
-   (see ``Documentation/filesystems/sysfs.txt``) or the ``/proc`` filesystem may
+   (see ``Documentation/filesystems/sysfs.rst``) or the ``/proc`` filesystem may
    be more appropriate.  However, access to these mechanisms requires that the
    relevant filesystem is mounted, which might not always be the case (e.g.
    in a namespaced/sandboxed/chrooted environment).  Avoid adding any API to
@@ -232,7 +235,7 @@ normally be optional, so add a ``CONFIG`` option (typically to
    by the option.
  - Make the option depend on EXPERT if it should be hidden from normal users.
  - Make any new source files implementing the function dependent on the CONFIG
-   option in the Makefile (e.g. ``obj-$(CONFIG_XYZZY_SYSCALL) += xyzzy.c``).
+   option in the Makefile (e.g. ``obj-$(CONFIG_XYZZY_SYSCALL) += xyzzy.o``).
  - Double check that the kernel still builds with the new CONFIG option turned
    off.
 
@@ -242,6 +245,52 @@ To summarize, you need a commit that includes:
  - ``SYSCALL_DEFINEn(xyzzy, ...)`` for the entry point
  - corresponding prototype in ``include/linux/syscalls.h``
  - generic table entry in ``include/uapi/asm-generic/unistd.h``
+ - fallback stub in ``kernel/sys_ni.c``
+
+
+.. _syscall_generic_6_11:
+
+Since 6.11
+~~~~~~~~~~
+
+Starting with kernel version 6.11, general system call implementation for the
+following architectures no longer requires modifications to
+``include/uapi/asm-generic/unistd.h``:
+
+ - arc
+ - arm64
+ - csky
+ - hexagon
+ - loongarch
+ - nios2
+ - openrisc
+ - riscv
+
+Instead, you need to update ``scripts/syscall.tbl`` and, if applicable, adjust
+``arch/*/kernel/Makefile.syscalls``.
+
+As ``scripts/syscall.tbl`` serves as a common syscall table across multiple
+architectures, a new entry is required in this table::
+
+    468   common   xyzzy     sys_xyzzy
+
+Note that adding an entry to ``scripts/syscall.tbl`` with the "common" ABI
+also affects all architectures that share this table. For more limited or
+architecture-specific changes, consider using an architecture-specific ABI or
+defining a new one.
+
+If a new ABI, say ``xyz``, is introduced, the corresponding updates should be
+made to ``arch/*/kernel/Makefile.syscalls`` as well::
+
+    syscall_abis_{32,64} += xyz (...)
+
+To summarize, you need a commit that includes:
+
+ - ``CONFIG`` option for the new function, normally in ``init/Kconfig``
+ - ``SYSCALL_DEFINEn(xyzzy, ...)`` for the entry point
+ - corresponding prototype in ``include/linux/syscalls.h``
+ - new entry in ``scripts/syscall.tbl``
+ - (if needed) Makefile updates in ``arch/*/kernel/Makefile.syscalls``
  - fallback stub in ``kernel/sys_ni.c``
 
 
@@ -348,6 +397,41 @@ To summarize, you need:
  - (if needed) 32-bit mapping struct in ``include/linux/compat.h``
  - instance of ``__SC_COMP`` not ``__SYSCALL`` in
    ``include/uapi/asm-generic/unistd.h``
+
+
+Since 6.11
+~~~~~~~~~~
+
+This applies to all the architectures listed in :ref:`Since 6.11<syscall_generic_6_11>`
+under "Generic System Call Implementation", except arm64. See
+:ref:`Compatibility System Calls (arm64)<compat_arm64>` for more information.
+
+You need to extend the entry in ``scripts/syscall.tbl`` with an extra column
+to indicate that a 32-bit userspace program running on a 64-bit kernel should
+hit the compat entry point::
+
+    468   common     xyzzy     sys_xyzzy    compat_sys_xyzzy
+
+To summarize, you need:
+
+ - ``COMPAT_SYSCALL_DEFINEn(xyzzy, ...)`` for the compat entry point
+ - corresponding prototype in ``include/linux/compat.h``
+ - modification of the entry in ``scripts/syscall.tbl`` to include an extra
+   "compat" column
+ - (if needed) 32-bit mapping struct in ``include/linux/compat.h``
+
+
+.. _compat_arm64:
+
+Compatibility System Calls (arm64)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+On arm64, there is a dedicated syscall table for compatibility system calls
+targeting 32-bit (AArch32) userspace: ``arch/arm64/tools/syscall_32.tbl``.
+You need to add an additional line to this table specifying the compat
+entry point::
+
+    468   common     xyzzy     sys_xyzzy    compat_sys_xyzzy
 
 
 Compatibility System Calls (x86)
@@ -498,7 +582,7 @@ table, but not from elsewhere in the kernel.  If the syscall functionality is
 useful to be used within the kernel, needs to be shared between an old and a
 new syscall, or needs to be shared between a syscall and its compatibility
 variant, it should be implemented by means of a "helper" function (such as
-``kern_xyzzy()``).  This kernel function may then be called within the
+``ksys_xyzzy()``).  This kernel function may then be called within the
 syscall stub (``sys_xyzzy()``), the compatibility syscall stub
 (``compat_sys_xyzzy()``), and/or other kernel code.
 
@@ -538,25 +622,25 @@ References and Sources
    :manpage:`syscall(2)` man-page:
    http://man7.org/linux/man-pages/man2/syscall.2.html#NOTES
  - Collated emails from Linus Torvalds discussing the problems with ``ioctl()``:
-   http://yarchive.net/comp/linux/ioctl.html
+   https://yarchive.net/comp/linux/ioctl.html
  - "How to not invent kernel interfaces", Arnd Bergmann,
-   http://www.ukuug.org/events/linux2007/2007/papers/Bergmann.pdf
+   https://www.ukuug.org/events/linux2007/2007/papers/Bergmann.pdf
  - LWN article from Michael Kerrisk on avoiding new uses of CAP_SYS_ADMIN:
    https://lwn.net/Articles/486306/
  - Recommendation from Andrew Morton that all related information for a new
    system call should come in the same email thread:
-   https://lkml.org/lkml/2014/7/24/641
+   https://lore.kernel.org/r/20140724144747.3041b208832bbdf9fbce5d96@linux-foundation.org
  - Recommendation from Michael Kerrisk that a new system call should come with
-   a man page: https://lkml.org/lkml/2014/6/13/309
+   a man page: https://lore.kernel.org/r/CAKgNAkgMA39AfoSoA5Pe1r9N+ZzfYQNvNPvcRN7tOvRb8+v06Q@mail.gmail.com
  - Suggestion from Thomas Gleixner that x86 wire-up should be in a separate
-   commit: https://lkml.org/lkml/2014/11/19/254
+   commit: https://lore.kernel.org/r/alpine.DEB.2.11.1411191249560.3909@nanos
  - Suggestion from Greg Kroah-Hartman that it's good for new system calls to
-   come with a man-page & selftest: https://lkml.org/lkml/2014/3/19/710
+   come with a man-page & selftest: https://lore.kernel.org/r/20140320025530.GA25469@kroah.com
  - Discussion from Michael Kerrisk of new system call vs. :manpage:`prctl(2)` extension:
-   https://lkml.org/lkml/2014/6/3/411
+   https://lore.kernel.org/r/CAHO5Pa3F2MjfTtfNxa8LbnkeeU8=YJ+9tDqxZpw7Gz59E-4AUg@mail.gmail.com
  - Suggestion from Ingo Molnar that system calls that involve multiple
    arguments should encapsulate those arguments in a struct, which includes a
-   size field for future extensibility: https://lkml.org/lkml/2015/7/30/117
+   size field for future extensibility: https://lore.kernel.org/r/20150730083831.GA22182@gmail.com
  - Numbering oddities arising from (re-)use of O_* numbering space flags:
 
     - commit 75069f2b5bfb ("vfs: renumber FMODE_NONOTIFY and add to uniqueness
@@ -566,9 +650,12 @@ References and Sources
     - commit bb458c644a59 ("Safer ABI for O_TMPFILE")
 
  - Discussion from Matthew Wilcox about restrictions on 64-bit arguments:
-   https://lkml.org/lkml/2008/12/12/187
+   https://lore.kernel.org/r/20081212152929.GM26095@parisc-linux.org
  - Recommendation from Greg Kroah-Hartman that unknown flags should be
-   policed: https://lkml.org/lkml/2014/7/17/577
+   policed: https://lore.kernel.org/r/20140717193330.GB4703@kroah.com
  - Recommendation from Linus Torvalds that x32 system calls should prefer
    compatibility with 64-bit versions rather than 32-bit versions:
-   https://lkml.org/lkml/2011/8/31/244
+   https://lore.kernel.org/r/CA+55aFxfmwfB7jbbrXxa=K7VBYPfAvmu3XOkGrLbB1UFjX1+Ew@mail.gmail.com
+ - Patch series revising system call table infrastructure to use
+   scripts/syscall.tbl across multiple architectures:
+   https://lore.kernel.org/lkml/20240704143611.2979589-1-arnd@kernel.org

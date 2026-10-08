@@ -18,7 +18,6 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(remove_device_from_group);
 
 /* iommu_device_event */
 EXPORT_TRACEPOINT_SYMBOL_GPL(attach_device_to_domain);
-EXPORT_TRACEPOINT_SYMBOL_GPL(detach_device_from_domain);
 
 /* iommu_map_unmap */
 EXPORT_TRACEPOINT_SYMBOL_GPL(map);
@@ -26,7 +25,3 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(unmap);
 
 /* iommu_error */
 EXPORT_TRACEPOINT_SYMBOL_GPL(io_page_fault);
-EXPORT_TRACEPOINT_SYMBOL_GPL(smmu_init);
-EXPORT_TRACEPOINT_SYMBOL_GPL(tlbi_end);
-EXPORT_TRACEPOINT_SYMBOL_GPL(tlbi_start);
-EXPORT_TRACEPOINT_SYMBOL_GPL(tlbsync_timeout);

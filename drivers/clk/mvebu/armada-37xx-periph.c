@@ -18,12 +18,13 @@
  */
 
 #include <linux/clk-provider.h>
+#include <linux/io.h>
 #include <linux/mfd/syscon.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
+#include <linux/jiffies.h>
 
 #define TBG_SEL		0x0
 #define DIV_SEL0	0x4
@@ -56,6 +57,15 @@
 struct clk_periph_driver_data {
 	struct clk_hw_onecell_data *hw_data;
 	spinlock_t lock;
+	void __iomem *reg;
+
+	/* Storage registers for suspend/resume operations */
+	u32 tbg_sel;
+	u32 div_sel0;
+	u32 div_sel1;
+	u32 div_sel2;
+	u32 clk_sel;
+	u32 clk_dis;
 };
 
 struct clk_double_div {
@@ -294,6 +304,7 @@ PERIPH_CLK_GATE_DIV(gbe_bm, 12, DIV_SEL1, 0, clk_table1);
 PERIPH_CLK_FULL_DD(sdio, 11, 14, DIV_SEL0, DIV_SEL0, 3, 6);
 PERIPH_CLK_FULL_DD(usb32_usb2_sys, 16, 16, DIV_SEL0, DIV_SEL0, 9, 12);
 PERIPH_CLK_FULL_DD(usb32_ss_sys, 17, 18, DIV_SEL0, DIV_SEL0, 15, 18);
+static PERIPH_GATE(pcie, 14);
 
 static struct clk_periph_data data_sb[] = {
 	REF_CLK_MUX_DD(gbe_50),
@@ -309,6 +320,7 @@ static struct clk_periph_data data_sb[] = {
 	REF_CLK_FULL_DD(sdio),
 	REF_CLK_FULL_DD(usb32_usb2_sys),
 	REF_CLK_FULL_DD(usb32_ss_sys),
+	REF_CLK_GATE(pcie, "gbe_core"),
 	{ },
 };
 
@@ -442,12 +454,12 @@ static unsigned long clk_pm_cpu_recalc_rate(struct clk_hw *hw,
 	return DIV_ROUND_UP_ULL((u64)parent_rate, div);
 }
 
-static long clk_pm_cpu_round_rate(struct clk_hw *hw, unsigned long rate,
-				  unsigned long *parent_rate)
+static int clk_pm_cpu_determine_rate(struct clk_hw *hw,
+				     struct clk_rate_request *req)
 {
 	struct clk_pm_cpu *pm_cpu = to_clk_pm_cpu(hw);
 	struct regmap *base = pm_cpu->nb_pm_base;
-	unsigned int div = *parent_rate / rate;
+	unsigned int div = req->best_parent_rate / req->rate;
 	unsigned int load_level;
 	/* only available when DVFS is enabled */
 	if (!armada_3700_pm_dvfs_is_enabled(base))
@@ -462,13 +474,16 @@ static long clk_pm_cpu_round_rate(struct clk_hw *hw, unsigned long rate,
 
 		val >>= offset;
 		val &= ARMADA_37XX_NB_TBG_DIV_MASK;
-		if (val == div)
+		if (val == div) {
 			/*
 			 * We found a load level matching the target
 			 * divider, switch to this load level and
 			 * return.
 			 */
-			return *parent_rate / div;
+			req->rate = req->best_parent_rate / div;
+
+			return 0;
+		}
 	}
 
 	/* We didn't find any valid divider */
@@ -529,7 +544,7 @@ static void clk_pm_cpu_set_rate_wa(struct clk_pm_cpu *pm_cpu,
 	 * We are going to L0 with rate >= 1GHz. Check whether we have been at
 	 * L1 for long enough time. If not, go to L1 for 20ms.
 	 */
-	if (pm_cpu->l1_expiration && jiffies >= pm_cpu->l1_expiration)
+	if (pm_cpu->l1_expiration && time_is_before_eq_jiffies(pm_cpu->l1_expiration))
 		goto invalidate_l1_exp;
 
 	regmap_update_bits(base, ARMADA_37XX_NB_CPU_LOAD,
@@ -588,7 +603,7 @@ static int clk_pm_cpu_set_rate(struct clk_hw *hw, unsigned long rate,
 
 static const struct clk_ops clk_pm_cpu_ops = {
 	.get_parent = clk_pm_cpu_get_parent,
-	.round_rate = clk_pm_cpu_round_rate,
+	.determine_rate = clk_pm_cpu_determine_rate,
 	.set_rate = clk_pm_cpu_set_rate,
 	.recalc_rate = clk_pm_cpu_recalc_rate,
 };
@@ -679,6 +694,40 @@ static int armada_3700_add_composite_clk(const struct clk_periph_data *data,
 	return PTR_ERR_OR_ZERO(*hw);
 }
 
+static int __maybe_unused armada_3700_periph_clock_suspend(struct device *dev)
+{
+	struct clk_periph_driver_data *data = dev_get_drvdata(dev);
+
+	data->tbg_sel = readl(data->reg + TBG_SEL);
+	data->div_sel0 = readl(data->reg + DIV_SEL0);
+	data->div_sel1 = readl(data->reg + DIV_SEL1);
+	data->div_sel2 = readl(data->reg + DIV_SEL2);
+	data->clk_sel = readl(data->reg + CLK_SEL);
+	data->clk_dis = readl(data->reg + CLK_DIS);
+
+	return 0;
+}
+
+static int __maybe_unused armada_3700_periph_clock_resume(struct device *dev)
+{
+	struct clk_periph_driver_data *data = dev_get_drvdata(dev);
+
+	/* Follow the same order than what the Cortex-M3 does (ATF code) */
+	writel(data->clk_dis, data->reg + CLK_DIS);
+	writel(data->div_sel0, data->reg + DIV_SEL0);
+	writel(data->div_sel1, data->reg + DIV_SEL1);
+	writel(data->div_sel2, data->reg + DIV_SEL2);
+	writel(data->tbg_sel, data->reg + TBG_SEL);
+	writel(data->clk_sel, data->reg + CLK_SEL);
+
+	return 0;
+}
+
+static const struct dev_pm_ops armada_3700_periph_clock_pm_ops = {
+	SET_NOIRQ_SYSTEM_SLEEP_PM_OPS(armada_3700_periph_clock_suspend,
+				      armada_3700_periph_clock_resume)
+};
+
 static int armada_3700_periph_clock_probe(struct platform_device *pdev)
 {
 	struct clk_periph_driver_data *driver_data;
@@ -686,8 +735,6 @@ static int armada_3700_periph_clock_probe(struct platform_device *pdev)
 	const struct clk_periph_data *data;
 	struct device *dev = &pdev->dev;
 	int num_periph = 0, i, ret;
-	struct resource *res;
-	void __iomem *reg;
 
 	data = of_device_get_match_data(dev);
 	if (!data)
@@ -695,11 +742,6 @@ static int armada_3700_periph_clock_probe(struct platform_device *pdev)
 
 	while (data[num_periph].name)
 		num_periph++;
-
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	reg = devm_ioremap_resource(dev, res);
-	if (IS_ERR(reg))
-		return PTR_ERR(reg);
 
 	driver_data = devm_kzalloc(dev, sizeof(*driver_data), GFP_KERNEL);
 	if (!driver_data)
@@ -713,12 +755,15 @@ static int armada_3700_periph_clock_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	driver_data->hw_data->num = num_periph;
 
+	driver_data->reg = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(driver_data->reg))
+		return PTR_ERR(driver_data->reg);
+
 	spin_lock_init(&driver_data->lock);
 
 	for (i = 0; i < num_periph; i++) {
 		struct clk_hw **hw = &driver_data->hw_data->hws[i];
-
-		if (armada_3700_add_composite_clk(&data[i], reg,
+		if (armada_3700_add_composite_clk(&data[i], driver_data->reg,
 						  &driver_data->lock, dev, hw))
 			dev_err(dev, "Can't register periph clock %s\n",
 				data[i].name);
@@ -736,7 +781,7 @@ static int armada_3700_periph_clock_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int armada_3700_periph_clock_remove(struct platform_device *pdev)
+static void armada_3700_periph_clock_remove(struct platform_device *pdev)
 {
 	struct clk_periph_driver_data *data = platform_get_drvdata(pdev);
 	struct clk_hw_onecell_data *hw_data = data->hw_data;
@@ -746,8 +791,6 @@ static int armada_3700_periph_clock_remove(struct platform_device *pdev)
 
 	for (i = 0; i < hw_data->num; i++)
 		clk_hw_unregister(hw_data->hws[i]);
-
-	return 0;
 }
 
 static struct platform_driver armada_3700_periph_clock_driver = {
@@ -756,6 +799,7 @@ static struct platform_driver armada_3700_periph_clock_driver = {
 	.driver		= {
 		.name	= "marvell-armada-3700-periph-clock",
 		.of_match_table = armada_3700_periph_clock_of_match,
+		.pm	= &armada_3700_periph_clock_pm_ops,
 	},
 };
 

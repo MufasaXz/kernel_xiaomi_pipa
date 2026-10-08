@@ -11,9 +11,11 @@
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/dma-buf.h>
+#include <linux/dma-direct.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
+#include <linux/module.h>
 
 #include <xen/xen.h>
 #include <xen/grant_table.h>
@@ -21,14 +23,7 @@
 #include "gntdev-common.h"
 #include "gntdev-dmabuf.h"
 
-#ifndef GRANT_INVALID_REF
-/*
- * Note on usage of grant reference 0 as invalid grant reference:
- * grant reference 0 is valid, but never exposed to a driver,
- * because of the fact it is already in use/reserved by the PV console.
- */
-#define GRANT_INVALID_REF	0
-#endif
+MODULE_IMPORT_NS("DMA_BUF");
 
 struct gntdev_dmabuf {
 	struct gntdev_dmabuf_priv *priv;
@@ -56,7 +51,7 @@ struct gntdev_dmabuf {
 
 	/* Number of pages this buffer has. */
 	int nr_pages;
-	/* Pages of this buffer. */
+	/* Pages of this buffer (only for dma-buf export). */
 	struct page **pages;
 };
 
@@ -247,10 +242,9 @@ static void dmabuf_exp_ops_detach(struct dma_buf *dma_buf,
 
 		if (sgt) {
 			if (gntdev_dmabuf_attach->dir != DMA_NONE)
-				dma_unmap_sg_attrs(attach->dev, sgt->sgl,
-						   sgt->nents,
-						   gntdev_dmabuf_attach->dir,
-						   DMA_ATTR_SKIP_CPU_SYNC);
+				dma_unmap_sgtable(attach->dev, sgt,
+						  gntdev_dmabuf_attach->dir,
+						  DMA_ATTR_SKIP_CPU_SYNC);
 			sg_free_table(sgt);
 		}
 
@@ -288,8 +282,8 @@ dmabuf_exp_ops_map_dma_buf(struct dma_buf_attachment *attach,
 	sgt = dmabuf_pages_to_sgt(gntdev_dmabuf->pages,
 				  gntdev_dmabuf->nr_pages);
 	if (!IS_ERR(sgt)) {
-		if (!dma_map_sg_attrs(attach->dev, sgt->sgl, sgt->nents, dir,
-				      DMA_ATTR_SKIP_CPU_SYNC)) {
+		if (dma_map_sgtable(attach->dev, sgt, dir,
+				    DMA_ATTR_SKIP_CPU_SYNC)) {
 			sg_free_table(sgt);
 			kfree(sgt);
 			sgt = ERR_PTR(-ENOMEM);
@@ -342,35 +336,12 @@ static void dmabuf_exp_ops_release(struct dma_buf *dma_buf)
 	mutex_unlock(&priv->lock);
 }
 
-static void *dmabuf_exp_ops_kmap(struct dma_buf *dma_buf,
-				 unsigned long page_num)
-{
-	/* Not implemented. */
-	return NULL;
-}
-
-static void dmabuf_exp_ops_kunmap(struct dma_buf *dma_buf,
-				  unsigned long page_num, void *addr)
-{
-	/* Not implemented. */
-}
-
-static int dmabuf_exp_ops_mmap(struct dma_buf *dma_buf,
-			       struct vm_area_struct *vma)
-{
-	/* Not implemented. */
-	return 0;
-}
-
 static const struct dma_buf_ops dmabuf_exp_ops =  {
 	.attach = dmabuf_exp_ops_attach,
 	.detach = dmabuf_exp_ops_detach,
 	.map_dma_buf = dmabuf_exp_ops_map_dma_buf,
 	.unmap_dma_buf = dmabuf_exp_ops_unmap_dma_buf,
 	.release = dmabuf_exp_ops_release,
-	.map = dmabuf_exp_ops_kmap,
-	.unmap = dmabuf_exp_ops_kunmap,
-	.mmap = dmabuf_exp_ops_mmap,
 };
 
 struct gntdev_dmabuf_export_args {
@@ -386,8 +357,11 @@ struct gntdev_dmabuf_export_args {
 static int dmabuf_exp_from_pages(struct gntdev_dmabuf_export_args *args)
 {
 	DEFINE_DMA_BUF_EXPORT_INFO(exp_info);
-	struct gntdev_dmabuf *gntdev_dmabuf;
-	int ret;
+	struct gntdev_dmabuf *gntdev_dmabuf __free(kfree) = NULL;
+	CLASS(get_unused_fd, ret)(O_CLOEXEC);
+
+	if (ret < 0)
+		return ret;
 
 	gntdev_dmabuf = kzalloc(sizeof(*gntdev_dmabuf), GFP_KERNEL);
 	if (!gntdev_dmabuf)
@@ -412,32 +386,21 @@ static int dmabuf_exp_from_pages(struct gntdev_dmabuf_export_args *args)
 	exp_info.priv = gntdev_dmabuf;
 
 	gntdev_dmabuf->dmabuf = dma_buf_export(&exp_info);
-	if (IS_ERR(gntdev_dmabuf->dmabuf)) {
-		ret = PTR_ERR(gntdev_dmabuf->dmabuf);
-		gntdev_dmabuf->dmabuf = NULL;
-		goto fail;
-	}
-
-	ret = dma_buf_fd(gntdev_dmabuf->dmabuf, O_CLOEXEC);
-	if (ret < 0)
-		goto fail;
+	if (IS_ERR(gntdev_dmabuf->dmabuf))
+		return PTR_ERR(gntdev_dmabuf->dmabuf);
 
 	gntdev_dmabuf->fd = ret;
 	args->fd = ret;
 
 	pr_debug("Exporting DMA buffer with fd %d\n", ret);
 
+	get_file(gntdev_dmabuf->priv->filp);
 	mutex_lock(&args->dmabuf_priv->lock);
 	list_add(&gntdev_dmabuf->next, &args->dmabuf_priv->exp_list);
 	mutex_unlock(&args->dmabuf_priv->lock);
-	get_file(gntdev_dmabuf->priv->filp);
-	return 0;
 
-fail:
-	if (gntdev_dmabuf->dmabuf)
-		dma_buf_put(gntdev_dmabuf->dmabuf);
-	kfree(gntdev_dmabuf);
-	return ret;
+	fd_install(take_fd(ret), no_free_ptr(gntdev_dmabuf)->dmabuf->file);
+	return 0;
 }
 
 static struct gntdev_grant_map *
@@ -446,7 +409,7 @@ dmabuf_exp_alloc_backing_storage(struct gntdev_priv *priv, int dmabuf_flags,
 {
 	struct gntdev_grant_map *map;
 
-	if (unlikely(count <= 0))
+	if (unlikely(gntdev_test_page_count(count)))
 		return ERR_PTR(-EINVAL);
 
 	if ((dmabuf_flags & GNTDEV_DMA_FLAG_WC) &&
@@ -459,11 +422,6 @@ dmabuf_exp_alloc_backing_storage(struct gntdev_priv *priv, int dmabuf_flags,
 	if (!map)
 		return ERR_PTR(-ENOMEM);
 
-	if (unlikely(gntdev_account_mapped_pages(count))) {
-		pr_debug("can't map %d pages: over limit\n", count);
-		gntdev_put_map(NULL, map);
-		return ERR_PTR(-ENOMEM);
-	}
 	return map;
 }
 
@@ -519,7 +477,7 @@ out:
 /* DMA buffer import support. */
 
 static int
-dmabuf_imp_grant_foreign_access(struct page **pages, u32 *refs,
+dmabuf_imp_grant_foreign_access(unsigned long *gfns, u32 *refs,
 				int count, int domid)
 {
 	grant_ref_t priv_gref_head;
@@ -542,7 +500,7 @@ dmabuf_imp_grant_foreign_access(struct page **pages, u32 *refs,
 		}
 
 		gnttab_grant_foreign_access_ref(cur_ref, domid,
-						xen_page_to_gfn(pages[i]), 0);
+						gfns[i], 0);
 		refs[i] = cur_ref;
 	}
 
@@ -558,13 +516,12 @@ static void dmabuf_imp_end_foreign_access(u32 *refs, int count)
 	int i;
 
 	for (i = 0; i < count; i++)
-		if (refs[i] != GRANT_INVALID_REF)
-			gnttab_end_foreign_access(refs[i], 0, 0UL);
+		if (refs[i] != INVALID_GRANT_REF)
+			gnttab_end_foreign_access(refs[i], NULL);
 }
 
 static void dmabuf_imp_free_storage(struct gntdev_dmabuf *gntdev_dmabuf)
 {
-	kfree(gntdev_dmabuf->pages);
 	kfree(gntdev_dmabuf->u.imp.refs);
 	kfree(gntdev_dmabuf);
 }
@@ -584,16 +541,10 @@ static struct gntdev_dmabuf *dmabuf_imp_alloc_storage(int count)
 	if (!gntdev_dmabuf->u.imp.refs)
 		goto fail;
 
-	gntdev_dmabuf->pages = kcalloc(count,
-				       sizeof(gntdev_dmabuf->pages[0]),
-				       GFP_KERNEL);
-	if (!gntdev_dmabuf->pages)
-		goto fail;
-
 	gntdev_dmabuf->nr_pages = count;
 
 	for (i = 0; i < count; i++)
-		gntdev_dmabuf->u.imp.refs[i] = GRANT_INVALID_REF;
+		gntdev_dmabuf->u.imp.refs[i] = INVALID_GRANT_REF;
 
 	return gntdev_dmabuf;
 
@@ -611,7 +562,8 @@ dmabuf_imp_to_refs(struct gntdev_dmabuf_priv *priv, struct device *dev,
 	struct dma_buf *dma_buf;
 	struct dma_buf_attachment *attach;
 	struct sg_table *sgt;
-	struct sg_page_iter sg_iter;
+	struct sg_dma_page_iter sg_iter;
+	unsigned long *gfns;
 	int i;
 
 	dma_buf = dma_buf_get(fd);
@@ -635,7 +587,7 @@ dmabuf_imp_to_refs(struct gntdev_dmabuf_priv *priv, struct device *dev,
 
 	gntdev_dmabuf->u.imp.attach = attach;
 
-	sgt = dma_buf_map_attachment(attach, DMA_BIDIRECTIONAL);
+	sgt = dma_buf_map_attachment_unlocked(attach, DMA_BIDIRECTIONAL);
 	if (IS_ERR(sgt)) {
 		ret = ERR_CAST(sgt);
 		goto fail_detach;
@@ -659,26 +611,31 @@ dmabuf_imp_to_refs(struct gntdev_dmabuf_priv *priv, struct device *dev,
 
 	gntdev_dmabuf->u.imp.sgt = sgt;
 
-	/* Now convert sgt to array of pages and check for page validity. */
-	i = 0;
-	for_each_sg_page(sgt->sgl, &sg_iter, sgt->nents, 0) {
-		struct page *page = sg_page_iter_page(&sg_iter);
-		/*
-		 * Check if page is valid: this can happen if we are given
-		 * a page from VRAM or other resources which are not backed
-		 * by a struct page.
-		 */
-		if (!pfn_valid(page_to_pfn(page))) {
-			ret = ERR_PTR(-EINVAL);
-			goto fail_unmap;
-		}
-
-		gntdev_dmabuf->pages[i++] = page;
+	gfns = kcalloc(count, sizeof(*gfns), GFP_KERNEL);
+	if (!gfns) {
+		ret = ERR_PTR(-ENOMEM);
+		goto fail_unmap;
 	}
 
-	ret = ERR_PTR(dmabuf_imp_grant_foreign_access(gntdev_dmabuf->pages,
+	/*
+	 * Now convert sgt to array of gfns without accessing underlying pages.
+	 * It is not allowed to access the underlying struct page of an sg table
+	 * exported by DMA-buf, but since we deal with special Xen dma device here
+	 * (not a normal physical one) look at the dma addresses in the sg table
+	 * and then calculate gfns directly from them.
+	 */
+	i = 0;
+	for_each_sgtable_dma_page(sgt, &sg_iter, 0) {
+		dma_addr_t addr = sg_page_iter_dma_address(&sg_iter);
+		unsigned long pfn = bfn_to_pfn(XEN_PFN_DOWN(dma_to_phys(dev, addr)));
+
+		gfns[i++] = pfn_to_gfn(pfn);
+	}
+
+	ret = ERR_PTR(dmabuf_imp_grant_foreign_access(gfns,
 						      gntdev_dmabuf->u.imp.refs,
 						      count, domid));
+	kfree(gfns);
 	if (IS_ERR(ret))
 		goto fail_end_access;
 
@@ -693,7 +650,7 @@ dmabuf_imp_to_refs(struct gntdev_dmabuf_priv *priv, struct device *dev,
 fail_end_access:
 	dmabuf_imp_end_foreign_access(gntdev_dmabuf->u.imp.refs, count);
 fail_unmap:
-	dma_buf_unmap_attachment(attach, sgt, DMA_BIDIRECTIONAL);
+	dma_buf_unmap_attachment_unlocked(attach, sgt, DMA_BIDIRECTIONAL);
 fail_detach:
 	dma_buf_detach(dma_buf, attach);
 fail_free_obj:
@@ -743,8 +700,8 @@ static int dmabuf_imp_release(struct gntdev_dmabuf_priv *priv, u32 fd)
 	attach = gntdev_dmabuf->u.imp.attach;
 
 	if (gntdev_dmabuf->u.imp.sgt)
-		dma_buf_unmap_attachment(attach, gntdev_dmabuf->u.imp.sgt,
-					 DMA_BIDIRECTIONAL);
+		dma_buf_unmap_attachment_unlocked(attach, gntdev_dmabuf->u.imp.sgt,
+						  DMA_BIDIRECTIONAL);
 	dma_buf = attach->dmabuf;
 	dma_buf_detach(attach->dmabuf, attach);
 	dma_buf_put(dma_buf);
@@ -753,25 +710,32 @@ static int dmabuf_imp_release(struct gntdev_dmabuf_priv *priv, u32 fd)
 	return 0;
 }
 
+static void dmabuf_imp_release_all(struct gntdev_dmabuf_priv *priv)
+{
+	struct gntdev_dmabuf *q, *gntdev_dmabuf;
+
+	list_for_each_entry_safe(gntdev_dmabuf, q, &priv->imp_list, next)
+		dmabuf_imp_release(priv, gntdev_dmabuf->fd);
+}
+
 /* DMA buffer IOCTL support. */
 
-long gntdev_ioctl_dmabuf_exp_from_refs(struct gntdev_priv *priv, int use_ptemod,
+long gntdev_ioctl_dmabuf_exp_from_refs(struct gntdev_priv *priv,
 				       struct ioctl_gntdev_dmabuf_exp_from_refs __user *u)
 {
 	struct ioctl_gntdev_dmabuf_exp_from_refs op;
 	u32 *refs;
 	long ret;
 
-	if (use_ptemod) {
-		pr_debug("Cannot provide dma-buf: use_ptemode %d\n",
-			 use_ptemod);
+	if (xen_pv_domain()) {
+		pr_debug("Cannot provide dma-buf in a PV domain\n");
 		return -EINVAL;
 	}
 
 	if (copy_from_user(&op, u, sizeof(op)) != 0)
 		return -EFAULT;
 
-	if (unlikely(op.count <= 0))
+	if (unlikely(gntdev_test_page_count(op.count)))
 		return -EINVAL;
 
 	refs = kcalloc(op.count, sizeof(*refs), GFP_KERNEL);
@@ -818,7 +782,7 @@ long gntdev_ioctl_dmabuf_imp_to_refs(struct gntdev_priv *priv,
 	if (copy_from_user(&op, u, sizeof(op)) != 0)
 		return -EFAULT;
 
-	if (unlikely(op.count <= 0))
+	if (unlikely(gntdev_test_page_count(op.count)))
 		return -EINVAL;
 
 	gntdev_dmabuf = dmabuf_imp_to_refs(priv->dmabuf_priv,
@@ -870,5 +834,6 @@ struct gntdev_dmabuf_priv *gntdev_dmabuf_init(struct file *filp)
 
 void gntdev_dmabuf_fini(struct gntdev_dmabuf_priv *priv)
 {
+	dmabuf_imp_release_all(priv);
 	kfree(priv);
 }

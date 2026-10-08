@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Device Tree support for Allwinner A1X SoCs
  *
@@ -5,15 +6,13 @@
  *
  * Maxime Ripard <maxime.ripard@free-electrons.com>
  *
- * This file is licensed under the terms of the GNU General Public
- * License version 2.  This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 
-#include <linux/clk-provider.h>
 #include <linux/clocksource.h>
 #include <linux/init.h>
+#include <linux/of_clk.h>
 #include <linux/platform_device.h>
+#include <linux/reset/sunxi.h>
 
 #include <asm/mach/arch.h>
 #include <asm/secure_cntvoff.h>
@@ -37,7 +36,6 @@ static const char * const sun6i_board_dt_compat[] = {
 	NULL,
 };
 
-extern void __init sun6i_reset_init(void);
 static void __init sun6i_timer_init(void)
 {
 	of_clk_init(NULL);
@@ -101,4 +99,13 @@ static const char * const sun9i_board_dt_compat[] = {
 
 DT_MACHINE_START(SUN9I_DT, "Allwinner sun9i Family")
 	.dt_compat	= sun9i_board_dt_compat,
+MACHINE_END
+
+static const char * const suniv_board_dt_compat[] = {
+	"allwinner,suniv-f1c100s",
+	NULL,
+};
+
+DT_MACHINE_START(SUNIV_DT, "Allwinner suniv Family")
+	.dt_compat	= suniv_board_dt_compat,
 MACHINE_END

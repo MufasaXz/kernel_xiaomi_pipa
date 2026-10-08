@@ -1,21 +1,12 @@
-/* -------------------------------------------------------------------------
- * i2c-algo-bit.c i2c driver algorithms for bit-shift adapters
- * -------------------------------------------------------------------------
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * i2c-algo-bit.c: i2c driver algorithms for bit-shift adapters
+ *
  *   Copyright (C) 1995-2000 Simon G. Vogl
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
- * ------------------------------------------------------------------------- */
-
-/* With some changes from Frodo Looijaard <frodol@dds.nl>, Kyösti Mälkki
-   <kmalkki@cc.hut.fi> and Jean Delvare <jdelvare@suse.de> */
+ *
+ * With some changes from Frodo Looijaard <frodol@dds.nl>, Kyösti Mälkki
+ * <kmalkki@cc.hut.fi> and Jean Delvare <jdelvare@suse.de>
+ */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -193,8 +184,9 @@ static int i2c_outb(struct i2c_adapter *i2c_adap, unsigned char c)
 
 	/* read ack: SDA should be pulled down by slave, or it may
 	 * NAK (usually to report problems with the data we wrote).
+	 * Always report ACK if SDA is write-only.
 	 */
-	ack = !getsda(adap);    /* ack: sda is pulled low -> success */
+	ack = !adap->getsda || !getsda(adap);    /* ack: sda is pulled low -> success */
 	bit_dbg(2, &i2c_adap->dev, "i2c_outb: 0x%02x %s\n", (int)c,
 		ack ? "A" : "NA");
 
@@ -247,71 +239,55 @@ static int test_bus(struct i2c_adapter *i2c_adap)
 			return -ENODEV;
 	}
 
+	if (adap->getsda == NULL)
+		pr_info("%s: SDA is write-only, testing not possible\n", name);
 	if (adap->getscl == NULL)
-		pr_info("%s: Testing SDA only, SCL is not readable\n", name);
+		pr_info("%s: SCL is write-only, testing not possible\n", name);
 
-	sda = getsda(adap);
-	scl = (adap->getscl == NULL) ? 1 : getscl(adap);
+	sda = adap->getsda ? getsda(adap) : 1;
+	scl = adap->getscl ? getscl(adap) : 1;
 	if (!scl || !sda) {
-		printk(KERN_WARNING
-		       "%s: bus seems to be busy (scl=%d, sda=%d)\n",
-		       name, scl, sda);
+		pr_warn("%s: bus seems to be busy (scl=%d, sda=%d)\n", name, scl, sda);
 		goto bailout;
 	}
 
 	sdalo(adap);
-	sda = getsda(adap);
-	scl = (adap->getscl == NULL) ? 1 : getscl(adap);
-	if (sda) {
-		printk(KERN_WARNING "%s: SDA stuck high!\n", name);
+	if (adap->getsda && getsda(adap)) {
+		pr_warn("%s: SDA stuck high!\n", name);
 		goto bailout;
 	}
-	if (!scl) {
-		printk(KERN_WARNING
-		       "%s: SCL unexpected low while pulling SDA low!\n",
-		       name);
+	if (adap->getscl && !getscl(adap)) {
+		pr_warn("%s: SCL unexpected low while pulling SDA low!\n", name);
 		goto bailout;
 	}
 
 	sdahi(adap);
-	sda = getsda(adap);
-	scl = (adap->getscl == NULL) ? 1 : getscl(adap);
-	if (!sda) {
-		printk(KERN_WARNING "%s: SDA stuck low!\n", name);
+	if (adap->getsda && !getsda(adap)) {
+		pr_warn("%s: SDA stuck low!\n", name);
 		goto bailout;
 	}
-	if (!scl) {
-		printk(KERN_WARNING
-		       "%s: SCL unexpected low while pulling SDA high!\n",
-		       name);
+	if (adap->getscl && !getscl(adap)) {
+		pr_warn("%s: SCL unexpected low while pulling SDA high!\n", name);
 		goto bailout;
 	}
 
 	scllo(adap);
-	sda = getsda(adap);
-	scl = (adap->getscl == NULL) ? 0 : getscl(adap);
-	if (scl) {
-		printk(KERN_WARNING "%s: SCL stuck high!\n", name);
+	if (adap->getscl && getscl(adap)) {
+		pr_warn("%s: SCL stuck high!\n", name);
 		goto bailout;
 	}
-	if (!sda) {
-		printk(KERN_WARNING
-		       "%s: SDA unexpected low while pulling SCL low!\n",
-		       name);
+	if (adap->getsda && !getsda(adap)) {
+		pr_warn("%s: SDA unexpected low while pulling SCL low!\n", name);
 		goto bailout;
 	}
 
 	sclhi(adap);
-	sda = getsda(adap);
-	scl = (adap->getscl == NULL) ? 1 : getscl(adap);
-	if (!scl) {
-		printk(KERN_WARNING "%s: SCL stuck low!\n", name);
+	if (adap->getscl && !getscl(adap)) {
+		pr_warn("%s: SCL stuck low!\n", name);
 		goto bailout;
 	}
-	if (!sda) {
-		printk(KERN_WARNING
-		       "%s: SDA unexpected low while pulling SCL high!\n",
-		       name);
+	if (adap->getsda && !getsda(adap)) {
+		pr_warn("%s: SDA unexpected low while pulling SCL high!\n", name);
 		goto bailout;
 	}
 
@@ -429,6 +405,10 @@ static int readbytes(struct i2c_adapter *i2c_adap, struct i2c_msg *msg)
 	unsigned char *temp = msg->buf;
 	int count = msg->len;
 	const unsigned flags = msg->flags;
+	struct i2c_algo_bit_data *adap = i2c_adap->algo_data;
+
+	if (!adap->getsda)
+		return -EOPNOTSUPP;
 
 	while (count > 0) {
 		inval = i2c_inb(i2c_adap);
@@ -612,11 +592,26 @@ bailout:
 	return ret;
 }
 
+/*
+ * We print a warning when we are not flagged to support atomic transfers but
+ * will try anyhow. That's what the I2C core would do as well. Sadly, we can't
+ * modify the algorithm struct at probe time because this struct is exported
+ * 'const'.
+ */
+static int bit_xfer_atomic(struct i2c_adapter *i2c_adap, struct i2c_msg msgs[],
+			   int num)
+{
+	struct i2c_algo_bit_data *adap = i2c_adap->algo_data;
+
+	if (!adap->can_do_atomic)
+		dev_warn(&i2c_adap->dev, "not flagged for atomic transfers\n");
+
+	return bit_xfer(i2c_adap, msgs, num);
+}
+
 static u32 bit_func(struct i2c_adapter *adap)
 {
-	return I2C_FUNC_I2C | I2C_FUNC_NOSTART | I2C_FUNC_SMBUS_EMUL |
-	       I2C_FUNC_SMBUS_READ_BLOCK_DATA |
-	       I2C_FUNC_SMBUS_BLOCK_PROC_CALL |
+	return I2C_FUNC_I2C | I2C_FUNC_NOSTART | I2C_FUNC_SMBUS_EMUL_ALL |
 	       I2C_FUNC_10BIT_ADDR | I2C_FUNC_PROTOCOL_MANGLING;
 }
 
@@ -624,8 +619,9 @@ static u32 bit_func(struct i2c_adapter *adap)
 /* -----exported algorithm data: -------------------------------------	*/
 
 const struct i2c_algorithm i2c_bit_algo = {
-	.master_xfer	= bit_xfer,
-	.functionality	= bit_func,
+	.xfer = bit_xfer,
+	.xfer_atomic = bit_xfer_atomic,
+	.functionality = bit_func,
 };
 EXPORT_SYMBOL(i2c_bit_algo);
 
@@ -663,11 +659,15 @@ static int __i2c_bit_add_bus(struct i2c_adapter *adap,
 	if (ret < 0)
 		return ret;
 
-	/* Complain if SCL can't be read */
-	if (bit_adap->getscl == NULL) {
+	if (bit_adap->getsda == NULL)
+		dev_warn(&adap->dev, "Not I2C compliant: can't read SDA\n");
+
+	if (bit_adap->getscl == NULL)
 		dev_warn(&adap->dev, "Not I2C compliant: can't read SCL\n");
+
+	if (bit_adap->getsda == NULL || bit_adap->getscl == NULL)
 		dev_warn(&adap->dev, "Bus may be unreliable\n");
-	}
+
 	return 0;
 }
 

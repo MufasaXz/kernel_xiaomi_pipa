@@ -1,7 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * (C) 2002 - 2003 Dominik Brodowski <linux@brodo.de>
- *
- *  Licensed under the terms of the GNU GPL License version 2.
  *
  *  Library for common functions for Intel SpeedStep v.1 and v.2 support
  *
@@ -241,7 +240,7 @@ unsigned int speedstep_get_frequency(enum speedstep_processor processor)
 		return pentium3_get_frequency(processor);
 	default:
 		return 0;
-	};
+	}
 	return 0;
 }
 EXPORT_SYMBOL_GPL(speedstep_get_frequency);
@@ -367,7 +366,7 @@ enum speedstep_processor speedstep_detect_processor(void)
 			} else
 				return SPEEDSTEP_CPU_PIII_C;
 		}
-		/* fall through */
+		fallthrough;
 	default:
 		return 0;
 	}
@@ -379,16 +378,16 @@ EXPORT_SYMBOL_GPL(speedstep_detect_processor);
  *                     DETECT SPEEDSTEP SPEEDS                       *
  *********************************************************************/
 
-unsigned int speedstep_get_freqs(enum speedstep_processor processor,
-				  unsigned int *low_speed,
-				  unsigned int *high_speed,
-				  unsigned int *transition_latency,
-				  void (*set_state) (unsigned int state))
+int speedstep_get_freqs(enum speedstep_processor processor,
+			unsigned int *low_speed,
+			unsigned int *high_speed,
+			unsigned int *transition_latency,
+			void (*set_state)(unsigned int state))
 {
 	unsigned int prev_speed;
-	unsigned int ret = 0;
 	unsigned long flags;
 	ktime_t tv1, tv2;
+	int ret = 0;
 
 	if ((!processor) || (!low_speed) || (!high_speed) || (!set_state))
 		return -EINVAL;

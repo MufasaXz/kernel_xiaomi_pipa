@@ -65,7 +65,7 @@ static int gnss_serial_write_raw(struct gnss_device *gdev,
 
 	/* write is only buffered synchronously */
 	ret = serdev_device_write(serdev, buf, count, MAX_SCHEDULE_TIMEOUT);
-	if (ret < 0)
+	if (ret < 0 || ret < count)
 		return ret;
 
 	/* FIXME: determine if interrupted? */
@@ -80,8 +80,8 @@ static const struct gnss_operations gnss_serial_gnss_ops = {
 	.write_raw	= gnss_serial_write_raw,
 };
 
-static int gnss_serial_receive_buf(struct serdev_device *serdev,
-					const unsigned char *buf, size_t count)
+static size_t gnss_serial_receive_buf(struct serdev_device *serdev,
+				       const u8 *buf, size_t count)
 {
 	struct gnss_serial *gserial = serdev_device_get_drvdata(serdev);
 	struct gnss_device *gdev = gserial->gdev;
@@ -165,7 +165,7 @@ void gnss_serial_free(struct gnss_serial *gserial)
 {
 	gnss_put_device(gserial->gdev);
 	kfree(gserial);
-};
+}
 EXPORT_SYMBOL_GPL(gnss_serial_free);
 
 int gnss_serial_register(struct gnss_serial *gserial)

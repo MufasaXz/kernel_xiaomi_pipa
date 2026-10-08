@@ -1,11 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*	Sysfs attributes of bond slaves
  *
  *      Copyright (c) 2014 Scott Feldman <sfeldma@cumulusnetworks.com>
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
  */
 
 #include <linux/capability.h>
@@ -19,43 +15,37 @@ struct slave_attribute {
 	ssize_t (*show)(struct slave *, char *);
 };
 
-#define SLAVE_ATTR(_name, _mode, _show)				\
-const struct slave_attribute slave_attr_##_name = {		\
-	.attr = {.name = __stringify(_name),			\
-		 .mode = _mode },				\
-	.show	= _show,					\
-};
 #define SLAVE_ATTR_RO(_name)					\
-	SLAVE_ATTR(_name, 0444, _name##_show)
+const struct slave_attribute slave_attr_##_name = __ATTR_RO(_name)
 
 static ssize_t state_show(struct slave *slave, char *buf)
 {
 	switch (bond_slave_state(slave)) {
 	case BOND_STATE_ACTIVE:
-		return sprintf(buf, "active\n");
+		return sysfs_emit(buf, "active\n");
 	case BOND_STATE_BACKUP:
-		return sprintf(buf, "backup\n");
+		return sysfs_emit(buf, "backup\n");
 	default:
-		return sprintf(buf, "UNKNOWN\n");
+		return sysfs_emit(buf, "UNKNOWN\n");
 	}
 }
 static SLAVE_ATTR_RO(state);
 
 static ssize_t mii_status_show(struct slave *slave, char *buf)
 {
-	return sprintf(buf, "%s\n", bond_slave_link_status(slave->link));
+	return sysfs_emit(buf, "%s\n", bond_slave_link_status(slave->link));
 }
 static SLAVE_ATTR_RO(mii_status);
 
 static ssize_t link_failure_count_show(struct slave *slave, char *buf)
 {
-	return sprintf(buf, "%d\n", slave->link_failure_count);
+	return sysfs_emit(buf, "%d\n", slave->link_failure_count);
 }
 static SLAVE_ATTR_RO(link_failure_count);
 
 static ssize_t perm_hwaddr_show(struct slave *slave, char *buf)
 {
-	return sprintf(buf, "%*phC\n",
+	return sysfs_emit(buf, "%*phC\n",
 		       slave->dev->addr_len,
 		       slave->perm_hwaddr);
 }
@@ -63,7 +53,7 @@ static SLAVE_ATTR_RO(perm_hwaddr);
 
 static ssize_t queue_id_show(struct slave *slave, char *buf)
 {
-	return sprintf(buf, "%d\n", slave->queue_id);
+	return sysfs_emit(buf, "%d\n", READ_ONCE(slave->queue_id));
 }
 static SLAVE_ATTR_RO(queue_id);
 
@@ -74,11 +64,11 @@ static ssize_t ad_aggregator_id_show(struct slave *slave, char *buf)
 	if (BOND_MODE(slave->bond) == BOND_MODE_8023AD) {
 		agg = SLAVE_AD_INFO(slave)->port.aggregator;
 		if (agg)
-			return sprintf(buf, "%d\n",
-				       agg->aggregator_identifier);
+			return sysfs_emit(buf, "%d\n",
+					  agg->aggregator_identifier);
 	}
 
-	return sprintf(buf, "N/A\n");
+	return sysfs_emit(buf, "N/A\n");
 }
 static SLAVE_ATTR_RO(ad_aggregator_id);
 
@@ -89,11 +79,11 @@ static ssize_t ad_actor_oper_port_state_show(struct slave *slave, char *buf)
 	if (BOND_MODE(slave->bond) == BOND_MODE_8023AD) {
 		ad_port = &SLAVE_AD_INFO(slave)->port;
 		if (ad_port->aggregator)
-			return sprintf(buf, "%u\n",
+			return sysfs_emit(buf, "%u\n",
 				       ad_port->actor_oper_port_state);
 	}
 
-	return sprintf(buf, "N/A\n");
+	return sysfs_emit(buf, "N/A\n");
 }
 static SLAVE_ATTR_RO(ad_actor_oper_port_state);
 
@@ -104,11 +94,11 @@ static ssize_t ad_partner_oper_port_state_show(struct slave *slave, char *buf)
 	if (BOND_MODE(slave->bond) == BOND_MODE_8023AD) {
 		ad_port = &SLAVE_AD_INFO(slave)->port;
 		if (ad_port->aggregator)
-			return sprintf(buf, "%u\n",
+			return sysfs_emit(buf, "%u\n",
 				       ad_port->partner_oper.port_state);
 	}
 
-	return sprintf(buf, "N/A\n");
+	return sysfs_emit(buf, "N/A\n");
 }
 static SLAVE_ATTR_RO(ad_partner_oper_port_state);
 

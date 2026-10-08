@@ -14,7 +14,7 @@
 static inline void cec_msg_active_source(struct cec_msg *msg, __u16 phys_addr)
 {
 	msg->len = 4;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_ACTIVE_SOURCE;
 	msg->msg[2] = phys_addr >> 8;
 	msg->msg[3] = phys_addr & 0xff;
@@ -59,7 +59,7 @@ static inline void cec_msg_request_active_source(struct cec_msg *msg,
 						 int reply)
 {
 	msg->len = 2;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_REQUEST_ACTIVE_SOURCE;
 	msg->reply = reply ? CEC_MSG_ACTIVE_SOURCE : 0;
 }
@@ -68,7 +68,7 @@ static inline void cec_msg_routing_information(struct cec_msg *msg,
 					       __u16 phys_addr)
 {
 	msg->len = 4;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_ROUTING_INFORMATION;
 	msg->msg[2] = phys_addr >> 8;
 	msg->msg[3] = phys_addr & 0xff;
@@ -86,7 +86,7 @@ static inline void cec_msg_routing_change(struct cec_msg *msg,
 					  __u16 new_phys_addr)
 {
 	msg->len = 6;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_ROUTING_CHANGE;
 	msg->msg[2] = orig_phys_addr >> 8;
 	msg->msg[3] = orig_phys_addr & 0xff;
@@ -106,7 +106,7 @@ static inline void cec_ops_routing_change(const struct cec_msg *msg,
 static inline void cec_msg_set_stream_path(struct cec_msg *msg, __u16 phys_addr)
 {
 	msg->len = 4;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_SET_STREAM_PATH;
 	msg->msg[2] = phys_addr >> 8;
 	msg->msg[3] = phys_addr & 0xff;
@@ -791,7 +791,7 @@ static inline void cec_msg_report_physical_addr(struct cec_msg *msg,
 					__u16 phys_addr, __u8 prim_devtype)
 {
 	msg->len = 5;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_REPORT_PHYSICAL_ADDR;
 	msg->msg[2] = phys_addr >> 8;
 	msg->msg[3] = phys_addr & 0xff;
@@ -817,7 +817,7 @@ static inline void cec_msg_set_menu_language(struct cec_msg *msg,
 					     const char *language)
 {
 	msg->len = 5;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_SET_MENU_LANGUAGE;
 	memcpy(msg->msg + 2, language, 3);
 }
@@ -850,7 +850,7 @@ static inline void cec_msg_report_features(struct cec_msg *msg,
 				__u8 rc_profile, __u8 dev_features)
 {
 	msg->len = 6;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_REPORT_FEATURES;
 	msg->msg[2] = cec_version;
 	msg->msg[3] = all_device_types;
@@ -1092,7 +1092,7 @@ static inline void cec_msg_tuner_step_increment(struct cec_msg *msg)
 static inline void cec_msg_device_vendor_id(struct cec_msg *msg, __u32 vendor_id)
 {
 	msg->len = 5;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_DEVICE_VENDOR_ID;
 	msg->msg[2] = vendor_id >> 16;
 	msg->msg[3] = (vendor_id >> 8) & 0xff;
@@ -1304,17 +1304,17 @@ static inline void cec_msg_user_control_pressed(struct cec_msg *msg,
 	if (!ui_cmd->has_opt_arg)
 		return;
 	switch (ui_cmd->ui_cmd) {
-	case 0x56:
-	case 0x57:
-	case 0x60:
-	case 0x68:
-	case 0x69:
-	case 0x6a:
+	case CEC_OP_UI_CMD_SELECT_BROADCAST_TYPE:
+	case CEC_OP_UI_CMD_SELECT_SOUND_PRESENTATION:
+	case CEC_OP_UI_CMD_PLAY_FUNCTION:
+	case CEC_OP_UI_CMD_SELECT_MEDIA_FUNCTION:
+	case CEC_OP_UI_CMD_SELECT_AV_INPUT_FUNCTION:
+	case CEC_OP_UI_CMD_SELECT_AUDIO_INPUT_FUNCTION:
 		/* The optional operand is one byte for all these ui commands */
 		msg->len++;
 		msg->msg[3] = ui_cmd->play_mode;
 		break;
-	case 0x67:
+	case CEC_OP_UI_CMD_TUNE_FUNCTION:
 		msg->len += 4;
 		msg->msg[3] = (ui_cmd->channel_identifier.channel_number_fmt << 2) |
 			      (ui_cmd->channel_identifier.major >> 8);
@@ -1333,17 +1333,17 @@ static inline void cec_ops_user_control_pressed(const struct cec_msg *msg,
 	if (msg->len == 3)
 		return;
 	switch (ui_cmd->ui_cmd) {
-	case 0x56:
-	case 0x57:
-	case 0x60:
-	case 0x68:
-	case 0x69:
-	case 0x6a:
+	case CEC_OP_UI_CMD_SELECT_BROADCAST_TYPE:
+	case CEC_OP_UI_CMD_SELECT_SOUND_PRESENTATION:
+	case CEC_OP_UI_CMD_PLAY_FUNCTION:
+	case CEC_OP_UI_CMD_SELECT_MEDIA_FUNCTION:
+	case CEC_OP_UI_CMD_SELECT_AV_INPUT_FUNCTION:
+	case CEC_OP_UI_CMD_SELECT_AUDIO_INPUT_FUNCTION:
 		/* The optional operand is one byte for all these ui commands */
 		ui_cmd->play_mode = msg->msg[3];
 		ui_cmd->has_opt_arg = 1;
 		break;
-	case 0x67:
+	case CEC_OP_UI_CMD_TUNE_FUNCTION:
 		if (msg->len < 7)
 			break;
 		ui_cmd->has_opt_arg = 1;
@@ -1568,6 +1568,20 @@ static inline void cec_ops_request_short_audio_descriptor(const struct cec_msg *
 	}
 }
 
+static inline void cec_msg_set_audio_volume_level(struct cec_msg *msg,
+						  __u8 audio_volume_level)
+{
+	msg->len = 3;
+	msg->msg[1] = CEC_MSG_SET_AUDIO_VOLUME_LEVEL;
+	msg->msg[2] = audio_volume_level;
+}
+
+static inline void cec_ops_set_audio_volume_level(const struct cec_msg *msg,
+						  __u8 *audio_volume_level)
+{
+	*audio_volume_level = msg->msg[2];
+}
+
 
 /* Audio Rate Control Feature */
 static inline void cec_msg_set_audio_rate(struct cec_msg *msg,
@@ -1641,7 +1655,7 @@ static inline void cec_msg_report_current_latency(struct cec_msg *msg,
 						  __u8 audio_out_delay)
 {
 	msg->len = 6;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_REPORT_CURRENT_LATENCY;
 	msg->msg[2] = phys_addr >> 8;
 	msg->msg[3] = phys_addr & 0xff;
@@ -1665,7 +1679,7 @@ static inline void cec_ops_report_current_latency(const struct cec_msg *msg,
 	if (*audio_out_compensated == 3 && msg->len >= 7)
 		*audio_out_delay = msg->msg[6];
 	else
-		*audio_out_delay = 0;
+		*audio_out_delay = 1;
 }
 
 static inline void cec_msg_request_current_latency(struct cec_msg *msg,
@@ -1673,7 +1687,7 @@ static inline void cec_msg_request_current_latency(struct cec_msg *msg,
 						   __u16 phys_addr)
 {
 	msg->len = 4;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_REQUEST_CURRENT_LATENCY;
 	msg->msg[2] = phys_addr >> 8;
 	msg->msg[3] = phys_addr & 0xff;
@@ -1693,7 +1707,7 @@ static inline void cec_msg_cdc_hec_inquire_state(struct cec_msg *msg,
 						 __u16 phys_addr2)
 {
 	msg->len = 9;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_CDC_MESSAGE;
 	/* msg[2] and msg[3] (phys_addr) are filled in by the CEC framework */
 	msg->msg[4] = CEC_MSG_CDC_HEC_INQUIRE_STATE;
@@ -1723,7 +1737,7 @@ static inline void cec_msg_cdc_hec_report_state(struct cec_msg *msg,
 						__u16 hec_field)
 {
 	msg->len = has_field ? 10 : 8;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_CDC_MESSAGE;
 	/* msg[2] and msg[3] (phys_addr) are filled in by the CEC framework */
 	msg->msg[4] = CEC_MSG_CDC_HEC_REPORT_STATE;
@@ -1768,7 +1782,7 @@ static inline void cec_msg_cdc_hec_set_state(struct cec_msg *msg,
 					     __u16 phys_addr5)
 {
 	msg->len = 10;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_CDC_MESSAGE;
 	/* msg[2] and msg[3] (phys_addr) are filled in by the CEC framework */
 	msg->msg[4] = CEC_MSG_CDC_HEC_INQUIRE_STATE;
@@ -1818,7 +1832,7 @@ static inline void cec_msg_cdc_hec_set_state_adjacent(struct cec_msg *msg,
 						      __u8 hec_set_state)
 {
 	msg->len = 8;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_CDC_MESSAGE;
 	/* msg[2] and msg[3] (phys_addr) are filled in by the CEC framework */
 	msg->msg[4] = CEC_MSG_CDC_HEC_SET_STATE_ADJACENT;
@@ -1843,7 +1857,7 @@ static inline void cec_msg_cdc_hec_request_deactivation(struct cec_msg *msg,
 							__u16 phys_addr3)
 {
 	msg->len = 11;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_CDC_MESSAGE;
 	/* msg[2] and msg[3] (phys_addr) are filled in by the CEC framework */
 	msg->msg[4] = CEC_MSG_CDC_HEC_REQUEST_DEACTIVATION;
@@ -1870,7 +1884,7 @@ static inline void cec_ops_cdc_hec_request_deactivation(const struct cec_msg *ms
 static inline void cec_msg_cdc_hec_notify_alive(struct cec_msg *msg)
 {
 	msg->len = 5;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_CDC_MESSAGE;
 	/* msg[2] and msg[3] (phys_addr) are filled in by the CEC framework */
 	msg->msg[4] = CEC_MSG_CDC_HEC_NOTIFY_ALIVE;
@@ -1885,7 +1899,7 @@ static inline void cec_ops_cdc_hec_notify_alive(const struct cec_msg *msg,
 static inline void cec_msg_cdc_hec_discover(struct cec_msg *msg)
 {
 	msg->len = 5;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_CDC_MESSAGE;
 	/* msg[2] and msg[3] (phys_addr) are filled in by the CEC framework */
 	msg->msg[4] = CEC_MSG_CDC_HEC_DISCOVER;
@@ -1902,7 +1916,7 @@ static inline void cec_msg_cdc_hpd_set_state(struct cec_msg *msg,
 					     __u8 hpd_state)
 {
 	msg->len = 6;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_CDC_MESSAGE;
 	/* msg[2] and msg[3] (phys_addr) are filled in by the CEC framework */
 	msg->msg[4] = CEC_MSG_CDC_HPD_SET_STATE;
@@ -1924,7 +1938,7 @@ static inline void cec_msg_cdc_hpd_report_state(struct cec_msg *msg,
 						__u8 hpd_error)
 {
 	msg->len = 6;
-	msg->msg[0] |= 0xf; /* broadcast */
+	msg->msg[0] |= CEC_LOG_ADDR_BROADCAST;
 	msg->msg[1] = CEC_MSG_CDC_MESSAGE;
 	/* msg[2] and msg[3] (phys_addr) are filled in by the CEC framework */
 	msg->msg[4] = CEC_MSG_CDC_HPD_REPORT_STATE;

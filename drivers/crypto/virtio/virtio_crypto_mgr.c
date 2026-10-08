@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
  /* Management for virtio crypto devices (refer to adf_dev_mgr.c)
   *
   * Copyright 2016 HUAWEI TECHNOLOGIES CO., LTD.
-  *
-  * This program is free software; you can redistribute it and/or modify
-  * it under the terms of the GNU General Public License as published by
-  * the Free Software Foundation; either version 2 of the License, or
-  * (at your option) any later version.
-  *
-  * This program is distributed in the hope that it will be useful,
-  * but WITHOUT ANY WARRANTY; without even the implied warranty of
-  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  * GNU General Public License for more details.
-  *
-  * You should have received a copy of the GNU General Public License
-  * along with this program; if not, see <http://www.gnu.org/licenses/>.
   */
 
 #include <linux/mutex.h>
@@ -91,42 +79,6 @@ void virtcrypto_devmgr_rm_dev(struct virtio_crypto *vcrypto_dev)
 	list_del(&vcrypto_dev->list);
 	num_devices--;
 	mutex_unlock(&table_lock);
-}
-
-/*
- * virtcrypto_devmgr_get_first()
- *
- * Function returns the first virtio crypto device from the acceleration
- * framework.
- *
- * To be used by virtio crypto device specific drivers.
- *
- * Return: pointer to vcrypto_dev or NULL if not found.
- */
-struct virtio_crypto *virtcrypto_devmgr_get_first(void)
-{
-	struct virtio_crypto *dev = NULL;
-
-	mutex_lock(&table_lock);
-	if (!list_empty(&virtio_crypto_table))
-		dev = list_first_entry(&virtio_crypto_table,
-					struct virtio_crypto,
-				    list);
-	mutex_unlock(&table_lock);
-	return dev;
-}
-
-/*
- * virtcrypto_dev_in_use() - Check whether vcrypto_dev is currently in use
- * @vcrypto_dev: Pointer to virtio crypto device.
- *
- * To be used by virtio crypto device specific drivers.
- *
- * Return: 1 when device is in use, 0 otherwise.
- */
-int virtcrypto_dev_in_use(struct virtio_crypto *vcrypto_dev)
-{
-	return atomic_read(&vcrypto_dev->ref_count) != 0;
 }
 
 /*
@@ -249,8 +201,14 @@ struct virtio_crypto *virtcrypto_get_dev_node(int node, uint32_t service,
  */
 int virtcrypto_dev_start(struct virtio_crypto *vcrypto)
 {
-	if (virtio_crypto_algs_register(vcrypto)) {
-		pr_err("virtio_crypto: Failed to register crypto algs\n");
+	if (virtio_crypto_skcipher_algs_register(vcrypto)) {
+		pr_err("virtio_crypto: Failed to register crypto skcipher algs\n");
+		return -EFAULT;
+	}
+
+	if (virtio_crypto_akcipher_algs_register(vcrypto)) {
+		pr_err("virtio_crypto: Failed to register crypto akcipher algs\n");
+		virtio_crypto_skcipher_algs_unregister(vcrypto);
 		return -EFAULT;
 	}
 
@@ -262,14 +220,15 @@ int virtcrypto_dev_start(struct virtio_crypto *vcrypto)
  * @vcrypto:    Pointer to virtio crypto device.
  *
  * Function notifies all the registered services that the virtio crypto device
- * is ready to be used.
+ * shall no longer be used.
  * To be used by virtio crypto device specific drivers.
  *
  * Return: void
  */
 void virtcrypto_dev_stop(struct virtio_crypto *vcrypto)
 {
-	virtio_crypto_algs_unregister(vcrypto);
+	virtio_crypto_skcipher_algs_unregister(vcrypto);
+	virtio_crypto_akcipher_algs_unregister(vcrypto);
 }
 
 /*
@@ -323,6 +282,10 @@ bool virtcrypto_algo_is_supported(struct virtio_crypto *vcrypto,
 
 	case VIRTIO_CRYPTO_SERVICE_AEAD:
 		algo_mask = vcrypto->aead_algo;
+		break;
+
+	case VIRTIO_CRYPTO_SERVICE_AKCIPHER:
+		algo_mask = vcrypto->akcipher_algo;
 		break;
 	}
 

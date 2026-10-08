@@ -3,19 +3,17 @@
 #include <linux/types.h>
 #include <linux/io.h>
 #include <linux/mm.h>
-
-#ifndef ioremap_cache
-/* temporary while we convert existing ioremap_cache users to memremap */
-__weak void __iomem *ioremap_cache(resource_size_t offset, unsigned long size)
-{
-	return ioremap(offset, size);
-}
-#endif
+#include <linux/ioremap.h>
 
 #ifndef arch_memremap_wb
-static void *arch_memremap_wb(resource_size_t offset, unsigned long size)
+static void *arch_memremap_wb(resource_size_t offset, unsigned long size,
+			      unsigned long flags)
 {
+#ifdef ioremap_cache
 	return (__force void *)ioremap_cache(offset, size);
+#else
+	return (__force void *)ioremap(offset, size);
+#endif
 }
 #endif
 
@@ -55,7 +53,7 @@ static void *try_ram_remap(resource_size_t offset, size_t size,
  *
  * MEMREMAP_WB - matches the default mapping for System RAM on
  * the architecture.  This is usually a read-allocate write-back cache.
- * Morever, if MEMREMAP_WB is specified and the requested remap region is RAM
+ * Moreover, if MEMREMAP_WB is specified and the requested remap region is RAM
  * memremap() will bypass establishing a new mapping and instead return
  * a pointer into the direct map.
  *
@@ -86,7 +84,7 @@ void *memremap(resource_size_t offset, size_t size, unsigned long flags)
 	/* Try all mapping types requested until one returns non-NULL */
 	if (flags & MEMREMAP_WB) {
 		/*
-		 * MEMREMAP_WB is special in that it can be satisifed
+		 * MEMREMAP_WB is special in that it can be satisfied
 		 * from the direct map.  Some archs depend on the
 		 * capability of memremap() to autodetect cases where
 		 * the requested range is potentially in System RAM.
@@ -94,7 +92,7 @@ void *memremap(resource_size_t offset, size_t size, unsigned long flags)
 		if (is_ram == REGION_INTERSECTS)
 			addr = try_ram_remap(offset, size, flags);
 		if (!addr)
-			addr = arch_memremap_wb(offset, size);
+			addr = arch_memremap_wb(offset, size, flags);
 	}
 
 	/*
@@ -121,7 +119,7 @@ EXPORT_SYMBOL(memremap);
 
 void memunmap(void *addr)
 {
-	if (is_vmalloc_addr(addr))
+	if (is_ioremap_addr(addr))
 		iounmap((void __iomem *) addr);
 }
 EXPORT_SYMBOL(memunmap);

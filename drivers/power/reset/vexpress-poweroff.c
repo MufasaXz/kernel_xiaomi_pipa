@@ -1,12 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  *
  * Copyright (C) 2012 ARM Limited
  */
@@ -14,8 +7,8 @@
 #include <linux/delay.h>
 #include <linux/notifier.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/reboot.h>
 #include <linux/stat.h>
 #include <linux/vexpress.h>
@@ -115,20 +108,17 @@ static int _vexpress_register_restart_handler(struct device *dev)
 
 static int vexpress_reset_probe(struct platform_device *pdev)
 {
-	const struct of_device_id *match =
-			of_match_device(vexpress_reset_of_match, &pdev->dev);
+	enum vexpress_reset_func func;
 	struct regmap *regmap;
 	int ret = 0;
-
-	if (!match)
-		return -EINVAL;
 
 	regmap = devm_regmap_init_vexpress_config(&pdev->dev);
 	if (IS_ERR(regmap))
 		return PTR_ERR(regmap);
 	dev_set_drvdata(&pdev->dev, regmap);
 
-	switch ((enum vexpress_reset_func)match->data) {
+	func = (uintptr_t)device_get_match_data(&pdev->dev);
+	switch (func) {
 	case FUNC_SHUTDOWN:
 		vexpress_power_off_device = &pdev->dev;
 		pm_power_off = vexpress_power_off;
@@ -140,7 +130,7 @@ static int vexpress_reset_probe(struct platform_device *pdev)
 	case FUNC_REBOOT:
 		ret = _vexpress_register_restart_handler(&pdev->dev);
 		break;
-	};
+	}
 
 	return ret;
 }
@@ -153,9 +143,4 @@ static struct platform_driver vexpress_reset_driver = {
 		.suppress_bind_attrs = true,
 	},
 };
-
-static int __init vexpress_reset_init(void)
-{
-	return platform_driver_register(&vexpress_reset_driver);
-}
-device_initcall(vexpress_reset_init);
+builtin_platform_driver(vexpress_reset_driver);

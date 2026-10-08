@@ -23,6 +23,7 @@
 MODULE_DESCRIPTION("Driver for Rio Karma");
 MODULE_AUTHOR("Bob Copeland <me@bobcopeland.com>, Keith Bennett <keith@mcs.st-and.ac.uk>");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("USB_STORAGE");
 
 #define RIO_PREFIX "RIOP\x00"
 #define RIO_PREFIX_LEN 5
@@ -50,7 +51,7 @@ static int rio_karma_init(struct us_data *us);
 { USB_DEVICE_VER(id_vendor, id_product, bcdDeviceMin, bcdDeviceMax), \
   .driver_info = (flags) }
 
-static struct usb_device_id karma_usb_ids[] = {
+static const struct usb_device_id karma_usb_ids[] = {
 #	include "unusual_karma.h"
 	{ }		/* Terminating entry */
 };
@@ -72,7 +73,7 @@ MODULE_DEVICE_TABLE(usb, karma_usb_ids);
 	.initFunction = init_function,	\
 }
 
-static struct us_unusual_dev karma_unusual_dev_list[] = {
+static const struct us_unusual_dev karma_unusual_dev_list[] = {
 #	include "unusual_karma.h"
 	{ }		/* Terminating entry */
 };
@@ -167,12 +168,14 @@ static int rio_karma_transport(struct scsi_cmnd *srb, struct us_data *us)
 static void rio_karma_destructor(void *extra)
 {
 	struct karma_data *data = (struct karma_data *) extra;
+
 	kfree(data->recv);
 }
 
 static int rio_karma_init(struct us_data *us)
 {
 	struct karma_data *data = kzalloc(sizeof(struct karma_data), GFP_NOIO);
+
 	if (!data)
 		return -ENOMEM;
 

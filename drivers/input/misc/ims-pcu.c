@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver for IMS Passenger Control Unit Devices
  *
  * Copyright (C) 2013 The IMS Company
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2
- * as published by the Free Software Foundation.
  */
 
 #include <linux/completion.h>
@@ -20,7 +17,7 @@
 #include <linux/types.h>
 #include <linux/usb/input.h>
 #include <linux/usb/cdc.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define IMS_PCU_KEYMAP_LEN		32
 
@@ -39,8 +36,6 @@ struct ims_pcu_gamepad {
 
 struct ims_pcu_backlight {
 	struct led_classdev cdev;
-	struct work_struct work;
-	enum led_brightness desired_brightness;
 	char name[32];
 };
 
@@ -212,8 +207,7 @@ static int ims_pcu_setup_buttons(struct ims_pcu *pcu,
 
 	input = input_allocate_device();
 	if (!input) {
-		dev_err(pcu->dev,
-			"Not enough memory for input input device\n");
+		dev_err(pcu->dev, "Not enough memory for input device\n");
 		return -ENOMEM;
 	}
 
@@ -292,7 +286,7 @@ static int ims_pcu_setup_gamepad(struct ims_pcu *pcu)
 	struct input_dev *input;
 	int error;
 
-	gamepad = kzalloc(sizeof(struct ims_pcu_gamepad), GFP_KERNEL);
+	gamepad = kzalloc(sizeof(*gamepad), GFP_KERNEL);
 	input = input_allocate_device();
 	if (!gamepad || !input) {
 		dev_err(pcu->dev,
@@ -340,7 +334,7 @@ static int ims_pcu_setup_gamepad(struct ims_pcu *pcu)
 err_free_mem:
 	input_free_device(input);
 	kfree(gamepad);
-	return -ENOMEM;
+	return error;
 }
 
 static void ims_pcu_destroy_gamepad(struct ims_pcu *pcu)
@@ -652,8 +646,8 @@ static int __ims_pcu_execute_command(struct ims_pcu *pcu,
 #define IMS_PCU_BL_DATA_OFFSET		3
 
 static int __ims_pcu_execute_bl_command(struct ims_pcu *pcu,
-				        u8 command, const void *data, size_t len,
-				        u8 expected_response, int response_time)
+					u8 command, const void *data, size_t len,
+					u8 expected_response, int response_time)
 {
 	int error;
 
@@ -745,11 +739,11 @@ static int ims_pcu_switch_to_bootloader(struct ims_pcu *pcu)
 {
 	int error;
 
-	/* Execute jump to the bootoloader */
+	/* Execute jump to the bootloader */
 	error = ims_pcu_execute_command(pcu, JUMP_TO_BTLDR, NULL, 0);
 	if (error) {
 		dev_err(pcu->dev,
-			"Failure when sending JUMP TO BOOLTLOADER command, error: %d\n",
+			"Failure when sending JUMP TO BOOTLOADER command, error: %d\n",
 			error);
 		return error;
 	}
@@ -766,7 +760,7 @@ static int ims_pcu_switch_to_bootloader(struct ims_pcu *pcu)
 struct ims_pcu_flash_fmt {
 	__le32 addr;
 	u8 len;
-	u8 data[];
+	u8 data[] __counted_by(len);
 };
 
 static unsigned int ims_pcu_count_fw_records(const struct firmware *fw)
@@ -939,9 +933,8 @@ static void ims_pcu_process_async_firmware(const struct firmware *fw,
 		goto out;
 	}
 
-	mutex_lock(&pcu->cmd_mutex);
-	ims_pcu_handle_firmware_update(pcu, fw);
-	mutex_unlock(&pcu->cmd_mutex);
+	scoped_guard(mutex, &pcu->cmd_mutex)
+		ims_pcu_handle_firmware_update(pcu, fw);
 
 	release_firmware(fw);
 
@@ -955,36 +948,26 @@ out:
 
 #define IMS_PCU_MAX_BRIGHTNESS		31998
 
-static void ims_pcu_backlight_work(struct work_struct *work)
+static int ims_pcu_backlight_set_brightness(struct led_classdev *cdev,
+					    enum led_brightness value)
 {
 	struct ims_pcu_backlight *backlight =
-			container_of(work, struct ims_pcu_backlight, work);
+			container_of(cdev, struct ims_pcu_backlight, cdev);
 	struct ims_pcu *pcu =
 			container_of(backlight, struct ims_pcu, backlight);
-	int desired_brightness = backlight->desired_brightness;
-	__le16 br_val = cpu_to_le16(desired_brightness);
+	__le16 br_val = cpu_to_le16(value);
 	int error;
 
-	mutex_lock(&pcu->cmd_mutex);
+	guard(mutex)(&pcu->cmd_mutex);
 
 	error = ims_pcu_execute_command(pcu, SET_BRIGHTNESS,
 					&br_val, sizeof(br_val));
 	if (error && error != -ENODEV)
 		dev_warn(pcu->dev,
 			 "Failed to set desired brightness %u, error: %d\n",
-			 desired_brightness, error);
+			 value, error);
 
-	mutex_unlock(&pcu->cmd_mutex);
-}
-
-static void ims_pcu_backlight_set_brightness(struct led_classdev *cdev,
-					     enum led_brightness value)
-{
-	struct ims_pcu_backlight *backlight =
-			container_of(cdev, struct ims_pcu_backlight, cdev);
-
-	backlight->desired_brightness = value;
-	schedule_work(&backlight->work);
+	return error;
 }
 
 static enum led_brightness
@@ -997,7 +980,7 @@ ims_pcu_backlight_get_brightness(struct led_classdev *cdev)
 	int brightness;
 	int error;
 
-	mutex_lock(&pcu->cmd_mutex);
+	guard(mutex)(&pcu->cmd_mutex);
 
 	error = ims_pcu_execute_query(pcu, GET_BRIGHTNESS);
 	if (error) {
@@ -1011,8 +994,6 @@ ims_pcu_backlight_get_brightness(struct led_classdev *cdev)
 			get_unaligned_le16(&pcu->cmd_buf[IMS_PCU_DATA_OFFSET]);
 	}
 
-	mutex_unlock(&pcu->cmd_mutex);
-
 	return brightness;
 }
 
@@ -1021,14 +1002,14 @@ static int ims_pcu_setup_backlight(struct ims_pcu *pcu)
 	struct ims_pcu_backlight *backlight = &pcu->backlight;
 	int error;
 
-	INIT_WORK(&backlight->work, ims_pcu_backlight_work);
 	snprintf(backlight->name, sizeof(backlight->name),
 		 "pcu%d::kbd_backlight", pcu->device_no);
 
 	backlight->cdev.name = backlight->name;
 	backlight->cdev.max_brightness = IMS_PCU_MAX_BRIGHTNESS;
 	backlight->cdev.brightness_get = ims_pcu_backlight_get_brightness;
-	backlight->cdev.brightness_set = ims_pcu_backlight_set_brightness;
+	backlight->cdev.brightness_set_blocking =
+					 ims_pcu_backlight_set_brightness;
 
 	error = led_classdev_register(pcu->dev, &backlight->cdev);
 	if (error) {
@@ -1046,7 +1027,6 @@ static void ims_pcu_destroy_backlight(struct ims_pcu *pcu)
 	struct ims_pcu_backlight *backlight = &pcu->backlight;
 
 	led_classdev_unregister(&backlight->cdev);
-	cancel_work_sync(&backlight->work);
 }
 
 
@@ -1070,7 +1050,7 @@ static ssize_t ims_pcu_attribute_show(struct device *dev,
 			container_of(dattr, struct ims_pcu_attribute, dattr);
 	char *field = (char *)pcu + attr->field_offset;
 
-	return scnprintf(buf, PAGE_SIZE, "%.*s\n", attr->field_length, field);
+	return sysfs_emit(buf, "%.*s\n", attr->field_length, field);
 }
 
 static ssize_t ims_pcu_attribute_store(struct device *dev,
@@ -1093,24 +1073,23 @@ static ssize_t ims_pcu_attribute_store(struct device *dev,
 	if (data_len > attr->field_length)
 		return -EINVAL;
 
-	error = mutex_lock_interruptible(&pcu->cmd_mutex);
-	if (error)
-		return error;
+	scoped_cond_guard(mutex_intr, return -EINTR, &pcu->cmd_mutex) {
+		memset(field, 0, attr->field_length);
+		memcpy(field, buf, data_len);
 
-	memset(field, 0, attr->field_length);
-	memcpy(field, buf, data_len);
+		error = ims_pcu_set_info(pcu);
 
-	error = ims_pcu_set_info(pcu);
+		/*
+		 * Even if update failed, let's fetch the info again as we just
+		 * clobbered one of the fields.
+		 */
+		ims_pcu_get_info(pcu);
 
-	/*
-	 * Even if update failed, let's fetch the info again as we just
-	 * clobbered one of the fields.
-	 */
-	ims_pcu_get_info(pcu);
+		if (error)
+			return error;
+	}
 
-	mutex_unlock(&pcu->cmd_mutex);
-
-	return error < 0 ? error : count;
+	return count;
 }
 
 #define IMS_PCU_ATTR(_field, _mode)					\
@@ -1173,7 +1152,6 @@ static ssize_t ims_pcu_update_firmware_store(struct device *dev,
 {
 	struct usb_interface *intf = to_usb_interface(dev);
 	struct ims_pcu *pcu = usb_get_intfdata(intf);
-	const struct firmware *fw = NULL;
 	int value;
 	int error;
 
@@ -1184,35 +1162,33 @@ static ssize_t ims_pcu_update_firmware_store(struct device *dev,
 	if (value != 1)
 		return -EINVAL;
 
-	error = mutex_lock_interruptible(&pcu->cmd_mutex);
-	if (error)
-		return error;
-
+	const struct firmware *fw __free(firmware) = NULL;
 	error = request_ihex_firmware(&fw, IMS_PCU_FIRMWARE_NAME, pcu->dev);
 	if (error) {
 		dev_err(pcu->dev, "Failed to request firmware %s, error: %d\n",
 			IMS_PCU_FIRMWARE_NAME, error);
-		goto out;
+		return error;
 	}
 
-	/*
-	 * If we are already in bootloader mode we can proceed with
-	 * flashing the firmware.
-	 *
-	 * If we are in application mode, then we need to switch into
-	 * bootloader mode, which will cause the device to disconnect
-	 * and reconnect as different device.
-	 */
-	if (pcu->bootloader_mode)
-		error = ims_pcu_handle_firmware_update(pcu, fw);
-	else
-		error = ims_pcu_switch_to_bootloader(pcu);
+	scoped_cond_guard(mutex_intr, return -EINTR, &pcu->cmd_mutex) {
+		/*
+		 * If we are already in bootloader mode we can proceed with
+		 * flashing the firmware.
+		 *
+		 * If we are in application mode, then we need to switch into
+		 * bootloader mode, which will cause the device to disconnect
+		 * and reconnect as different device.
+		 */
+		if (pcu->bootloader_mode)
+			error = ims_pcu_handle_firmware_update(pcu, fw);
+		else
+			error = ims_pcu_switch_to_bootloader(pcu);
 
-	release_firmware(fw);
+		if (error)
+			return error;
+	}
 
-out:
-	mutex_unlock(&pcu->cmd_mutex);
-	return error ?: count;
+	return count;
 }
 
 static DEVICE_ATTR(update_firmware, S_IWUSR,
@@ -1226,7 +1202,7 @@ ims_pcu_update_firmware_status_show(struct device *dev,
 	struct usb_interface *intf = to_usb_interface(dev);
 	struct ims_pcu *pcu = usb_get_intfdata(intf);
 
-	return scnprintf(buf, PAGE_SIZE, "%d\n", pcu->update_firmware_status);
+	return sysfs_emit(buf, "%d\n", pcu->update_firmware_status);
 }
 
 static DEVICE_ATTR(update_firmware_status, S_IRUGO,
@@ -1248,7 +1224,7 @@ static struct attribute *ims_pcu_attrs[] = {
 static umode_t ims_pcu_is_attr_visible(struct kobject *kobj,
 				       struct attribute *attr, int n)
 {
-	struct device *dev = container_of(kobj, struct device, kobj);
+	struct device *dev = kobj_to_dev(kobj);
 	struct usb_interface *intf = to_usb_interface(dev);
 	struct ims_pcu *pcu = usb_get_intfdata(intf);
 	umode_t mode = attr->mode;
@@ -1322,14 +1298,13 @@ static ssize_t ims_pcu_ofn_reg_data_show(struct device *dev,
 	int error;
 	u8 data;
 
-	mutex_lock(&pcu->cmd_mutex);
-	error = ims_pcu_read_ofn_config(pcu, pcu->ofn_reg_addr, &data);
-	mutex_unlock(&pcu->cmd_mutex);
+	scoped_guard(mutex, &pcu->cmd_mutex) {
+		error = ims_pcu_read_ofn_config(pcu, pcu->ofn_reg_addr, &data);
+		if (error)
+			return error;
+	}
 
-	if (error)
-		return error;
-
-	return scnprintf(buf, PAGE_SIZE, "%x\n", data);
+	return sysfs_emit(buf, "%x\n", data);
 }
 
 static ssize_t ims_pcu_ofn_reg_data_store(struct device *dev,
@@ -1345,11 +1320,13 @@ static ssize_t ims_pcu_ofn_reg_data_store(struct device *dev,
 	if (error)
 		return error;
 
-	mutex_lock(&pcu->cmd_mutex);
-	error = ims_pcu_write_ofn_config(pcu, pcu->ofn_reg_addr, value);
-	mutex_unlock(&pcu->cmd_mutex);
+	guard(mutex)(&pcu->cmd_mutex);
 
-	return error ?: count;
+	error = ims_pcu_write_ofn_config(pcu, pcu->ofn_reg_addr, value);
+	if (error)
+		return error;
+
+	return count;
 }
 
 static DEVICE_ATTR(reg_data, S_IRUGO | S_IWUSR,
@@ -1361,13 +1338,10 @@ static ssize_t ims_pcu_ofn_reg_addr_show(struct device *dev,
 {
 	struct usb_interface *intf = to_usb_interface(dev);
 	struct ims_pcu *pcu = usb_get_intfdata(intf);
-	int error;
 
-	mutex_lock(&pcu->cmd_mutex);
-	error = scnprintf(buf, PAGE_SIZE, "%x\n", pcu->ofn_reg_addr);
-	mutex_unlock(&pcu->cmd_mutex);
+	guard(mutex)(&pcu->cmd_mutex);
 
-	return error;
+	return sysfs_emit(buf, "%x\n", pcu->ofn_reg_addr);
 }
 
 static ssize_t ims_pcu_ofn_reg_addr_store(struct device *dev,
@@ -1383,9 +1357,9 @@ static ssize_t ims_pcu_ofn_reg_addr_store(struct device *dev,
 	if (error)
 		return error;
 
-	mutex_lock(&pcu->cmd_mutex);
+	guard(mutex)(&pcu->cmd_mutex);
+
 	pcu->ofn_reg_addr = value;
-	mutex_unlock(&pcu->cmd_mutex);
 
 	return count;
 }
@@ -1410,14 +1384,13 @@ static ssize_t ims_pcu_ofn_bit_show(struct device *dev,
 	int error;
 	u8 data;
 
-	mutex_lock(&pcu->cmd_mutex);
-	error = ims_pcu_read_ofn_config(pcu, attr->addr, &data);
-	mutex_unlock(&pcu->cmd_mutex);
+	scoped_guard(mutex, &pcu->cmd_mutex) {
+		error = ims_pcu_read_ofn_config(pcu, attr->addr, &data);
+		if (error)
+			return error;
+	}
 
-	if (error)
-		return error;
-
-	return scnprintf(buf, PAGE_SIZE, "%d\n", !!(data & (1 << attr->nr)));
+	return sysfs_emit(buf, "%d\n", !!(data & (1 << attr->nr)));
 }
 
 static ssize_t ims_pcu_ofn_bit_store(struct device *dev,
@@ -1439,21 +1412,22 @@ static ssize_t ims_pcu_ofn_bit_store(struct device *dev,
 	if (value > 1)
 		return -EINVAL;
 
-	mutex_lock(&pcu->cmd_mutex);
+	scoped_guard(mutex, &pcu->cmd_mutex) {
+		error = ims_pcu_read_ofn_config(pcu, attr->addr, &data);
+		if (error)
+			return error;
 
-	error = ims_pcu_read_ofn_config(pcu, attr->addr, &data);
-	if (!error) {
 		if (value)
 			data |= 1U << attr->nr;
 		else
 			data &= ~(1U << attr->nr);
 
 		error = ims_pcu_write_ofn_config(pcu, attr->addr, data);
+		if (error)
+			return error;
 	}
 
-	mutex_unlock(&pcu->cmd_mutex);
-
-	return error ?: count;
+	return count;
 }
 
 #define IMS_PCU_OFN_BIT_ATTR(_field, _addr, _nr)			\
@@ -1486,9 +1460,27 @@ static struct attribute *ims_pcu_ofn_attrs[] = {
 	NULL
 };
 
+static umode_t ims_pcu_ofn_is_attr_visible(struct kobject *kobj,
+					   struct attribute *attr, int n)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct usb_interface *intf = to_usb_interface(dev);
+	struct ims_pcu *pcu = usb_get_intfdata(intf);
+	umode_t mode = attr->mode;
+
+	/*
+	 * PCU-B devices, both GEN_1 and GEN_2 do not have OFN sensor.
+	 */
+	if (pcu->bootloader_mode || pcu->device_id == IMS_PCU_PCU_B_DEVICE_ID)
+		mode = 0;
+
+	return mode;
+}
+
 static const struct attribute_group ims_pcu_ofn_attr_group = {
-	.name	= "ofn",
-	.attrs	= ims_pcu_ofn_attrs,
+	.name		= "ofn",
+	.is_visible	= ims_pcu_ofn_is_attr_visible,
+	.attrs		= ims_pcu_ofn_attrs,
 };
 
 static void ims_pcu_irq(struct urb *urb)
@@ -1910,16 +1902,6 @@ static int ims_pcu_init_application_mode(struct ims_pcu *pcu)
 	/* Device appears to be operable, complete initialization */
 	pcu->device_no = atomic_inc_return(&device_no);
 
-	/*
-	 * PCU-B devices, both GEN_1 and GEN_2 do not have OFN sensor
-	 */
-	if (pcu->device_id != IMS_PCU_PCU_B_DEVICE_ID) {
-		error = sysfs_create_group(&pcu->dev->kobj,
-					   &ims_pcu_ofn_attr_group);
-		if (error)
-			return error;
-	}
-
 	error = ims_pcu_setup_backlight(pcu);
 	if (error)
 		return error;
@@ -1956,10 +1938,6 @@ static void ims_pcu_destroy_application_mode(struct ims_pcu *pcu)
 			ims_pcu_destroy_gamepad(pcu);
 		ims_pcu_destroy_buttons(pcu);
 		ims_pcu_destroy_backlight(pcu);
-
-		if (pcu->device_id != IMS_PCU_PCU_B_DEVICE_ID)
-			sysfs_remove_group(&pcu->dev->kobj,
-					   &ims_pcu_ofn_attr_group);
 	}
 }
 
@@ -2013,7 +1991,7 @@ static int ims_pcu_probe(struct usb_interface *intf,
 	struct ims_pcu *pcu;
 	int error;
 
-	pcu = kzalloc(sizeof(struct ims_pcu), GFP_KERNEL);
+	pcu = kzalloc(sizeof(*pcu), GFP_KERNEL);
 	if (!pcu)
 		return -ENOMEM;
 
@@ -2038,7 +2016,6 @@ static int ims_pcu_probe(struct usb_interface *intf,
 	}
 
 	usb_set_intfdata(pcu->ctrl_intf, pcu);
-	usb_set_intfdata(pcu->data_intf, pcu);
 
 	error = ims_pcu_buffers_alloc(pcu);
 	if (error)
@@ -2052,20 +2029,14 @@ static int ims_pcu_probe(struct usb_interface *intf,
 	if (error)
 		goto err_stop_io;
 
-	error = sysfs_create_group(&intf->dev.kobj, &ims_pcu_attr_group);
-	if (error)
-		goto err_stop_io;
-
 	error = pcu->bootloader_mode ?
 			ims_pcu_init_bootloader_mode(pcu) :
 			ims_pcu_init_application_mode(pcu);
 	if (error)
-		goto err_remove_sysfs;
+		goto err_stop_io;
 
 	return 0;
 
-err_remove_sysfs:
-	sysfs_remove_group(&intf->dev.kobj, &ims_pcu_attr_group);
 err_stop_io:
 	ims_pcu_stop_io(pcu);
 err_free_buffers:
@@ -2090,8 +2061,6 @@ static void ims_pcu_disconnect(struct usb_interface *intf)
 	 */
 	if (alt->desc.bInterfaceClass != USB_CLASS_COMM)
 		return;
-
-	sysfs_remove_group(&intf->dev.kobj, &ims_pcu_attr_group);
 
 	ims_pcu_stop_io(pcu);
 
@@ -2151,9 +2120,16 @@ static const struct usb_device_id ims_pcu_id_table[] = {
 	{ }
 };
 
+static const struct attribute_group *ims_pcu_sysfs_groups[] = {
+	&ims_pcu_attr_group,
+	&ims_pcu_ofn_attr_group,
+	NULL
+};
+
 static struct usb_driver ims_pcu_driver = {
 	.name			= "ims_pcu",
 	.id_table		= ims_pcu_id_table,
+	.dev_groups		= ims_pcu_sysfs_groups,
 	.probe			= ims_pcu_probe,
 	.disconnect		= ims_pcu_disconnect,
 #ifdef CONFIG_PM

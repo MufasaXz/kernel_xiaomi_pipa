@@ -62,33 +62,11 @@ static ssize_t edac_device_ctl_log_ce_store(struct edac_device_ctl_info
 	return count;
 }
 
-/* 'panic_on_ce' */
-static ssize_t edac_device_ctl_panic_on_ce_show(struct edac_device_ctl_info
-						*ctl_info, char *data)
-{
-	return snprintf(data, PAGE_SIZE, "%u\n", ctl_info->panic_on_ce);
-}
-
 /* 'panic_on_ue' */
 static ssize_t edac_device_ctl_panic_on_ue_show(struct edac_device_ctl_info
 						*ctl_info, char *data)
 {
 	return sprintf(data, "%u\n", ctl_info->panic_on_ue);
-}
-
-static ssize_t edac_device_ctl_panic_on_ce_store(struct edac_device_ctl_info
-						 *ctl_info, const char *data,
-						 size_t count)
-{
-	unsigned long val;
-
-	/* if parameter is zero, turn off flag, if non-zero turn on flag */
-	if (kstrtoul(data, 0, &val) < 0)
-		return -EINVAL;
-
-	ctl_info->panic_on_ce = !!val;
-
-	return count;
 }
 
 static ssize_t edac_device_ctl_panic_on_ue_store(struct edac_device_ctl_info
@@ -178,9 +156,6 @@ CTL_INFO_ATTR(log_ue, S_IRUGO | S_IWUSR,
 	edac_device_ctl_log_ue_show, edac_device_ctl_log_ue_store);
 CTL_INFO_ATTR(log_ce, S_IRUGO | S_IWUSR,
 	edac_device_ctl_log_ce_show, edac_device_ctl_log_ce_store);
-CTL_INFO_ATTR(panic_on_ce, 0644,
-	edac_device_ctl_panic_on_ce_show,
-	edac_device_ctl_panic_on_ce_store);
 CTL_INFO_ATTR(panic_on_ue, S_IRUGO | S_IWUSR,
 	edac_device_ctl_panic_on_ue_show,
 	edac_device_ctl_panic_on_ue_store);
@@ -188,14 +163,14 @@ CTL_INFO_ATTR(poll_msec, S_IRUGO | S_IWUSR,
 	edac_device_ctl_poll_msec_show, edac_device_ctl_poll_msec_store);
 
 /* Base Attributes of the EDAC_DEVICE ECC object */
-static struct ctl_info_attribute *device_ctrl_attr[] = {
-	&attr_ctl_info_panic_on_ce,
-	&attr_ctl_info_panic_on_ue,
-	&attr_ctl_info_log_ue,
-	&attr_ctl_info_log_ce,
-	&attr_ctl_info_poll_msec,
+static struct attribute *device_ctrl_attrs[] = {
+	&attr_ctl_info_panic_on_ue.attr,
+	&attr_ctl_info_log_ue.attr,
+	&attr_ctl_info_log_ce.attr,
+	&attr_ctl_info_poll_msec.attr,
 	NULL,
 };
+ATTRIBUTE_GROUPS(device_ctrl);
 
 /*
  * edac_device_ctrl_master_release
@@ -233,17 +208,14 @@ static void edac_device_ctrl_master_release(struct kobject *kobj)
 	/* decrement the EDAC CORE module ref count */
 	module_put(edac_dev->owner);
 
-	/* free the control struct containing the 'main' kobj
-	 * passed in to this routine
-	 */
-	kfree(edac_dev);
+	__edac_device_free_ctl_info(edac_dev);
 }
 
 /* ktype for the main (master) kobject */
 static struct kobj_type ktype_device_ctrl = {
 	.release = edac_device_ctrl_master_release,
 	.sysfs_ops = &device_ctl_info_ops,
-	.default_attrs = (struct attribute **)device_ctrl_attr,
+	.default_groups = device_ctrl_groups,
 };
 
 /*
@@ -256,8 +228,9 @@ static struct kobj_type ktype_device_ctrl = {
  */
 int edac_device_register_sysfs_main_kobj(struct edac_device_ctl_info *edac_dev)
 {
-	struct bus_type *edac_subsys;
-	int err;
+	struct device *dev_root;
+	const struct bus_type *edac_subsys;
+	int err = -ENODEV;
 
 	edac_dbg(1, "\n");
 
@@ -275,15 +248,16 @@ int edac_device_register_sysfs_main_kobj(struct edac_device_ctl_info *edac_dev)
 	 */
 	edac_dev->owner = THIS_MODULE;
 
-	if (!try_module_get(edac_dev->owner)) {
-		err = -ENODEV;
+	if (!try_module_get(edac_dev->owner))
 		goto err_out;
-	}
 
 	/* register */
-	err = kobject_init_and_add(&edac_dev->kobj, &ktype_device_ctrl,
-				   &edac_subsys->dev_root->kobj,
-				   "%s", edac_dev->name);
+	dev_root = bus_get_dev_root(edac_subsys);
+	if (dev_root) {
+		err = kobject_init_and_add(&edac_dev->kobj, &ktype_device_ctrl,
+					   &dev_root->kobj, "%s", edac_dev->name);
+		put_device(dev_root);
+	}
 	if (err) {
 		edac_dbg(1, "Failed to register '.../edac/%s'\n",
 			 edac_dev->name);
@@ -415,17 +389,18 @@ INSTANCE_ATTR(ce_count, S_IRUGO, instance_ce_count_show, NULL);
 INSTANCE_ATTR(ue_count, S_IRUGO, instance_ue_count_show, NULL);
 
 /* list of edac_dev 'instance' attributes */
-static struct instance_attribute *device_instance_attr[] = {
-	&attr_instance_ce_count,
-	&attr_instance_ue_count,
+static struct attribute *device_instance_attrs[] = {
+	&attr_instance_ce_count.attr,
+	&attr_instance_ue_count.attr,
 	NULL,
 };
+ATTRIBUTE_GROUPS(device_instance);
 
 /* The 'ktype' for each edac_dev 'instance' */
 static struct kobj_type ktype_instance_ctrl = {
 	.release = edac_device_ctrl_instance_release,
 	.sysfs_ops = &device_instance_ops,
-	.default_attrs = (struct attribute **)device_instance_attr,
+	.default_groups = device_instance_groups,
 };
 
 /* edac_dev -> instance -> block information */
@@ -482,48 +457,33 @@ static ssize_t edac_dev_block_show(struct kobject *kobj,
 	return -EIO;
 }
 
-/* Function to 'store' fields into the edac_dev 'block' structure */
-static ssize_t edac_dev_block_store(struct kobject *kobj,
-				struct attribute *attr,
-				const char *buffer, size_t count)
-{
-	struct edac_dev_sysfs_block_attribute *block_attr;
-
-	block_attr = to_block_attr(attr);
-
-	if (block_attr->store)
-		return block_attr->store(kobj, attr, buffer, count);
-	return -EIO;
-}
-
 /* edac_dev file operations for a 'block' */
 static const struct sysfs_ops device_block_ops = {
 	.show = edac_dev_block_show,
-	.store = edac_dev_block_store
 };
 
-#define BLOCK_ATTR(_name,_mode,_show,_store)        \
+#define BLOCK_ATTR(_name,_mode,_show)        \
 static struct edac_dev_sysfs_block_attribute attr_block_##_name = {	\
 	.attr = {.name = __stringify(_name), .mode = _mode },   \
 	.show   = _show,                                        \
-	.store  = _store,                                       \
 };
 
-BLOCK_ATTR(ce_count, S_IRUGO, block_ce_count_show, NULL);
-BLOCK_ATTR(ue_count, S_IRUGO, block_ue_count_show, NULL);
+BLOCK_ATTR(ce_count, S_IRUGO, block_ce_count_show);
+BLOCK_ATTR(ue_count, S_IRUGO, block_ue_count_show);
 
 /* list of edac_dev 'block' attributes */
-static struct edac_dev_sysfs_block_attribute *device_block_attr[] = {
-	&attr_block_ce_count,
-	&attr_block_ue_count,
+static struct attribute *device_block_attrs[] = {
+	&attr_block_ce_count.attr,
+	&attr_block_ue_count.attr,
 	NULL,
 };
+ATTRIBUTE_GROUPS(device_block);
 
 /* The 'ktype' for each edac_dev 'block' */
 static struct kobj_type ktype_block_ctrl = {
 	.release = edac_device_ctrl_block_release,
 	.sysfs_ops = &device_block_ops,
-	.default_attrs = (struct attribute **)device_block_attr,
+	.default_groups = device_block_groups,
 };
 
 /* block ctor/dtor  code */

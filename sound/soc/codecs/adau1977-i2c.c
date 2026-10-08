@@ -1,10 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * ADAU1977/ADAU1978/ADAU1979 driver
  *
  * Copyright 2014 Analog Devices Inc.
  *  Author: Lars-Peter Clausen <lars@metafoo.de>
- *
- * Licensed under the GPL-2.
  */
 
 #include <linux/i2c.h>
@@ -15,8 +14,7 @@
 
 #include "adau1977.h"
 
-static int adau1977_i2c_probe(struct i2c_client *client,
-	const struct i2c_device_id *id)
+static int adau1977_i2c_probe(struct i2c_client *client)
 {
 	struct regmap_config config;
 
@@ -26,7 +24,7 @@ static int adau1977_i2c_probe(struct i2c_client *client,
 
 	return adau1977_probe(&client->dev,
 		devm_regmap_init_i2c(client, &config),
-		id->driver_data, NULL);
+		(uintptr_t)i2c_get_match_data(client), NULL);
 }
 
 static const struct i2c_device_id adau1977_i2c_ids[] = {

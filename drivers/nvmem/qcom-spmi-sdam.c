@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2017 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017, 2020-2021, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/device.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_platform.h>
 #include <linux/nvmem-provider.h>
+#include <linux/platform_device.h>
 #include <linux/regmap.h>
 
 #define SDAM_MEM_START			0x40
@@ -18,10 +18,10 @@
 #define SDAM_PBS_TRIG_CLR		0xE6
 
 struct sdam_chip {
-	struct platform_device		*pdev;
 	struct regmap			*regmap;
-	int				base;
-	int				size;
+	struct nvmem_config		sdam_config;
+	unsigned int			base;
+	unsigned int			size;
 };
 
 /* read only register offsets */
@@ -31,9 +31,10 @@ static const u8 sdam_ro_map[] = {
 	SDAM_SIZE
 };
 
-static bool is_valid(struct sdam_chip *sdam, unsigned int offset, size_t len)
+static bool sdam_is_valid(struct sdam_chip *sdam, unsigned int offset,
+				size_t len)
 {
-	int sdam_mem_end = SDAM_MEM_START + sdam->size - 1;
+	unsigned int sdam_mem_end = SDAM_MEM_START + sdam->size - 1;
 
 	if (!len)
 		return false;
@@ -48,7 +49,7 @@ static bool is_valid(struct sdam_chip *sdam, unsigned int offset, size_t len)
 	return false;
 }
 
-static bool is_ro(unsigned int offset, size_t len)
+static bool sdam_is_ro(unsigned int offset, size_t len)
 {
 	int i;
 
@@ -59,42 +60,49 @@ static bool is_ro(unsigned int offset, size_t len)
 	return false;
 }
 
-static int sdam_read(void *priv, unsigned int offset, void *val, size_t bytes)
+static int sdam_read(void *priv, unsigned int offset, void *val,
+				size_t bytes)
 {
 	struct sdam_chip *sdam = priv;
+	struct device *dev = sdam->sdam_config.dev;
 	int rc;
 
-	if (!is_valid(sdam, offset, bytes)) {
-		pr_err("Invalid SDAM offset 0x%02x len=%zd\n", offset, bytes);
+	if (!sdam_is_valid(sdam, offset, bytes)) {
+		dev_err(dev, "Invalid SDAM offset %#x len=%zd\n",
+			offset, bytes);
 		return -EINVAL;
 	}
 
 	rc = regmap_bulk_read(sdam->regmap, sdam->base + offset, val, bytes);
 	if (rc < 0)
-		pr_err("Failed to read SDAM offset 0x%02x len=%zd, rc=%d\n",
+		dev_err(dev, "Failed to read SDAM offset %#x len=%zd, rc=%d\n",
 						offset, bytes, rc);
 
 	return rc;
 }
 
-static int sdam_write(void *priv, unsigned int offset, void *val, size_t bytes)
+static int sdam_write(void *priv, unsigned int offset, void *val,
+				size_t bytes)
 {
 	struct sdam_chip *sdam = priv;
+	struct device *dev = sdam->sdam_config.dev;
 	int rc;
 
-	if (!is_valid(sdam, offset, bytes)) {
-		pr_err("Invalid SDAM offset 0x%02x len=%zd\n", offset, bytes);
+	if (!sdam_is_valid(sdam, offset, bytes)) {
+		dev_err(dev, "Invalid SDAM offset %#x len=%zd\n",
+			offset, bytes);
 		return -EINVAL;
 	}
 
-	if (is_ro(offset, bytes)) {
-		pr_err("Invalid write offset 0x%02x len=%zd\n", offset, bytes);
+	if (sdam_is_ro(offset, bytes)) {
+		dev_err(dev, "Invalid write offset %#x len=%zd\n",
+			offset, bytes);
 		return -EINVAL;
 	}
 
 	rc = regmap_bulk_write(sdam->regmap, sdam->base + offset, val, bytes);
 	if (rc < 0)
-		pr_err("Failed to write SDAM offset 0x%02x len=%zd, rc=%d\n",
+		dev_err(dev, "Failed to write SDAM offset %#x len=%zd, rc=%d\n",
 						offset, bytes, rc);
 
 	return rc;
@@ -104,73 +112,63 @@ static int sdam_probe(struct platform_device *pdev)
 {
 	struct sdam_chip *sdam;
 	struct nvmem_device *nvmem;
-	struct nvmem_config *sdam_config;
-	unsigned int val = 0;
+	unsigned int val;
 	int rc;
 
 	sdam = devm_kzalloc(&pdev->dev, sizeof(*sdam), GFP_KERNEL);
 	if (!sdam)
 		return -ENOMEM;
 
-	sdam_config = devm_kzalloc(&pdev->dev, sizeof(*sdam_config),
-							GFP_KERNEL);
-	if (!sdam_config)
-		return -ENOMEM;
-
 	sdam->regmap = dev_get_regmap(pdev->dev.parent, NULL);
 	if (!sdam->regmap) {
-		pr_err("Failed to get regmap handle\n");
+		dev_err(&pdev->dev, "Failed to get regmap handle\n");
 		return -ENXIO;
 	}
 
 	rc = of_property_read_u32(pdev->dev.of_node, "reg", &sdam->base);
 	if (rc < 0) {
-		pr_err("Failed to get SDAM base, rc=%d\n", rc);
+		dev_err(&pdev->dev, "Failed to get SDAM base, rc=%d\n", rc);
 		return -EINVAL;
 	}
 
 	rc = regmap_read(sdam->regmap, sdam->base + SDAM_SIZE, &val);
 	if (rc < 0) {
-		pr_err("Failed to read SDAM_SIZE rc=%d\n", rc);
+		dev_err(&pdev->dev, "Failed to read SDAM_SIZE rc=%d\n", rc);
 		return -EINVAL;
 	}
 	sdam->size = val * 32;
 
-	sdam_config->dev = &pdev->dev;
-	sdam_config->name = "spmi_sdam";
-	sdam_config->id = pdev->id;
-	sdam_config->owner = THIS_MODULE,
-	sdam_config->stride = 1;
-	sdam_config->word_size = 1;
-	sdam_config->reg_read = sdam_read;
-	sdam_config->reg_write = sdam_write;
-	sdam_config->priv = sdam;
+	sdam->sdam_config.dev = &pdev->dev;
+	sdam->sdam_config.name = "spmi_sdam";
+	sdam->sdam_config.id = NVMEM_DEVID_AUTO;
+	sdam->sdam_config.owner = THIS_MODULE;
+	sdam->sdam_config.add_legacy_fixed_of_cells = true;
+	sdam->sdam_config.stride = 1;
+	sdam->sdam_config.size = sdam->size;
+	sdam->sdam_config.word_size = 1;
+	sdam->sdam_config.reg_read = sdam_read;
+	sdam->sdam_config.reg_write = sdam_write;
+	sdam->sdam_config.priv = sdam;
 
-	nvmem = nvmem_register(sdam_config);
+	nvmem = devm_nvmem_register(&pdev->dev, &sdam->sdam_config);
 	if (IS_ERR(nvmem)) {
-		pr_err("Failed to register SDAM nvmem device rc=%ld\n",
-						PTR_ERR(nvmem));
+		dev_err(&pdev->dev,
+			"Failed to register SDAM nvmem device rc=%ld\n",
+			PTR_ERR(nvmem));
 		return -ENXIO;
 	}
-	platform_set_drvdata(pdev, nvmem);
-
-	pr_info("SDAM base=0x%04x size=%d registered successfully\n",
-						sdam->base, sdam->size);
+	dev_dbg(&pdev->dev,
+		"SDAM base=%#x size=%u registered successfully\n",
+		sdam->base, sdam->size);
 
 	return 0;
 }
 
-static int sdam_remove(struct platform_device *pdev)
-{
-	struct nvmem_device *nvmem = platform_get_drvdata(pdev);
-
-	return nvmem_unregister(nvmem);
-}
-
 static const struct of_device_id sdam_match_table[] = {
-	{.compatible = "qcom,spmi-sdam"},
+	{ .compatible = "qcom,spmi-sdam" },
 	{},
 };
+MODULE_DEVICE_TABLE(of, sdam_match_table);
 
 static struct platform_driver sdam_driver = {
 	.driver = {
@@ -178,20 +176,8 @@ static struct platform_driver sdam_driver = {
 		.of_match_table = sdam_match_table,
 	},
 	.probe		= sdam_probe,
-	.remove		= sdam_remove,
 };
-
-static int __init sdam_init(void)
-{
-	return platform_driver_register(&sdam_driver);
-}
-subsys_initcall(sdam_init);
-
-static void __exit sdam_exit(void)
-{
-	return platform_driver_unregister(&sdam_driver);
-}
-module_exit(sdam_exit);
+module_platform_driver(sdam_driver);
 
 MODULE_DESCRIPTION("QCOM SPMI SDAM driver");
 MODULE_LICENSE("GPL v2");

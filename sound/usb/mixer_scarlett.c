@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *   Scarlett Driver for ALSA
  *
@@ -12,17 +13,6 @@
  *
  *   Code cleanup:
  *   David Henningsson <david.henningsson at canonical.com>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
  */
 
 /*
@@ -31,7 +21,7 @@
  * Auto-detection via UAC2 is not feasible to properly discover the vast
  * majority of features. It's related to both Linux/ALSA's UAC2 as well as
  * Focusrite's implementation of it. Eventually quirks may be sufficient but
- * right now it's a major headache to work arount these things.
+ * right now it's a major headache to work around these things.
  *
  * NB. Neither the OSX nor the win driver provided by Focusrite performs
  * discovery, they seem to operate the same as this driver.
@@ -152,6 +142,7 @@ enum {
 	SCARLETT_OUTPUTS,
 	SCARLETT_SWITCH_IMPEDANCE,
 	SCARLETT_SWITCH_PAD,
+	SCARLETT_SWITCH_GAIN,
 };
 
 enum {
@@ -199,6 +190,15 @@ static const struct scarlett_mixer_elem_enum_info opt_pad = {
 	.offsets = {},
 	.names = (char const * const []){
 		"0dB", "-10dB"
+	}
+};
+
+static const struct scarlett_mixer_elem_enum_info opt_gain = {
+	.start = 0,
+	.len = 2,
+	.offsets = {},
+	.names = (char const * const []){
+		"Lo", "Hi"
 	}
 };
 
@@ -357,21 +357,21 @@ static int scarlett_ctl_put(struct snd_kcontrol *kctl,
 	return changed;
 }
 
-static void scarlett_generate_name(int i, char *dst, int offsets[])
+static void scarlett_generate_name(int i, char *dst, size_t size, int offsets[])
 {
 	if (i > offsets[SCARLETT_OFFSET_MIX])
-		sprintf(dst, "Mix %c",
-			'A'+(i - offsets[SCARLETT_OFFSET_MIX] - 1));
+		scnprintf(dst, size, "Mix %c",
+			  'A'+(i - offsets[SCARLETT_OFFSET_MIX] - 1));
 	else if (i > offsets[SCARLETT_OFFSET_ADAT])
-		sprintf(dst, "ADAT %d", i - offsets[SCARLETT_OFFSET_ADAT]);
+		scnprintf(dst, size, "ADAT %d", i - offsets[SCARLETT_OFFSET_ADAT]);
 	else if (i > offsets[SCARLETT_OFFSET_SPDIF])
-		sprintf(dst, "SPDIF %d", i - offsets[SCARLETT_OFFSET_SPDIF]);
+		scnprintf(dst, size, "SPDIF %d", i - offsets[SCARLETT_OFFSET_SPDIF]);
 	else if (i > offsets[SCARLETT_OFFSET_ANALOG])
-		sprintf(dst, "Analog %d", i - offsets[SCARLETT_OFFSET_ANALOG]);
+		scnprintf(dst, size, "Analog %d", i - offsets[SCARLETT_OFFSET_ANALOG]);
 	else if (i > offsets[SCARLETT_OFFSET_PCM])
-		sprintf(dst, "PCM %d", i - offsets[SCARLETT_OFFSET_PCM]);
+		scnprintf(dst, size, "PCM %d", i - offsets[SCARLETT_OFFSET_PCM]);
 	else
-		sprintf(dst, "Off");
+		scnprintf(dst, size, "Off");
 }
 
 static int scarlett_ctl_enum_dynamic_info(struct snd_kcontrol *kctl,
@@ -391,6 +391,7 @@ static int scarlett_ctl_enum_dynamic_info(struct snd_kcontrol *kctl,
 	/* generate name dynamically based on item number and offset info */
 	scarlett_generate_name(uinfo->value.enumerated.item,
 			       uinfo->value.enumerated.name,
+			       sizeof(uinfo->value.enumerated.name),
 			       opt->offsets);
 
 	return 0;
@@ -460,7 +461,7 @@ static int scarlett_ctl_meter_get(struct snd_kcontrol *kctl,
 	struct snd_usb_audio *chip = elem->head.mixer->chip;
 	unsigned char buf[2 * MAX_CHANNELS] = {0, };
 	int wValue = (elem->control << 8) | elem->idx_off;
-	int idx = snd_usb_ctrl_intf(chip) | (elem->head.id << 8);
+	int idx = snd_usb_ctrl_intf(elem->head.mixer->hostif) | (elem->head.id << 8);
 	int err;
 
 	err = snd_usb_ctl_msg(chip->dev,
@@ -569,7 +570,7 @@ static int add_new_ctl(struct usb_mixer_interface *mixer,
 	}
 	kctl->private_free = snd_usb_mixer_elem_free;
 
-	strlcpy(kctl->id.name, name, sizeof(kctl->id.name));
+	strscpy(kctl->id.name, name, sizeof(kctl->id.name));
 
 	err = snd_usb_mixer_add_control(&elem->head, kctl);
 	if (err < 0)
@@ -662,8 +663,8 @@ static const struct scarlett_device_info s6i6_info = {
 		{ .num = 1, .type = SCARLETT_SWITCH_PAD, .name = NULL},
 		{ .num = 2, .type = SCARLETT_SWITCH_IMPEDANCE, .name = NULL},
 		{ .num = 2, .type = SCARLETT_SWITCH_PAD, .name = NULL},
-		{ .num = 3, .type = SCARLETT_SWITCH_PAD, .name = NULL},
-		{ .num = 4, .type = SCARLETT_SWITCH_PAD, .name = NULL},
+		{ .num = 3, .type = SCARLETT_SWITCH_GAIN, .name = NULL},
+		{ .num = 4, .type = SCARLETT_SWITCH_GAIN, .name = NULL},
 	},
 
 	.matrix_mux_init = {
@@ -876,7 +877,8 @@ static int scarlett_controls_create_generic(struct usb_mixer_interface *mixer,
 				return err;
 			break;
 		case SCARLETT_SWITCH_IMPEDANCE:
-			sprintf(mx, "Input %d Impedance Switch", ctl->num);
+			scnprintf(mx, sizeof(mx),
+				  "Input %d Impedance Switch", ctl->num);
 			err = add_new_ctl(mixer, &usb_scarlett_ctl_enum,
 					  scarlett_ctl_enum_resume, 0x01,
 					  0x09, ctl->num, USB_MIXER_S16, 1, mx,
@@ -885,11 +887,22 @@ static int scarlett_controls_create_generic(struct usb_mixer_interface *mixer,
 				return err;
 			break;
 		case SCARLETT_SWITCH_PAD:
-			sprintf(mx, "Input %d Pad Switch", ctl->num);
+			scnprintf(mx, sizeof(mx),
+				  "Input %d Pad Switch", ctl->num);
 			err = add_new_ctl(mixer, &usb_scarlett_ctl_enum,
 					  scarlett_ctl_enum_resume, 0x01,
 					  0x0b, ctl->num, USB_MIXER_S16, 1, mx,
 					  &opt_pad, &elem);
+			if (err < 0)
+				return err;
+			break;
+		case SCARLETT_SWITCH_GAIN:
+			scnprintf(mx, sizeof(mx),
+				  "Input %d Gain Switch", ctl->num);
+			err = add_new_ctl(mixer, &usb_scarlett_ctl_enum,
+					  scarlett_ctl_enum_resume, 0x01,
+					  0x08, ctl->num, USB_MIXER_S16, 1, mx,
+					  &opt_gain, &elem);
 			if (err < 0)
 				return err;
 			break;
@@ -951,8 +964,9 @@ int snd_scarlett_controls_create(struct usb_mixer_interface *mixer)
 			return err;
 
 		for (o = 0; o < info->matrix_out; o++) {
-			sprintf(mx, "Matrix %02d Mix %c Playback Volume", i+1,
-				o+'A');
+			scnprintf(mx, sizeof(mx),
+				  "Matrix %02d Mix %c Playback Volume", i+1,
+				  o+'A');
 			err = add_new_ctl(mixer, &usb_scarlett_ctl,
 					  scarlett_ctl_resume, 0x3c, 0x00,
 					  (i << 3) + (o & 0x07), USB_MIXER_S16,
@@ -993,7 +1007,7 @@ int snd_scarlett_controls_create(struct usb_mixer_interface *mixer)
 	err = snd_usb_ctl_msg(mixer->chip->dev,
 		usb_sndctrlpipe(mixer->chip->dev, 0), UAC2_CS_CUR,
 		USB_RECIP_INTERFACE | USB_TYPE_CLASS |
-		USB_DIR_OUT, 0x0100, snd_usb_ctrl_intf(mixer->chip) |
+		USB_DIR_OUT, 0x0100, snd_usb_ctrl_intf(mixer->hostif) |
 		(0x29 << 8), sample_rate_buffer, 4);
 	if (err < 0)
 		return err;

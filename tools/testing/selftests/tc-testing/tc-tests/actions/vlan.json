@@ -6,6 +6,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -30,6 +33,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -54,6 +60,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -78,6 +87,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -102,6 +114,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -126,6 +141,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -150,6 +168,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -174,6 +195,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -196,6 +220,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -220,6 +247,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -242,6 +272,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -264,6 +297,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -286,6 +322,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -310,6 +349,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -334,6 +376,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -358,6 +403,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -382,6 +430,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -406,6 +457,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -430,6 +484,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -446,12 +503,42 @@
         "teardown": []
     },
     {
+        "id": "ba5b",
+        "name": "Add vlan modify action for protocol 802.1Q setting priority 0",
+        "category": [
+            "actions",
+            "vlan"
+        ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
+        "setup": [
+            [
+                "$TC actions flush action vlan",
+                0,
+                1,
+                255
+            ]
+        ],
+        "cmdUnderTest": "$TC actions add action vlan modify protocol 802.1Q id 5 priority 0 index 100",
+        "expExitCode": "0",
+        "verifyCmd": "$TC actions get action vlan index 100",
+        "matchPattern": "action order [0-9]+: vlan.*modify id 100 priority 0 protocol 802.1Q pipe.*index 100 ref",
+        "matchCount": "0",
+        "teardown": [
+            "$TC actions flush action vlan"
+        ]
+    },
+    {
         "id": "6812",
         "name": "Add vlan modify action for protocol 802.1Q",
         "category": [
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -463,7 +550,7 @@
         "cmdUnderTest": "$TC actions add action vlan modify protocol 802.1Q id 5 index 100",
         "expExitCode": "0",
         "verifyCmd": "$TC actions get action vlan index 100",
-        "matchPattern": "action order [0-9]+: vlan.*modify id 100 protocol 802.1Q priority 0 pipe.*index 100 ref",
+        "matchPattern": "action order [0-9]+: vlan.*modify id 100 protocol 802.1Q pipe.*index 100 ref",
         "matchCount": "0",
         "teardown": [
             "$TC actions flush action vlan"
@@ -476,6 +563,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -487,7 +577,7 @@
         "cmdUnderTest": "$TC actions add action vlan modify protocol 802.1ad id 500 reclassify index 12",
         "expExitCode": "0",
         "verifyCmd": "$TC actions get action vlan index 12",
-        "matchPattern": "action order [0-9]+: vlan.*modify id 500 protocol 802.1ad priority 0 reclassify.*index 12 ref",
+        "matchPattern": "action order [0-9]+: vlan.*modify id 500 protocol 802.1ad reclassify.*index 12 ref",
         "matchCount": "1",
         "teardown": [
             "$TC actions flush action vlan"
@@ -500,6 +590,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -525,6 +618,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -550,6 +646,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -575,6 +674,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -600,6 +702,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -623,6 +728,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -646,6 +754,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -672,6 +783,9 @@
             "actions",
             "vlan"
         ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
         "setup": [
             [
                 "$TC actions flush action vlan",
@@ -684,6 +798,167 @@
         "expExitCode": "0",
         "verifyCmd": "$TC actions list action vlan",
         "matchPattern": "action order [0-9]+: vlan.*push id 4.*cookie a0a0a0a0a0a0a0",
+        "matchCount": "1",
+        "teardown": [
+            "$TC actions flush action vlan"
+        ]
+    },
+    {
+        "id": "e394",
+        "name": "Replace vlan push action with invalid goto chain control",
+        "category": [
+            "actions",
+            "vlan"
+        ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
+        "setup": [
+            [
+                "$TC actions flush action vlan",
+                0,
+                1,
+                255
+            ],
+            "$TC actions add action vlan push id 500 pass index 90"
+        ],
+        "cmdUnderTest": "$TC actions replace action vlan push id 500 goto chain 42 index 90 cookie c1a0c1a0",
+        "expExitCode": "255",
+        "verifyCmd": "$TC actions get action vlan index 90",
+        "matchPattern": "action order [0-9]+: vlan.*push id 500 protocol 802.1Q priority 0 pass.*index 90 ref",
+        "matchCount": "1",
+        "teardown": [
+            "$TC actions flush action vlan"
+        ]
+    },
+    {
+        "id": "294e",
+        "name": "Add batch of 32 vlan push actions with cookie",
+        "category": [
+            "actions",
+            "vlan"
+        ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
+        "setup": [
+            [
+                "$TC actions flush action vlan",
+                0,
+                1,
+                255
+            ]
+        ],
+        "cmdUnderTest": "bash -c \"for i in \\`seq 1 32\\`; do cmd=\\\"action vlan push protocol 802.1q id 4094 priority 7 pipe index \\$i cookie aabbccddeeff112233445566778800a1 \\\"; args=\"\\$args\\$cmd\"; done && $TC actions add \\$args\"",
+        "expExitCode": "0",
+        "verifyCmd": "$TC actions list action vlan",
+        "matchPattern": "^[ \t]+index [0-9]+ ref",
+        "matchCount": "32",
+        "teardown": [
+            "$TC actions flush action vlan"
+        ]
+    },
+    {
+        "id": "56f7",
+        "name": "Delete batch of 32 vlan push actions",
+        "category": [
+            "actions",
+            "vlan"
+        ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
+        "setup": [
+            [
+                "$TC actions flush action vlan",
+                0,
+                1,
+                255
+            ],
+            "bash -c \"for i in \\`seq 1 32\\`; do cmd=\\\"action vlan push protocol 802.1q id 4094 priority 7 pipe index \\$i \\\"; args=\\\"\\$args\\$cmd\\\"; done && $TC actions add \\$args\""
+        ],
+        "cmdUnderTest": "bash -c \"for i in \\`seq 1 32\\`; do cmd=\\\"action vlan index \\$i \\\"; args=\"\\$args\\$cmd\"; done && $TC actions del \\$args\"",
+        "expExitCode": "0",
+        "verifyCmd": "$TC actions list action vlan",
+        "matchPattern": "^[ \t]+index [0-9]+ ref",
+        "matchCount": "0",
+        "teardown": []
+    },
+    {
+        "id": "759f",
+        "name": "Add batch of 32 vlan pop actions with cookie",
+        "category": [
+            "actions",
+            "vlan"
+        ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
+        "setup": [
+            [
+                "$TC actions flush action vlan",
+                0,
+                1,
+                255
+            ]
+        ],
+        "cmdUnderTest": "bash -c \"for i in \\`seq 1 32\\`; do cmd=\\\"action vlan pop continue index \\$i cookie aabbccddeeff112233445566778800a1 \\\"; args=\"\\$args\\$cmd\"; done && $TC actions add \\$args\"",
+        "expExitCode": "0",
+        "verifyCmd": "$TC actions list action vlan",
+        "matchPattern": "^[ \t]+index [0-9]+ ref",
+        "matchCount": "32",
+        "teardown": [
+            "$TC actions flush action vlan"
+        ]
+    },
+    {
+        "id": "c84a",
+        "name": "Delete batch of 32 vlan pop actions",
+        "category": [
+            "actions",
+            "vlan"
+        ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
+        "setup": [
+            [
+                "$TC actions flush action vlan",
+                0,
+                1,
+                255
+            ],
+            "bash -c \"for i in \\`seq 1 32\\`; do cmd=\\\"action vlan pop index \\$i \\\"; args=\\\"\\$args\\$cmd\\\"; done && $TC actions add \\$args\""
+        ],
+        "cmdUnderTest": "bash -c \"for i in \\`seq 1 32\\`; do cmd=\\\"action vlan index \\$i \\\"; args=\"\\$args\\$cmd\"; done && $TC actions del \\$args\"",
+        "expExitCode": "0",
+        "verifyCmd": "$TC actions list action vlan",
+        "matchPattern": "^[ \t]+index [0-9]+ ref",
+        "matchCount": "0",
+        "teardown": []
+    },
+    {
+        "id": "1a3d",
+        "name": "Add vlan pop action with no_percpu flag",
+        "category": [
+            "actions",
+            "vlan"
+        ],
+        "plugins": {
+           "requires": "nsPlugin"
+        },
+        "setup": [
+            [
+                "$TC actions flush action vlan",
+                0,
+                1,
+                255
+            ]
+        ],
+        "cmdUnderTest": "$TC actions add action vlan pop no_percpu",
+        "expExitCode": "0",
+        "verifyCmd": "$TC actions list action vlan",
+        "matchPattern": "action order [0-9]+: vlan.*pop.*no_percpu",
         "matchCount": "1",
         "teardown": [
             "$TC actions flush action vlan"

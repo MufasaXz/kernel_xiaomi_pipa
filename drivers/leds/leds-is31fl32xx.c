@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver for ISSI IS31FL32xx family of I2C LED controllers
  *
  * Copyright 2015 Allworx Corp.
- *
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Datasheets:
  *   http://www.issi.com/US/product-analog-fxled-driver.shtml
@@ -19,7 +15,6 @@
 #include <linux/leds.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 
 /* Used to indicate a device has no such register */
 #define IS31FL32XX_REG_NONE 0xFF
@@ -37,6 +32,8 @@
 #define IS31FL3216_CONFIG_SSD_ENABLE  BIT(7)
 #define IS31FL3216_CONFIG_SSD_DISABLE 0
 
+#define IS31FL32XX_PWM_FREQUENCY_22KHZ  0x01
+
 struct is31fl32xx_priv;
 struct is31fl32xx_led_data {
 	struct led_classdev cdev;
@@ -48,7 +45,7 @@ struct is31fl32xx_priv {
 	const struct is31fl32xx_chipdef *cdef;
 	struct i2c_client *client;
 	unsigned int num_leds;
-	struct is31fl32xx_led_data leds[0];
+	struct is31fl32xx_led_data leds[];
 };
 
 /**
@@ -58,11 +55,13 @@ struct is31fl32xx_priv {
  * @pwm_update_reg      : address of PWM Update register
  * @global_control_reg  : address of Global Control register (optional)
  * @reset_reg           : address of Reset register (optional)
+ * @output_frequency_setting_reg: address of output frequency register (optional)
  * @pwm_register_base   : address of first PWM register
  * @pwm_registers_reversed: : true if PWM registers count down instead of up
  * @led_control_register_base : address of first LED control register (optional)
  * @enable_bits_per_led_control_register: number of LEDs enable bits in each
- * @reset_func:         : pointer to reset function
+ * @reset_func          : pointer to reset function
+ * @sw_shutdown_func    : pointer to software shutdown function
  *
  * For all optional register addresses, the sentinel value %IS31FL32XX_REG_NONE
  * indicates that this chip has no such register.
@@ -80,6 +79,7 @@ struct is31fl32xx_chipdef {
 	u8	pwm_update_reg;
 	u8	global_control_reg;
 	u8	reset_reg;
+	u8	output_frequency_setting_reg;
 	u8	pwm_register_base;
 	bool	pwm_registers_reversed;
 	u8	led_control_register_base;
@@ -94,6 +94,19 @@ static const struct is31fl32xx_chipdef is31fl3236_cdef = {
 	.pwm_update_reg				= 0x25,
 	.global_control_reg			= 0x4a,
 	.reset_reg				= 0x4f,
+	.output_frequency_setting_reg		= IS31FL32XX_REG_NONE,
+	.pwm_register_base			= 0x01,
+	.led_control_register_base		= 0x26,
+	.enable_bits_per_led_control_register	= 1,
+};
+
+static const struct is31fl32xx_chipdef is31fl3236a_cdef = {
+	.channels				= 36,
+	.shutdown_reg				= 0x00,
+	.pwm_update_reg				= 0x25,
+	.global_control_reg			= 0x4a,
+	.reset_reg				= 0x4f,
+	.output_frequency_setting_reg		= 0x4b,
 	.pwm_register_base			= 0x01,
 	.led_control_register_base		= 0x26,
 	.enable_bits_per_led_control_register	= 1,
@@ -105,6 +118,7 @@ static const struct is31fl32xx_chipdef is31fl3235_cdef = {
 	.pwm_update_reg				= 0x25,
 	.global_control_reg			= 0x4a,
 	.reset_reg				= 0x4f,
+	.output_frequency_setting_reg		= IS31FL32XX_REG_NONE,
 	.pwm_register_base			= 0x05,
 	.led_control_register_base		= 0x2a,
 	.enable_bits_per_led_control_register	= 1,
@@ -116,6 +130,7 @@ static const struct is31fl32xx_chipdef is31fl3218_cdef = {
 	.pwm_update_reg				= 0x16,
 	.global_control_reg			= IS31FL32XX_REG_NONE,
 	.reset_reg				= 0x17,
+	.output_frequency_setting_reg		= IS31FL32XX_REG_NONE,
 	.pwm_register_base			= 0x01,
 	.led_control_register_base		= 0x13,
 	.enable_bits_per_led_control_register	= 6,
@@ -130,6 +145,7 @@ static const struct is31fl32xx_chipdef is31fl3216_cdef = {
 	.pwm_update_reg				= 0xB0,
 	.global_control_reg			= IS31FL32XX_REG_NONE,
 	.reset_reg				= IS31FL32XX_REG_NONE,
+	.output_frequency_setting_reg		= IS31FL32XX_REG_NONE,
 	.pwm_register_base			= 0x10,
 	.pwm_registers_reversed			= true,
 	.led_control_register_base		= 0x01,
@@ -328,12 +344,6 @@ static int is31fl32xx_init_regs(struct is31fl32xx_priv *priv)
 	return 0;
 }
 
-static inline size_t sizeof_is31fl32xx_priv(int num_leds)
-{
-	return sizeof(struct is31fl32xx_priv) +
-		      (sizeof(struct is31fl32xx_led_data) * num_leds);
-}
-
 static int is31fl32xx_parse_child_dt(const struct device *dev,
 				     const struct device_node *child,
 				     struct is31fl32xx_led_data *led_data)
@@ -341,9 +351,6 @@ static int is31fl32xx_parse_child_dt(const struct device *dev,
 	struct led_classdev *cdev = &led_data->cdev;
 	int ret = 0;
 	u32 reg;
-
-	if (of_property_read_string(child, "label", &cdev->name))
-		cdev->name = child->name;
 
 	ret = of_property_read_u32(child, "reg", &reg);
 	if (ret || reg < 1 || reg > led_data->priv->cdef->channels) {
@@ -353,9 +360,6 @@ static int is31fl32xx_parse_child_dt(const struct device *dev,
 		return -EINVAL;
 	}
 	led_data->channel = reg;
-
-	of_property_read_string(child, "linux,default-trigger",
-				&cdev->default_trigger);
 
 	cdev->brightness_set_blocking = is31fl32xx_brightness_set;
 
@@ -379,10 +383,23 @@ static struct is31fl32xx_led_data *is31fl32xx_find_led_data(
 static int is31fl32xx_parse_dt(struct device *dev,
 			       struct is31fl32xx_priv *priv)
 {
-	struct device_node *child;
+	const struct is31fl32xx_chipdef *cdef = priv->cdef;
 	int ret = 0;
 
-	for_each_child_of_node(dev->of_node, child) {
+	if ((cdef->output_frequency_setting_reg != IS31FL32XX_REG_NONE) &&
+	    of_property_read_bool(dev_of_node(dev), "issi,22khz-pwm")) {
+
+		ret = is31fl32xx_write(priv, cdef->output_frequency_setting_reg,
+				       IS31FL32XX_PWM_FREQUENCY_22KHZ);
+
+		if (ret) {
+			dev_err(dev, "Failed to write output PWM frequency register\n");
+			return ret;
+		}
+	}
+
+	for_each_available_child_of_node_scoped(dev_of_node(dev), child) {
+		struct led_init_data init_data = {};
 		struct is31fl32xx_led_data *led_data =
 			&priv->leds[priv->num_leds];
 		const struct is31fl32xx_led_data *other_led_data;
@@ -391,70 +408,62 @@ static int is31fl32xx_parse_dt(struct device *dev,
 
 		ret = is31fl32xx_parse_child_dt(dev, child, led_data);
 		if (ret)
-			goto err;
+			return ret;
 
 		/* Detect if channel is already in use by another child */
 		other_led_data = is31fl32xx_find_led_data(priv,
 							  led_data->channel);
 		if (other_led_data) {
 			dev_err(dev,
-				"%s and %s both attempting to use channel %d\n",
-				led_data->cdev.name,
-				other_led_data->cdev.name,
-				led_data->channel);
-			goto err;
+				"Node %pOF 'reg' conflicts with another LED\n",
+				child);
+			return -EINVAL;
 		}
 
-		ret = devm_led_classdev_register(dev, &led_data->cdev);
+		init_data.fwnode = of_fwnode_handle(child);
+
+		ret = devm_led_classdev_register_ext(dev, &led_data->cdev,
+						     &init_data);
 		if (ret) {
-			dev_err(dev, "failed to register PWM led for %s: %d\n",
-				led_data->cdev.name, ret);
-			goto err;
+			dev_err(dev, "Failed to register LED for %pOF: %d\n",
+				child, ret);
+			return ret;
 		}
 
 		priv->num_leds++;
 	}
 
 	return 0;
-
-err:
-	of_node_put(child);
-	return ret;
 }
 
 static const struct of_device_id of_is31fl32xx_match[] = {
-	{ .compatible = "issi,is31fl3236", .data = &is31fl3236_cdef, },
-	{ .compatible = "issi,is31fl3235", .data = &is31fl3235_cdef, },
-	{ .compatible = "issi,is31fl3218", .data = &is31fl3218_cdef, },
-	{ .compatible = "si-en,sn3218",    .data = &is31fl3218_cdef, },
-	{ .compatible = "issi,is31fl3216", .data = &is31fl3216_cdef, },
-	{ .compatible = "si-en,sn3216",    .data = &is31fl3216_cdef, },
+	{ .compatible = "issi,is31fl3236",  .data = &is31fl3236_cdef, },
+	{ .compatible = "issi,is31fl3236a", .data = &is31fl3236a_cdef, },
+	{ .compatible = "issi,is31fl3235",  .data = &is31fl3235_cdef, },
+	{ .compatible = "issi,is31fl3218",  .data = &is31fl3218_cdef, },
+	{ .compatible = "si-en,sn3218",     .data = &is31fl3218_cdef, },
+	{ .compatible = "issi,is31fl3216",  .data = &is31fl3216_cdef, },
+	{ .compatible = "si-en,sn3216",     .data = &is31fl3216_cdef, },
 	{},
 };
 
 MODULE_DEVICE_TABLE(of, of_is31fl32xx_match);
 
-static int is31fl32xx_probe(struct i2c_client *client,
-			    const struct i2c_device_id *id)
+static int is31fl32xx_probe(struct i2c_client *client)
 {
 	const struct is31fl32xx_chipdef *cdef;
-	const struct of_device_id *of_dev_id;
 	struct device *dev = &client->dev;
 	struct is31fl32xx_priv *priv;
 	int count;
 	int ret = 0;
 
-	of_dev_id = of_match_device(of_is31fl32xx_match, dev);
-	if (!of_dev_id)
-		return -EINVAL;
+	cdef = device_get_match_data(dev);
 
-	cdef = of_dev_id->data;
-
-	count = of_get_child_count(dev->of_node);
+	count = of_get_available_child_count(dev_of_node(dev));
 	if (!count)
 		return -EINVAL;
 
-	priv = devm_kzalloc(dev, sizeof_is31fl32xx_priv(count),
+	priv = devm_kzalloc(dev, struct_size(priv, leds, count),
 			    GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
@@ -474,11 +483,15 @@ static int is31fl32xx_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int is31fl32xx_remove(struct i2c_client *client)
+static void is31fl32xx_remove(struct i2c_client *client)
 {
 	struct is31fl32xx_priv *priv = i2c_get_clientdata(client);
+	int ret;
 
-	return is31fl32xx_reset_regs(priv);
+	ret = is31fl32xx_reset_regs(priv);
+	if (ret)
+		dev_err(&client->dev, "Failed to reset registers on removal (%pe)\n",
+			ERR_PTR(ret));
 }
 
 /*
@@ -487,6 +500,7 @@ static int is31fl32xx_remove(struct i2c_client *client)
  */
 static const struct i2c_device_id is31fl32xx_id[] = {
 	{ "is31fl3236" },
+	{ "is31fl3236a" },
 	{ "is31fl3235" },
 	{ "is31fl3218" },
 	{ "sn3218" },

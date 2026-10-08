@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * IPVS         An implementation of the IP virtual server support for the
  *              LINUX operating system.  IPVS is now implemented as a module
@@ -9,17 +10,11 @@
  *              Peter Kese <peter.kese@ijs.si>
  *              Julian Anastasov <ja@ssi.bg>
  *
- *              This program is free software; you can redistribute it and/or
- *              modify it under the terms of the GNU General Public License
- *              as published by the Free Software Foundation; either version
- *              2 of the License, or (at your option) any later version.
- *
  * The IPVS code for kernel 2.2 was done by Wensong Zhang and Peter Kese,
  * with changes/fixes from Julian Anastasov, Lars Marowsky-Bree, Horms
  * and others. Many code here is taken from IP MASQ code of kernel 2.2.
  *
  * Changes:
- *
  */
 
 #define KMSG_COMPONENT "IPVS"
@@ -31,12 +26,12 @@
 #include <linux/net.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/vmalloc.h>
 #include <linux/proc_fs.h>		/* for proc_net_* */
 #include <linux/slab.h>
 #include <linux/seq_file.h>
 #include <linux/jhash.h>
 #include <linux/random.h>
+#include <linux/rcupdate_wait.h>
 
 #include <net/net_namespace.h>
 #include <net/ip_vs.h>
@@ -407,6 +402,8 @@ struct ip_vs_conn *ip_vs_conn_out_get(const struct ip_vs_conn_param *p)
 {
 	unsigned int hash;
 	struct ip_vs_conn *cp, *ret=NULL;
+	const union nf_inet_addr *saddr;
+	__be16 sport;
 
 	/*
 	 *	Check for "full" addressed entries
@@ -416,10 +413,20 @@ struct ip_vs_conn *ip_vs_conn_out_get(const struct ip_vs_conn_param *p)
 	rcu_read_lock();
 
 	hlist_for_each_entry_rcu(cp, &ip_vs_conn_tab[hash], c_list) {
-		if (p->vport == cp->cport && p->cport == cp->dport &&
-		    cp->af == p->af &&
+		if (p->vport != cp->cport)
+			continue;
+
+		if (IP_VS_FWD_METHOD(cp) != IP_VS_CONN_F_MASQ) {
+			sport = cp->vport;
+			saddr = &cp->vaddr;
+		} else {
+			sport = cp->dport;
+			saddr = &cp->daddr;
+		}
+
+		if (p->cport == sport && cp->af == p->af &&
 		    ip_vs_addr_equal(p->af, p->vaddr, &cp->caddr) &&
-		    ip_vs_addr_equal(p->af, p->caddr, &cp->daddr) &&
+		    ip_vs_addr_equal(p->af, p->caddr, saddr) &&
 		    p->protocol == cp->protocol &&
 		    cp->ipvs == p->ipvs) {
 			if (!__ip_vs_conn_get(cp))
@@ -812,9 +819,34 @@ static void ip_vs_conn_rcu_free(struct rcu_head *head)
 	kmem_cache_free(ip_vs_conn_cachep, cp);
 }
 
+/* Try to delete connection while not holding reference */
+static void ip_vs_conn_del(struct ip_vs_conn *cp)
+{
+	if (timer_delete(&cp->timer)) {
+		/* Drop cp->control chain too */
+		if (cp->control)
+			cp->timeout = 0;
+		ip_vs_conn_expire(&cp->timer);
+	}
+}
+
+/* Try to delete connection while holding reference */
+static void ip_vs_conn_del_put(struct ip_vs_conn *cp)
+{
+	if (timer_delete(&cp->timer)) {
+		/* Drop cp->control chain too */
+		if (cp->control)
+			cp->timeout = 0;
+		__ip_vs_conn_put(cp);
+		ip_vs_conn_expire(&cp->timer);
+	} else {
+		__ip_vs_conn_put(cp);
+	}
+}
+
 static void ip_vs_conn_expire(struct timer_list *t)
 {
-	struct ip_vs_conn *cp = from_timer(cp, t, timer);
+	struct ip_vs_conn *cp = timer_container_of(cp, t, timer);
 	struct netns_ipvs *ipvs = cp->ipvs;
 
 	/*
@@ -828,18 +860,21 @@ static void ip_vs_conn_expire(struct timer_list *t)
 		struct ip_vs_conn *ct = cp->control;
 
 		/* delete the timer if it is activated by other users */
-		del_timer(&cp->timer);
+		timer_delete(&cp->timer);
 
 		/* does anybody control me? */
 		if (ct) {
+			bool has_ref = !cp->timeout && __ip_vs_conn_get(ct);
+
 			ip_vs_control_del(cp);
 			/* Drop CTL or non-assured TPL if not used anymore */
-			if (!cp->timeout && !atomic_read(&ct->n_control) &&
+			if (has_ref && !atomic_read(&ct->n_control) &&
 			    (!(ct->flags & IP_VS_CONN_F_TEMPLATE) ||
 			     !(ct->state & IP_VS_CTPL_S_ASSURED))) {
 				IP_VS_DBG(4, "drop controlling connection\n");
-				ct->timeout = 0;
-				ip_vs_conn_expire_now(ct);
+				ip_vs_conn_del_put(ct);
+			} else if (has_ref) {
+				__ip_vs_conn_put(ct);
 			}
 		}
 
@@ -850,7 +885,7 @@ static void ip_vs_conn_expire(struct timer_list *t)
 			 * conntrack cleanup for the net.
 			 */
 			smp_rmb();
-			if (ipvs->enable)
+			if (READ_ONCE(ipvs->enable))
 				ip_vs_conn_drop_conntrack(cp);
 		}
 
@@ -891,7 +926,7 @@ static void ip_vs_conn_expire(struct timer_list *t)
 void ip_vs_conn_expire_now(struct ip_vs_conn *cp)
 {
 	/* Using mod_timer_pending will ensure the timer is not
-	 * modified after the final del_timer in ip_vs_conn_expire.
+	 * modified after the final timer_delete in ip_vs_conn_expire.
 	 */
 	if (timer_pending(&cp->timer) &&
 	    time_after(cp->timer.expires, jiffies))
@@ -1011,28 +1046,35 @@ ip_vs_conn_new(const struct ip_vs_conn_param *p, int dest_af,
 #ifdef CONFIG_PROC_FS
 struct ip_vs_iter_state {
 	struct seq_net_private	p;
-	struct hlist_head	*l;
+	unsigned int		bucket;
+	unsigned int		skip_elems;
 };
 
-static void *ip_vs_conn_array(struct seq_file *seq, loff_t pos)
+static void *ip_vs_conn_array(struct ip_vs_iter_state *iter)
 {
 	int idx;
 	struct ip_vs_conn *cp;
-	struct ip_vs_iter_state *iter = seq->private;
 
-	for (idx = 0; idx < ip_vs_conn_tab_size; idx++) {
+	for (idx = iter->bucket; idx < ip_vs_conn_tab_size; idx++) {
+		unsigned int skip = 0;
+
 		hlist_for_each_entry_rcu(cp, &ip_vs_conn_tab[idx], c_list) {
 			/* __ip_vs_conn_get() is not needed by
 			 * ip_vs_conn_seq_show and ip_vs_conn_sync_seq_show
 			 */
-			if (pos-- == 0) {
-				iter->l = &ip_vs_conn_tab[idx];
+			if (skip >= iter->skip_elems) {
+				iter->bucket = idx;
 				return cp;
 			}
+
+			++skip;
 		}
+
+		iter->skip_elems = 0;
 		cond_resched_rcu();
 	}
 
+	iter->bucket = idx;
 	return NULL;
 }
 
@@ -1041,9 +1083,14 @@ static void *ip_vs_conn_seq_start(struct seq_file *seq, loff_t *pos)
 {
 	struct ip_vs_iter_state *iter = seq->private;
 
-	iter->l = NULL;
 	rcu_read_lock();
-	return *pos ? ip_vs_conn_array(seq, *pos - 1) :SEQ_START_TOKEN;
+	if (*pos == 0) {
+		iter->skip_elems = 0;
+		iter->bucket = 0;
+		return SEQ_START_TOKEN;
+	}
+
+	return ip_vs_conn_array(iter);
 }
 
 static void *ip_vs_conn_seq_next(struct seq_file *seq, void *v, loff_t *pos)
@@ -1051,28 +1098,22 @@ static void *ip_vs_conn_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 	struct ip_vs_conn *cp = v;
 	struct ip_vs_iter_state *iter = seq->private;
 	struct hlist_node *e;
-	struct hlist_head *l = iter->l;
-	int idx;
 
 	++*pos;
 	if (v == SEQ_START_TOKEN)
-		return ip_vs_conn_array(seq, 0);
+		return ip_vs_conn_array(iter);
 
 	/* more on same hash chain? */
 	e = rcu_dereference(hlist_next_rcu(&cp->c_list));
-	if (e)
+	if (e) {
+		iter->skip_elems++;
 		return hlist_entry(e, struct ip_vs_conn, c_list);
-
-	idx = l - ip_vs_conn_tab;
-	while (++idx < ip_vs_conn_tab_size) {
-		hlist_for_each_entry_rcu(cp, &ip_vs_conn_tab[idx], c_list) {
-			iter->l = &ip_vs_conn_tab[idx];
-			return cp;
-		}
-		cond_resched_rcu();
 	}
-	iter->l = NULL;
-	return NULL;
+
+	iter->skip_elems = 0;
+	iter->bucket++;
+
+	return ip_vs_conn_array(iter);
 }
 
 static void ip_vs_conn_seq_stop(struct seq_file *seq, void *v)
@@ -1273,7 +1314,7 @@ void ip_vs_random_dropentry(struct netns_ipvs *ipvs)
 	 * Randomly scan 1/32 of the whole table every second
 	 */
 	for (idx = 0; idx < (ip_vs_conn_tab_size>>5); idx++) {
-		unsigned int hash = prandom_u32() & ip_vs_conn_tab_mask;
+		unsigned int hash = get_random_u32() & ip_vs_conn_tab_mask;
 
 		hlist_for_each_entry_rcu(cp, &ip_vs_conn_tab[hash], c_list) {
 			if (cp->ipvs != ipvs)
@@ -1322,8 +1363,7 @@ try_drop:
 
 drop:
 			IP_VS_DBG(4, "drop connection\n");
-			cp->timeout = 0;
-			ip_vs_conn_expire_now(cp);
+			ip_vs_conn_del(cp);
 		}
 		cond_resched_rcu();
 	}
@@ -1346,19 +1386,15 @@ flush_again:
 		hlist_for_each_entry_rcu(cp, &ip_vs_conn_tab[idx], c_list) {
 			if (cp->ipvs != ipvs)
 				continue;
-			/* As timers are expired in LIFO order, restart
-			 * the timer of controlling connection first, so
-			 * that it is expired after us.
-			 */
+			if (atomic_read(&cp->n_control))
+				continue;
 			cp_c = cp->control;
-			/* cp->control is valid only with reference to cp */
-			if (cp_c && __ip_vs_conn_get(cp)) {
-				IP_VS_DBG(4, "del controlling connection\n");
-				ip_vs_conn_expire_now(cp_c);
-				__ip_vs_conn_put(cp);
-			}
 			IP_VS_DBG(4, "del connection\n");
-			ip_vs_conn_expire_now(cp);
+			ip_vs_conn_del(cp);
+			if (cp_c && !atomic_read(&cp_c->n_control)) {
+				IP_VS_DBG(4, "del controlling connection\n");
+				ip_vs_conn_del(cp_c);
+			}
 		}
 		cond_resched_rcu();
 	}
@@ -1371,6 +1407,45 @@ flush_again:
 		goto flush_again;
 	}
 }
+
+#ifdef CONFIG_SYSCTL
+void ip_vs_expire_nodest_conn_flush(struct netns_ipvs *ipvs)
+{
+	int idx;
+	struct ip_vs_conn *cp, *cp_c;
+	struct ip_vs_dest *dest;
+
+	rcu_read_lock();
+	for (idx = 0; idx < ip_vs_conn_tab_size; idx++) {
+		hlist_for_each_entry_rcu(cp, &ip_vs_conn_tab[idx], c_list) {
+			if (cp->ipvs != ipvs)
+				continue;
+
+			dest = cp->dest;
+			if (!dest || (dest->flags & IP_VS_DEST_F_AVAILABLE))
+				continue;
+
+			if (atomic_read(&cp->n_control))
+				continue;
+
+			cp_c = cp->control;
+			IP_VS_DBG(4, "del connection\n");
+			ip_vs_conn_del(cp);
+			if (cp_c && !atomic_read(&cp_c->n_control)) {
+				IP_VS_DBG(4, "del controlling connection\n");
+				ip_vs_conn_del(cp_c);
+			}
+		}
+		cond_resched_rcu();
+
+		/* netns clean up started, abort delayed work */
+		if (!READ_ONCE(ipvs->enable))
+			break;
+	}
+	rcu_read_unlock();
+}
+#endif
+
 /*
  * per netns init and exit
  */
@@ -1412,37 +1487,44 @@ void __net_exit ip_vs_conn_net_cleanup(struct netns_ipvs *ipvs)
 
 int __init ip_vs_conn_init(void)
 {
+	size_t tab_array_size;
+	int max_avail;
+#if BITS_PER_LONG > 32
+	int max = 27;
+#else
+	int max = 20;
+#endif
+	int min = 8;
 	int idx;
 
-	/* Compute size and mask */
-	if (ip_vs_conn_tab_bits < 8 || ip_vs_conn_tab_bits > 20) {
-		pr_info("conn_tab_bits not in [8, 20]. Using default value\n");
-		ip_vs_conn_tab_bits = CONFIG_IP_VS_TAB_BITS;
-	}
+	max_avail = order_base_2(totalram_pages()) + PAGE_SHIFT;
+	max_avail -= 2;		/* ~4 in hash row */
+	max_avail -= 1;		/* IPVS up to 1/2 of mem */
+	max_avail -= order_base_2(sizeof(struct ip_vs_conn));
+	max = clamp(max_avail, min, max);
+	ip_vs_conn_tab_bits = clamp(ip_vs_conn_tab_bits, min, max);
 	ip_vs_conn_tab_size = 1 << ip_vs_conn_tab_bits;
 	ip_vs_conn_tab_mask = ip_vs_conn_tab_size - 1;
 
 	/*
 	 * Allocate the connection hash table and initialize its list heads
 	 */
-	ip_vs_conn_tab = vmalloc(array_size(ip_vs_conn_tab_size,
-					    sizeof(*ip_vs_conn_tab)));
+	tab_array_size = array_size(ip_vs_conn_tab_size,
+				    sizeof(*ip_vs_conn_tab));
+	ip_vs_conn_tab = kvmalloc_array(ip_vs_conn_tab_size,
+					sizeof(*ip_vs_conn_tab), GFP_KERNEL);
 	if (!ip_vs_conn_tab)
 		return -ENOMEM;
 
 	/* Allocate ip_vs_conn slab cache */
-	ip_vs_conn_cachep = kmem_cache_create("ip_vs_conn",
-					      sizeof(struct ip_vs_conn), 0,
-					      SLAB_HWCACHE_ALIGN, NULL);
+	ip_vs_conn_cachep = KMEM_CACHE(ip_vs_conn, SLAB_HWCACHE_ALIGN);
 	if (!ip_vs_conn_cachep) {
-		vfree(ip_vs_conn_tab);
+		kvfree(ip_vs_conn_tab);
 		return -ENOMEM;
 	}
 
-	pr_info("Connection hash table configured "
-		"(size=%d, memory=%ldKbytes)\n",
-		ip_vs_conn_tab_size,
-		(long)(ip_vs_conn_tab_size*sizeof(*ip_vs_conn_tab))/1024);
+	pr_info("Connection hash table configured (size=%d, memory=%zdKbytes)\n",
+		ip_vs_conn_tab_size, tab_array_size / 1024);
 	IP_VS_DBG(0, "Each connection entry needs %zd bytes at least\n",
 		  sizeof(struct ip_vs_conn));
 
@@ -1465,5 +1547,5 @@ void ip_vs_conn_cleanup(void)
 	rcu_barrier();
 	/* Release the empty cache */
 	kmem_cache_destroy(ip_vs_conn_cachep);
-	vfree(ip_vs_conn_tab);
+	kvfree(ip_vs_conn_tab);
 }

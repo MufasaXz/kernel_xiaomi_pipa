@@ -87,8 +87,7 @@ void bch_rescale_priorities(struct cache_set *c, int sectors)
 {
 	struct cache *ca;
 	struct bucket *b;
-	unsigned int next = c->nbuckets * c->sb.bucket_size / 1024;
-	unsigned int i;
+	unsigned long next = c->nbuckets * c->cache->sb.bucket_size / 1024;
 	int r;
 
 	atomic_sub(sectors, &c->rescale);
@@ -104,14 +103,14 @@ void bch_rescale_priorities(struct cache_set *c, int sectors)
 
 	c->min_prio = USHRT_MAX;
 
-	for_each_cache(ca, c, i)
-		for_each_bucket(b, ca)
-			if (b->prio &&
-			    b->prio != BTREE_PRIO &&
-			    !atomic_read(&b->pin)) {
-				b->prio--;
-				c->min_prio = min(c->min_prio, b->prio);
-			}
+	ca = c->cache;
+	for_each_bucket(b, ca)
+		if (b->prio &&
+		    b->prio != BTREE_PRIO &&
+		    !atomic_read(&b->pin)) {
+			b->prio--;
+			c->min_prio = min(c->min_prio, b->prio);
+		}
 
 	mutex_unlock(&c->bucket_lock);
 }
@@ -130,12 +129,9 @@ static inline bool can_inc_bucket_gen(struct bucket *b)
 
 bool bch_can_invalidate_bucket(struct cache *ca, struct bucket *b)
 {
-	BUG_ON(!ca->set->gc_mark_valid);
-
-	return (!GC_MARK(b) ||
-		GC_MARK(b) == GC_MARK_RECLAIMABLE) &&
-		!atomic_read(&b->pin) &&
-		can_inc_bucket_gen(b);
+	return (ca->set->gc_mark_valid || b->reclaimable_in_gc) &&
+	       ((!GC_MARK(b) || GC_MARK(b) == GC_MARK_RECLAIMABLE) &&
+	       !atomic_read(&b->pin) && can_inc_bucket_gen(b));
 }
 
 void __bch_invalidate_one_bucket(struct cache *ca, struct bucket *b)
@@ -149,6 +145,7 @@ void __bch_invalidate_one_bucket(struct cache *ca, struct bucket *b)
 	bch_inc_gen(ca, b);
 	b->prio = INITIAL_PRIO;
 	atomic_inc(&b->pin);
+	b->reclaimable_in_gc = 0;
 }
 
 static void bch_invalidate_one_bucket(struct cache *ca, struct bucket *b)
@@ -337,7 +334,7 @@ static int bch_allocator_thread(void *arg)
 				mutex_unlock(&ca->set->bucket_lock);
 				blkdev_issue_discard(ca->bdev,
 					bucket_to_sector(ca->set, bucket),
-					ca->sb.bucket_size, GFP_KERNEL, 0);
+					ca->sb.bucket_size, GFP_KERNEL);
 				mutex_lock(&ca->set->bucket_lock);
 			}
 
@@ -353,8 +350,7 @@ static int bch_allocator_thread(void *arg)
 		 */
 
 retry_invalidate:
-		allocator_wait(ca, ca->set->gc_mark_valid &&
-			       !ca->invalidate_needs_gc);
+		allocator_wait(ca, !ca->invalidate_needs_gc);
 		invalidate_buckets(ca);
 
 		/*
@@ -362,7 +358,7 @@ retry_invalidate:
 		 * new stuff to them:
 		 */
 		allocator_wait(ca, !atomic_read(&ca->set->prio_blocked));
-		if (CACHE_SYNC(&ca->set->sb)) {
+		if (CACHE_SYNC(&ca->sb)) {
 			/*
 			 * This could deadlock if an allocation with a btree
 			 * node locked ever blocked - having the btree node
@@ -483,8 +479,7 @@ void bch_bucket_free(struct cache_set *c, struct bkey *k)
 	unsigned int i;
 
 	for (i = 0; i < KEY_PTRS(k); i++)
-		__bch_bucket_free(PTR_CACHE(c, k, i),
-				  PTR_BUCKET(c, k, i));
+		__bch_bucket_free(c->cache, PTR_BUCKET(c, k, i));
 }
 
 int __bch_bucket_alloc_set(struct cache_set *c, unsigned int reserve,
@@ -501,10 +496,10 @@ int __bch_bucket_alloc_set(struct cache_set *c, unsigned int reserve,
 
 	bkey_init(k);
 
-	ca = c->cache_by_alloc[0];
+	ca = c->cache;
 	b = bch_bucket_alloc(ca, reserve, wait);
-	if (b == -1)
-		goto err;
+	if (b < 0)
+		return -1;
 
 	k->ptr[0] = MAKE_PTR(ca->buckets[b].gen,
 			     bucket_to_sector(c, b),
@@ -513,10 +508,6 @@ int __bch_bucket_alloc_set(struct cache_set *c, unsigned int reserve,
 	SET_KEY_PTRS(k, 1);
 
 	return 0;
-err:
-	bch_bucket_free(c, k);
-	bkey_put(c, k);
-	return -1;
 }
 
 int bch_bucket_alloc_set(struct cache_set *c, unsigned int reserve,
@@ -584,7 +575,7 @@ static struct open_bucket *pick_data_bucket(struct cache_set *c,
 					   struct open_bucket, list);
 found:
 	if (!ret->sectors_free && KEY_PTRS(alloc)) {
-		ret->sectors_free = c->sb.bucket_size;
+		ret->sectors_free = c->cache->sb.bucket_size;
 		bkey_copy(&ret->key, alloc);
 		bkey_init(alloc);
 	}
@@ -675,10 +666,10 @@ bool bch_alloc_sectors(struct cache_set *c,
 		SET_PTR_OFFSET(&b->key, i, PTR_OFFSET(&b->key, i) + sectors);
 
 		atomic_long_add(sectors,
-				&PTR_CACHE(c, &b->key, i)->sectors_written);
+				&c->cache->sectors_written);
 	}
 
-	if (b->sectors_free < c->sb.block_size)
+	if (b->sectors_free < c->cache->sb.block_size)
 		b->sectors_free = 0;
 
 	/*

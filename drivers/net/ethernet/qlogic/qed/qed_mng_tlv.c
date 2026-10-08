@@ -1,4 +1,6 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
+/* Copyright (c) 2019-2020 Marvell International Ltd. */
+
 #include <linux/types.h>
 #include <asm/byteorder.h>
 #include <linux/bug.h>
@@ -240,7 +242,7 @@ static int qed_mfw_get_tlv_group(u8 tlv_type, u8 *tlv_group)
 }
 
 /* Returns size of the data buffer or, -1 in case TLV data is not available. */
-static int
+static noinline_for_stack int
 qed_mfw_get_gen_tlv_value(struct qed_drv_tlv_hdr *p_tlv,
 			  struct qed_mfw_tlv_generic *p_drv_buf,
 			  struct qed_tlv_parsed_buf *p_buf)
@@ -302,7 +304,7 @@ qed_mfw_get_gen_tlv_value(struct qed_drv_tlv_hdr *p_tlv,
 	return -1;
 }
 
-static int
+static noinline_for_stack int
 qed_mfw_get_eth_tlv_value(struct qed_drv_tlv_hdr *p_tlv,
 			  struct qed_mfw_tlv_eth *p_drv_buf,
 			  struct qed_tlv_parsed_buf *p_buf)
@@ -420,7 +422,7 @@ qed_mfw_get_tlv_time_value(struct qed_mfw_tlv_time *p_time,
 	if (p_time->hour > 23)
 		p_time->hour = 0;
 	if (p_time->min > 59)
-		p_time->hour = 0;
+		p_time->min = 0;
 	if (p_time->msec > 999)
 		p_time->msec = 0;
 	if (p_time->usec > 999)
@@ -436,7 +438,7 @@ qed_mfw_get_tlv_time_value(struct qed_mfw_tlv_time *p_time,
 	return QED_MFW_TLV_TIME_SIZE;
 }
 
-static int
+static noinline_for_stack int
 qed_mfw_get_fcoe_tlv_value(struct qed_drv_tlv_hdr *p_tlv,
 			   struct qed_mfw_tlv_fcoe *p_drv_buf,
 			   struct qed_tlv_parsed_buf *p_buf)
@@ -1071,7 +1073,7 @@ qed_mfw_get_fcoe_tlv_value(struct qed_drv_tlv_hdr *p_tlv,
 	return -1;
 }
 
-static int
+static noinline_for_stack int
 qed_mfw_get_iscsi_tlv_value(struct qed_drv_tlv_hdr *p_tlv,
 			    struct qed_mfw_tlv_iscsi *p_drv_buf,
 			    struct qed_tlv_parsed_buf *p_buf)
@@ -1274,7 +1276,7 @@ int qed_mfw_process_tlv_req(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt)
 	 */
 	for (offset = 0; offset < size; offset += sizeof(u32)) {
 		val = qed_rd(p_hwfn, p_ptt, addr + offset);
-		val = be32_to_cpu(val);
+		val = be32_to_cpu((__force __be32)val);
 		memcpy(&p_mfw_buf[offset], &val, sizeof(u32));
 	}
 
@@ -1304,7 +1306,8 @@ int qed_mfw_process_tlv_req(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt)
 	}
 
 	if ((tlv_group & QED_MFW_TLV_ISCSI) &&
-	    p_hwfn->hw_info.personality != QED_PCI_ISCSI) {
+	    p_hwfn->hw_info.personality != QED_PCI_ISCSI &&
+		p_hwfn->hw_info.personality != QED_PCI_NVMETCP) {
 		DP_VERBOSE(p_hwfn, QED_MSG_SP,
 			   "Skipping iSCSI TLVs for non-iSCSI function\n");
 		tlv_group &= ~QED_MFW_TLV_ISCSI;
@@ -1323,7 +1326,7 @@ int qed_mfw_process_tlv_req(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt)
 	 */
 	for (offset = 0; offset < size; offset += sizeof(u32)) {
 		memcpy(&val, &p_mfw_buf[offset], sizeof(u32));
-		val = cpu_to_be32(val);
+		val = (__force u32)cpu_to_be32(val);
 		qed_wr(p_hwfn, p_ptt, addr + offset, val);
 	}
 

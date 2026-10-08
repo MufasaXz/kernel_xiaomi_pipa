@@ -1,9 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2014-15 Synopsys, Inc. (www.synopsys.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/linkage.h>
@@ -30,20 +27,21 @@
 
 #else
 
-.macro PREALLOC_INSTR
+.macro PREALLOC_INSTR	reg, off
 .endm
 
-.macro PREFETCHW_INSTR
+.macro PREFETCHW_INSTR	reg, off
 .endm
 
 #endif
 
 ENTRY_CFI(memset)
-	PREFETCHW_INSTR	r0, 0	; Prefetch the first write location
 	mov.f	0, r2
 ;;; if size is zero
 	jz.d	[blink]
 	mov	r3, r0		; don't clobber ret val
+
+	PREFETCHW_INSTR	r0, 0	; Prefetch the first write location
 
 ;;; if length < 8
 	brls.d.nt	r2, 8, .Lsmallchunk

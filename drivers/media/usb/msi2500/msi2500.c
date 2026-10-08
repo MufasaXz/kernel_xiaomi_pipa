@@ -1,18 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Mirics MSi2500 driver
  * Mirics MSi3101 SDR Dongle driver
  *
  * Copyright (C) 2013 Antti Palosaari <crope@iki.fi>
- *
- *    This program is free software; you can redistribute it and/or modify
- *    it under the terms of the GNU General Public License as published by
- *    the Free Software Foundation; either version 2 of the License, or
- *    (at your option) any later version.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU General Public License for more details.
  *
  * That driver is somehow based of pwc driver:
  *  (C) 1999-2004 Nemosoft Unv.
@@ -75,7 +66,6 @@ static const struct v4l2_frequency_band bands[] = {
 
 /* stream formats */
 struct msi2500_format {
-	char	*name;
 	u32	pixelformat;
 	u32	buffersize;
 };
@@ -83,27 +73,21 @@ struct msi2500_format {
 /* format descriptions for capture and preview */
 static struct msi2500_format formats[] = {
 	{
-		.name		= "Complex S8",
 		.pixelformat	= V4L2_SDR_FMT_CS8,
 		.buffersize	= 3 * 1008,
 #if 0
 	}, {
-		.name		= "10+2-bit signed",
 		.pixelformat	= MSI2500_PIX_FMT_SDR_MSI2500_384,
 	}, {
-		.name		= "12-bit signed",
 		.pixelformat	= MSI2500_PIX_FMT_SDR_S12,
 #endif
 	}, {
-		.name		= "Complex S14LE",
 		.pixelformat	= V4L2_SDR_FMT_CS14LE,
 		.buffersize	= 3 * 1008,
 	}, {
-		.name		= "Complex U8 (emulated)",
 		.pixelformat	= V4L2_SDR_FMT_CU8,
 		.buffersize	= 3 * 1008,
 	}, {
-		.name		= "Complex U16LE (emulated)",
 		.pixelformat	=  V4L2_SDR_FMT_CU16LE,
 		.buffersize	= 3 * 1008,
 	},
@@ -123,7 +107,7 @@ struct msi2500_dev {
 	struct video_device vdev;
 	struct v4l2_device v4l2_dev;
 	struct v4l2_subdev *v4l2_subdev;
-	struct spi_master *master;
+	struct spi_controller *ctlr;
 
 	/* videobuf2 queue and queued buffers list */
 	struct vb2_queue vb_queue;
@@ -225,7 +209,7 @@ leave:
  *
  * Control bits for previous samples is 32-bit field, containing 16 x 2-bit
  * numbers. This results one 2-bit number for 8 samples. It is likely used for
- * for bit shifting sample by given bits, increasing actual sampling resolution.
+ * bit shifting sample by given bits, increasing actual sampling resolution.
  * Number 2 (0b10) was never seen.
  *
  * 6 * 16 * 2 * 4 = 768 samples. 768 * 4 = 3072 bytes
@@ -427,7 +411,7 @@ static void msi2500_isoc_handler(struct urb *urb)
 		if (unlikely(fbuf == NULL)) {
 			dev->vb_full++;
 			dev_dbg_ratelimited(dev->dev,
-					    "videobuf is full, %d packets dropped\n",
+					    "video buffer is full, %d packets dropped\n",
 					    dev->vb_full);
 			continue;
 		}
@@ -590,7 +574,7 @@ static void msi2500_disconnect(struct usb_interface *intf)
 	dev->udev = NULL;
 	v4l2_device_disconnect(&dev->v4l2_dev);
 	video_unregister_device(&dev->vdev);
-	spi_unregister_master(dev->master);
+	spi_unregister_controller(dev->ctlr);
 	mutex_unlock(&dev->v4l2_lock);
 	mutex_unlock(&dev->vb_queue_lock);
 
@@ -604,12 +588,9 @@ static int msi2500_querycap(struct file *file, void *fh,
 
 	dev_dbg(dev->dev, "\n");
 
-	strlcpy(cap->driver, KBUILD_MODNAME, sizeof(cap->driver));
-	strlcpy(cap->card, dev->vdev.name, sizeof(cap->card));
+	strscpy(cap->driver, KBUILD_MODNAME, sizeof(cap->driver));
+	strscpy(cap->card, dev->vdev.name, sizeof(cap->card));
 	usb_make_path(dev->udev, cap->bus_info, sizeof(cap->bus_info));
-	cap->device_caps = V4L2_CAP_SDR_CAPTURE | V4L2_CAP_STREAMING |
-			V4L2_CAP_READWRITE | V4L2_CAP_TUNER;
-	cap->capabilities = cap->device_caps | V4L2_CAP_DEVICE_CAPS;
 	return 0;
 }
 
@@ -886,7 +867,7 @@ static void msi2500_stop_streaming(struct vb2_queue *vq)
 
 	/* according to tests, at least 700us delay is required  */
 	msleep(20);
-	if (!msi2500_ctrl_msg(dev, CMD_STOP_STREAMING, 0)) {
+	if (dev->udev && !msi2500_ctrl_msg(dev, CMD_STOP_STREAMING, 0)) {
 		/* sleep USB IF / ADC */
 		msi2500_ctrl_msg(dev, CMD_WREG, 0x01000003);
 	}
@@ -902,8 +883,6 @@ static const struct vb2_ops msi2500_vb2_ops = {
 	.buf_queue              = msi2500_buf_queue,
 	.start_streaming        = msi2500_start_streaming,
 	.stop_streaming         = msi2500_stop_streaming,
-	.wait_prepare           = vb2_ops_wait_prepare,
-	.wait_finish            = vb2_ops_wait_finish,
 };
 
 static int msi2500_enum_fmt_sdr_cap(struct file *file, void *priv,
@@ -916,7 +895,6 @@ static int msi2500_enum_fmt_sdr_cap(struct file *file, void *priv,
 	if (f->index >= dev->num_formats)
 		return -EINVAL;
 
-	strlcpy(f->description, formats[f->index].name, sizeof(f->description));
 	f->pixelformat = formats[f->index].pixelformat;
 
 	return 0;
@@ -932,7 +910,6 @@ static int msi2500_g_fmt_sdr_cap(struct file *file, void *priv,
 
 	f->fmt.sdr.pixelformat = dev->pixelformat;
 	f->fmt.sdr.buffersize = dev->buffersize;
-	memset(f->fmt.sdr.reserved, 0, sizeof(f->fmt.sdr.reserved));
 
 	return 0;
 }
@@ -950,7 +927,6 @@ static int msi2500_s_fmt_sdr_cap(struct file *file, void *priv,
 	if (vb2_is_busy(q))
 		return -EBUSY;
 
-	memset(f->fmt.sdr.reserved, 0, sizeof(f->fmt.sdr.reserved));
 	for (i = 0; i < dev->num_formats; i++) {
 		if (formats[i].pixelformat == f->fmt.sdr.pixelformat) {
 			dev->pixelformat = formats[i].pixelformat;
@@ -977,7 +953,6 @@ static int msi2500_try_fmt_sdr_cap(struct file *file, void *priv,
 	dev_dbg(dev->dev, "pixelformat fourcc %4.4s\n",
 		(char *)&f->fmt.sdr.pixelformat);
 
-	memset(f->fmt.sdr.reserved, 0, sizeof(f->fmt.sdr.reserved));
 	for (i = 0; i < dev->num_formats; i++) {
 		if (formats[i].pixelformat == f->fmt.sdr.pixelformat) {
 			f->fmt.sdr.buffersize = formats[i].buffersize;
@@ -1017,7 +992,7 @@ static int msi2500_g_tuner(struct file *file, void *priv, struct v4l2_tuner *v)
 	dev_dbg(dev->dev, "index=%d\n", v->index);
 
 	if (v->index == 0) {
-		strlcpy(v->name, "Mirics MSi2500", sizeof(v->name));
+		strscpy(v->name, "Mirics MSi2500", sizeof(v->name));
 		v->type = V4L2_TUNER_ADC;
 		v->capability = V4L2_TUNER_CAP_1HZ | V4L2_TUNER_CAP_FREQ_BANDS;
 		v->rangelow =   1200000;
@@ -1159,10 +1134,10 @@ static void msi2500_video_release(struct v4l2_device *v)
 	kfree(dev);
 }
 
-static int msi2500_transfer_one_message(struct spi_master *master,
+static int msi2500_transfer_one_message(struct spi_controller *ctlr,
 					struct spi_message *m)
 {
-	struct msi2500_dev *dev = spi_master_get_devdata(master);
+	struct msi2500_dev *dev = spi_controller_get_devdata(ctlr);
 	struct spi_transfer *t;
 	int ret = 0;
 	u32 data;
@@ -1177,7 +1152,7 @@ static int msi2500_transfer_one_message(struct spi_master *master,
 	}
 
 	m->status = ret;
-	spi_finalize_current_message(master);
+	spi_finalize_current_message(ctlr);
 	return ret;
 }
 
@@ -1186,7 +1161,7 @@ static int msi2500_probe(struct usb_interface *intf,
 {
 	struct msi2500_dev *dev;
 	struct v4l2_subdev *sd;
-	struct spi_master *master;
+	struct spi_controller *ctlr;
 	int ret;
 	static struct spi_board_info board_info = {
 		.modalias		= "msi001",
@@ -1222,6 +1197,7 @@ static int msi2500_probe(struct usb_interface *intf,
 	dev->vb_queue.ops = &msi2500_vb2_ops;
 	dev->vb_queue.mem_ops = &vb2_vmalloc_memops;
 	dev->vb_queue.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+	dev->vb_queue.lock = &dev->vb_queue_lock;
 	ret = vb2_queue_init(&dev->vb_queue);
 	if (ret) {
 		dev_err(dev->dev, "Could not initialize vb2 queue\n");
@@ -1231,7 +1207,6 @@ static int msi2500_probe(struct usb_interface *intf,
 	/* Init video_device structure */
 	dev->vdev = msi2500_template;
 	dev->vdev.queue = &dev->vb_queue;
-	dev->vdev.queue->lock = &dev->vb_queue_lock;
 	video_set_drvdata(&dev->vdev, dev);
 
 	/* Register the v4l2_device structure */
@@ -1242,31 +1217,31 @@ static int msi2500_probe(struct usb_interface *intf,
 		goto err_free_mem;
 	}
 
-	/* SPI master adapter */
-	master = spi_alloc_master(dev->dev, 0);
-	if (master == NULL) {
+	/* SPI host adapter */
+	ctlr = spi_alloc_host(dev->dev, 0);
+	if (ctlr == NULL) {
 		ret = -ENOMEM;
 		goto err_unregister_v4l2_dev;
 	}
 
-	dev->master = master;
-	master->bus_num = -1;
-	master->num_chipselect = 1;
-	master->transfer_one_message = msi2500_transfer_one_message;
-	spi_master_set_devdata(master, dev);
-	ret = spi_register_master(master);
+	dev->ctlr = ctlr;
+	ctlr->bus_num = -1;
+	ctlr->num_chipselect = 1;
+	ctlr->transfer_one_message = msi2500_transfer_one_message;
+	spi_controller_set_devdata(ctlr, dev);
+	ret = spi_register_controller(ctlr);
 	if (ret) {
-		spi_master_put(master);
+		spi_controller_put(ctlr);
 		goto err_unregister_v4l2_dev;
 	}
 
 	/* load v4l2 subdevice */
-	sd = v4l2_spi_new_subdev(&dev->v4l2_dev, master, &board_info);
+	sd = v4l2_spi_new_subdev(&dev->v4l2_dev, ctlr, &board_info);
 	dev->v4l2_subdev = sd;
 	if (sd == NULL) {
 		dev_err(dev->dev, "cannot get v4l2 subdevice\n");
 		ret = -ENODEV;
-		goto err_unregister_master;
+		goto err_unregister_controller;
 	}
 
 	/* Register controls */
@@ -1278,11 +1253,13 @@ static int msi2500_probe(struct usb_interface *intf,
 	}
 
 	/* currently all controls are from subdev */
-	v4l2_ctrl_add_handler(&dev->hdl, sd->ctrl_handler, NULL);
+	v4l2_ctrl_add_handler(&dev->hdl, sd->ctrl_handler, NULL, true);
 
 	dev->v4l2_dev.ctrl_handler = &dev->hdl;
 	dev->vdev.v4l2_dev = &dev->v4l2_dev;
 	dev->vdev.lock = &dev->v4l2_lock;
+	dev->vdev.device_caps = V4L2_CAP_SDR_CAPTURE | V4L2_CAP_STREAMING |
+				V4L2_CAP_READWRITE | V4L2_CAP_TUNER;
 
 	ret = video_register_device(&dev->vdev, VFL_TYPE_SDR, -1);
 	if (ret) {
@@ -1297,8 +1274,8 @@ static int msi2500_probe(struct usb_interface *intf,
 	return 0;
 err_free_controls:
 	v4l2_ctrl_handler_free(&dev->hdl);
-err_unregister_master:
-	spi_unregister_master(dev->master);
+err_unregister_controller:
+	spi_unregister_controller(dev->ctlr);
 err_unregister_v4l2_dev:
 	v4l2_device_unregister(&dev->v4l2_dev);
 err_free_mem:

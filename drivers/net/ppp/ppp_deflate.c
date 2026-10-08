@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * ppp_deflate.c - interface the zlib procedures for Deflate compression
  * and decompression (as used by gzip) to the PPP code.
  *
  * Copyright 1994-1998 Paul Mackerras.
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  version 2 as published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -19,7 +16,7 @@
 #include <linux/ppp-comp.h>
 
 #include <linux/zlib.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 /*
  * State for a Deflate (de)compressor.
@@ -282,7 +279,6 @@ static void z_decomp_free(void *arg)
 	struct ppp_deflate_state *state = (struct ppp_deflate_state *) arg;
 
 	if (state) {
-		zlib_inflateEnd(&state->strm);
 		vfree(state->strm.workspace);
 		kfree(state);
 	}
@@ -634,6 +630,7 @@ static void __exit deflate_cleanup(void)
 
 module_init(deflate_init);
 module_exit(deflate_cleanup);
+MODULE_DESCRIPTION("PPP Deflate compression module");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_ALIAS("ppp-compress-" __stringify(CI_DEFLATE));
 MODULE_ALIAS("ppp-compress-" __stringify(CI_DEFLATE_DRAFT));

@@ -6,59 +6,113 @@
 #ifndef	__XFS_LOG_H__
 #define __XFS_LOG_H__
 
+struct xfs_cil_ctx;
+
 struct xfs_log_vec {
-	struct xfs_log_vec	*lv_next;	/* next lv in build list */
+	struct list_head	lv_list;	/* CIL lv chain ptrs */
+	uint32_t		lv_order_id;	/* chain ordering info */
 	int			lv_niovecs;	/* number of iovecs in lv */
 	struct xfs_log_iovec	*lv_iovecp;	/* iovec array */
 	struct xfs_log_item	*lv_item;	/* owner */
 	char			*lv_buf;	/* formatted buffer */
 	int			lv_bytes;	/* accounted space in buffer */
-	int			lv_buf_len;	/* aligned size of buffer */
-	int			lv_size;	/* size of allocated lv */
+	int			lv_buf_used;	/* buffer space used so far */
+	int			lv_alloc_size;	/* size of allocated lv */
 };
+
+/* Region types for iovec's i_type */
+#define XLOG_REG_TYPE_BFORMAT		1
+#define XLOG_REG_TYPE_BCHUNK		2
+#define XLOG_REG_TYPE_EFI_FORMAT	3
+#define XLOG_REG_TYPE_EFD_FORMAT	4
+#define XLOG_REG_TYPE_IFORMAT		5
+#define XLOG_REG_TYPE_ICORE		6
+#define XLOG_REG_TYPE_IEXT		7
+#define XLOG_REG_TYPE_IBROOT		8
+#define XLOG_REG_TYPE_ILOCAL		9
+#define XLOG_REG_TYPE_IATTR_EXT		10
+#define XLOG_REG_TYPE_IATTR_BROOT	11
+#define XLOG_REG_TYPE_IATTR_LOCAL	12
+#define XLOG_REG_TYPE_QFORMAT		13
+#define XLOG_REG_TYPE_DQUOT		14
+#define XLOG_REG_TYPE_QUOTAOFF		15
+#define XLOG_REG_TYPE_LRHEADER		16
+#define XLOG_REG_TYPE_UNMOUNT		17
+#define XLOG_REG_TYPE_COMMIT		18
+#define XLOG_REG_TYPE_TRANSHDR		19
+#define XLOG_REG_TYPE_ICREATE		20
+#define XLOG_REG_TYPE_RUI_FORMAT	21
+#define XLOG_REG_TYPE_RUD_FORMAT	22
+#define XLOG_REG_TYPE_CUI_FORMAT	23
+#define XLOG_REG_TYPE_CUD_FORMAT	24
+#define XLOG_REG_TYPE_BUI_FORMAT	25
+#define XLOG_REG_TYPE_BUD_FORMAT	26
+#define XLOG_REG_TYPE_ATTRI_FORMAT	27
+#define XLOG_REG_TYPE_ATTRD_FORMAT	28
+#define XLOG_REG_TYPE_ATTR_NAME		29
+#define XLOG_REG_TYPE_ATTR_VALUE	30
+#define XLOG_REG_TYPE_XMI_FORMAT	31
+#define XLOG_REG_TYPE_XMD_FORMAT	32
+#define XLOG_REG_TYPE_ATTR_NEWNAME	33
+#define XLOG_REG_TYPE_ATTR_NEWVALUE	34
+#define XLOG_REG_TYPE_MAX		34
 
 #define XFS_LOG_VEC_ORDERED	(-1)
 
-static inline void *
-xlog_prepare_iovec(struct xfs_log_vec *lv, struct xfs_log_iovec **vecp,
-		uint type)
+/*
+ * Calculate the log iovec length for a given user buffer length. Intended to be
+ * used by ->iop_size implementations when sizing buffers of arbitrary
+ * alignments.
+ */
+static inline int
+xlog_calc_iovec_len(int len)
 {
-	struct xfs_log_iovec *vec = *vecp;
+	return roundup(len, sizeof(uint32_t));
+}
 
-	if (vec) {
-		ASSERT(vec - lv->lv_iovecp < lv->lv_niovecs);
-		vec++;
-	} else {
-		vec = &lv->lv_iovecp[0];
+void *xlog_prepare_iovec(struct xfs_log_vec *lv, struct xfs_log_iovec **vecp,
+		uint type);
+
+static inline void
+xlog_finish_iovec(struct xfs_log_vec *lv, struct xfs_log_iovec *vec,
+		int data_len)
+{
+	struct xlog_op_header	*oph = vec->i_addr;
+	int			len;
+
+	/*
+	 * Always round up the length to the correct alignment so callers don't
+	 * need to know anything about this log vec layout requirement. This
+	 * means we have to zero the area the data to be written does not cover.
+	 * This is complicated by fact the payload region is offset into the
+	 * logvec region by the opheader that tracks the payload.
+	 */
+	len = xlog_calc_iovec_len(data_len);
+	if (len - data_len != 0) {
+		char	*buf = vec->i_addr + sizeof(struct xlog_op_header);
+
+		memset(buf + data_len, 0, len - data_len);
 	}
 
-	vec->i_type = type;
-	vec->i_addr = lv->lv_buf + lv->lv_buf_len;
+	/*
+	 * The opheader tracks aligned payload length, whilst the logvec tracks
+	 * the overall region length.
+	 */
+	oph->oh_len = cpu_to_be32(len);
 
-	ASSERT(IS_ALIGNED((unsigned long)vec->i_addr, sizeof(uint64_t)));
+	len += sizeof(struct xlog_op_header);
+	lv->lv_buf_used += len;
+	lv->lv_bytes += len;
+	vec->i_len = len;
 
-	*vecp = vec;
-	return vec->i_addr;
+	/* Catch buffer overruns */
+	ASSERT((void *)lv->lv_buf + lv->lv_bytes <=
+		(void *)lv + lv->lv_alloc_size);
 }
 
 /*
- * We need to make sure the next buffer is naturally aligned for the biggest
- * basic data type we put into it.  We already accounted for this padding when
- * sizing the buffer.
- *
- * However, this padding does not get written into the log, and hence we have to
- * track the space used by the log vectors separately to prevent log space hangs
- * due to inaccurate accounting (i.e. a leak) of the used log space through the
- * CIL context ticket.
+ * Copy the amount of data requested by the caller into a new log iovec.
  */
-static inline void
-xlog_finish_iovec(struct xfs_log_vec *lv, struct xfs_log_iovec *vec, int len)
-{
-	lv->lv_buf_len += round_up(len, sizeof(uint64_t));
-	lv->lv_bytes += len;
-	vec->i_len = len;
-}
-
 static inline void *
 xlog_copy_iovec(struct xfs_log_vec *lv, struct xfs_log_iovec **vecp,
 		uint type, void *data, int len)
@@ -70,16 +124,6 @@ xlog_copy_iovec(struct xfs_log_vec *lv, struct xfs_log_iovec **vecp,
 	xlog_finish_iovec(lv, *vecp, len);
 	return buf;
 }
-
-/*
- * Structure used to pass callback function and the function's argument
- * to the log manager.
- */
-typedef struct xfs_log_callback {
-	struct xfs_log_callback	*cb_next;
-	void			(*cb_func)(void *, int);
-	void			*cb_arg;
-} xfs_log_callback_t;
 
 /*
  * By comparing each component, we don't have to worry about extra
@@ -112,47 +156,37 @@ struct xlog_ticket;
 struct xfs_log_item;
 struct xfs_item_ops;
 struct xfs_trans;
+struct xlog;
 
-xfs_lsn_t xfs_log_done(struct xfs_mount *mp,
-		       struct xlog_ticket *ticket,
-		       struct xlog_in_core **iclog,
-		       bool regrant);
 int	  xfs_log_force(struct xfs_mount *mp, uint flags);
-int	  xfs_log_force_lsn(struct xfs_mount *mp, xfs_lsn_t lsn, uint flags,
+int	  xfs_log_force_seq(struct xfs_mount *mp, xfs_csn_t seq, uint flags,
 		int *log_forced);
 int	  xfs_log_mount(struct xfs_mount	*mp,
 			struct xfs_buftarg	*log_target,
 			xfs_daddr_t		start_block,
 			int		 	num_bblocks);
 int	  xfs_log_mount_finish(struct xfs_mount *mp);
-int	xfs_log_mount_cancel(struct xfs_mount *);
+void	xfs_log_mount_cancel(struct xfs_mount *);
 xfs_lsn_t xlog_assign_tail_lsn(struct xfs_mount *mp);
 xfs_lsn_t xlog_assign_tail_lsn_locked(struct xfs_mount *mp);
-void	  xfs_log_space_wake(struct xfs_mount *mp);
-int	  xfs_log_notify(struct xlog_in_core	*iclog,
-			 struct xfs_log_callback *callback_entry);
-int	  xfs_log_release_iclog(struct xfs_mount *mp,
-			 struct xlog_in_core	 *iclog);
-int	  xfs_log_reserve(struct xfs_mount *mp,
-			  int		   length,
-			  int		   count,
-			  struct xlog_ticket **ticket,
-			  uint8_t		   clientid,
-			  bool		   permanent);
-int	  xfs_log_regrant(struct xfs_mount *mp, struct xlog_ticket *tic);
-void      xfs_log_unmount(struct xfs_mount *mp);
-int	  xfs_log_force_umount(struct xfs_mount *mp, int logerror);
+void	xfs_log_space_wake(struct xfs_mount *mp);
+int	xfs_log_reserve(struct xfs_mount *mp, int length, int count,
+			struct xlog_ticket **ticket, bool permanent);
+int	xfs_log_regrant(struct xfs_mount *mp, struct xlog_ticket *tic);
+void	xfs_log_unmount(struct xfs_mount *mp);
+bool	xfs_log_writable(struct xfs_mount *mp);
 
 struct xlog_ticket *xfs_log_ticket_get(struct xlog_ticket *ticket);
 void	  xfs_log_ticket_put(struct xlog_ticket *ticket);
 
-void	xfs_log_commit_cil(struct xfs_mount *mp, struct xfs_trans *tp,
-				xfs_lsn_t *commit_lsn, bool regrant);
+void	xlog_cil_process_committed(struct list_head *list);
 bool	xfs_log_item_in_current_chkpt(struct xfs_log_item *lip);
 
 void	xfs_log_work_queue(struct xfs_mount *mp);
-void	xfs_log_quiesce(struct xfs_mount *mp);
+int	xfs_log_quiesce(struct xfs_mount *mp);
+void	xfs_log_clean(struct xfs_mount *mp);
 bool	xfs_log_check_lsn(struct xfs_mount *, xfs_lsn_t);
-bool	xfs_log_in_recovery(struct xfs_mount *);
+
+bool	  xlog_force_shutdown(struct xlog *log, uint32_t shutdown_flags);
 
 #endif	/* __XFS_LOG_H__ */

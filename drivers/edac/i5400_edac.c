@@ -8,7 +8,7 @@
  *	 Ben Woodard <woodard@redhat.com>
  *	 Mauro Carvalho Chehab
  *
- * Red Hat Inc. http://www.redhat.com
+ * Red Hat Inc. https://www.redhat.com
  *
  * Forked and adapted from the i5000_edac driver which was
  * written by Douglas Thompson Linux Networx <norsk5@xmission.com>
@@ -31,6 +31,7 @@
 #include <linux/slab.h>
 #include <linux/edac.h>
 #include <linux/mmzone.h>
+#include <linux/string_choices.h>
 
 #include "edac_module.h"
 
@@ -279,7 +280,8 @@ static inline int from_nf_ferr(unsigned int mask)
 #define FERR_NF_RECOVERABLE	to_nf_mask(ERROR_NF_RECOVERABLE)
 #define FERR_NF_UNCORRECTABLE	to_nf_mask(ERROR_NF_UNCORRECTABLE)
 
-/* Defines to extract the vaious fields from the
+/*
+ * Defines to extract the various fields from the
  *	MTRx - Memory Technology Registers
  */
 #define MTR_DIMMS_PRESENT(mtr)		((mtr) & (1 << 10))
@@ -548,8 +550,8 @@ static void i5400_proccess_non_recoverable_info(struct mem_ctl_info *mci,
 	ras = nrec_ras(info);
 	cas = nrec_cas(info);
 
-	edac_dbg(0, "\t\tDIMM= %d  Channels= %d,%d  (Branch= %d DRAM Bank= %d Buffer ID = %d rdwr= %s ras= %d cas= %d)\n",
-		 rank, channel, channel + 1, branch >> 1, bank,
+	edac_dbg(0, "\t\t%s DIMM= %d  Channels= %d,%d  (Branch= %d DRAM Bank= %d Buffer ID = %d rdwr= %s ras= %d cas= %d)\n",
+		 type, rank, channel, channel + 1, branch >> 1, bank,
 		 buf_id, rdwr_str(rdwr), ras, cas);
 
 	/* Only 1 bit will be on */
@@ -686,7 +688,7 @@ static void i5400_clear_error(struct mem_ctl_info *mci)
 static void i5400_check_error(struct mem_ctl_info *mci)
 {
 	struct i5400_error_info info;
-	edac_dbg(4, "MC%d\n", mci->mc_idx);
+
 	i5400_get_error_info(mci, &info);
 	i5400_process_error_info(mci, &info);
 }
@@ -898,7 +900,7 @@ static void decode_mtr(int slot_row, u16 mtr)
 	edac_dbg(2, "\t\tWIDTH: x%d\n", MTR_DRAM_WIDTH(mtr));
 
 	edac_dbg(2, "\t\tELECTRICAL THROTTLING is %s\n",
-		 MTR_DIMMS_ETHROTTLE(mtr) ? "enabled" : "disabled");
+		 str_enabled_disabled(MTR_DIMMS_ETHROTTLE(mtr)));
 
 	edac_dbg(2, "\t\tNUMBANK: %d bank(s)\n", MTR_DRAM_BANKS(mtr));
 	edac_dbg(2, "\t\tNUMRANK: %s\n",
@@ -1024,13 +1026,13 @@ static void calculate_dimm_size(struct i5400_pvt *pvt)
 		space -= n;
 	}
 
-	space -= n;
 	edac_dbg(2, "%s\n", mem_buffer);
 	p = mem_buffer;
 	space = PAGE_SIZE;
 
 	n = snprintf(p, space, "           ");
 	p += n;
+	space -= n;
 	for (branch = 0; branch < MAX_BRANCHES; branch++) {
 		n = snprintf(p, space, "       branch %d       | ", branch);
 		p += n;
@@ -1054,8 +1056,6 @@ static void i5400_get_mc_regs(struct mem_ctl_info *mci)
 	u32 actual_tolm;
 	u16 limit;
 	int slot_row;
-	int maxch;
-	int maxdimmperch;
 	int way0, way1;
 
 	pvt = mci->pvt_info;
@@ -1064,9 +1064,6 @@ static void i5400_get_mc_regs(struct mem_ctl_info *mci)
 			&pvt->u.ambase_bottom);
 	pci_read_config_dword(pvt->system_address, AMBASE + sizeof(u32),
 			&pvt->u.ambase_top);
-
-	maxdimmperch = pvt->maxdimmperch;
-	maxch = pvt->maxch;
 
 	edac_dbg(2, "AMBASE= 0x%lx  MAXCH= %d  MAX-DIMM-Per-CH= %d\n",
 		 (long unsigned int)pvt->ambase, pvt->maxch, pvt->maxdimmperch);
@@ -1170,16 +1167,12 @@ static int i5400_init_dimms(struct mem_ctl_info *mci)
 {
 	struct i5400_pvt *pvt;
 	struct dimm_info *dimm;
-	int ndimms, channel_count;
-	int max_dimms;
+	int ndimms;
 	int mtr;
 	int size_mb;
 	int  channel, slot;
 
 	pvt = mci->pvt_info;
-
-	channel_count = pvt->maxch;
-	max_dimms = pvt->maxdimmperch;
 
 	ndimms = 0;
 
@@ -1196,8 +1189,7 @@ static int i5400_init_dimms(struct mem_ctl_info *mci)
 			if (!MTR_DIMMS_PRESENT(mtr))
 				continue;
 
-			dimm = EDAC_DIMM_PTR(mci->layers, mci->dimms, mci->n_layers,
-				       channel / 2, channel % 2, slot);
+			dimm = edac_get_dimm(mci, channel / 2, channel % 2, slot);
 
 			size_mb =  pvt->dimm_info[slot][channel].megabytes;
 
@@ -1470,7 +1462,7 @@ module_exit(i5400_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Ben Woodard <woodard@redhat.com>");
 MODULE_AUTHOR("Mauro Carvalho Chehab");
-MODULE_AUTHOR("Red Hat Inc. (http://www.redhat.com)");
+MODULE_AUTHOR("Red Hat Inc. (https://www.redhat.com)");
 MODULE_DESCRIPTION("MC Driver for Intel I5400 memory controllers - "
 		   I5400_REVISION);
 

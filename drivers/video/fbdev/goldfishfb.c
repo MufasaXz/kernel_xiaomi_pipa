@@ -1,16 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2007 Google, Inc.
  * Copyright (C) 2012 Intel, Inc.
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #include <linux/module.h>
@@ -169,16 +160,14 @@ static int goldfish_fb_blank(int blank, struct fb_info *info)
 	return 0;
 }
 
-static struct fb_ops goldfish_fb_ops = {
+static const struct fb_ops goldfish_fb_ops = {
 	.owner          = THIS_MODULE,
+	FB_DEFAULT_IOMEM_OPS,
 	.fb_check_var   = goldfish_fb_check_var,
 	.fb_set_par     = goldfish_fb_set_par,
 	.fb_setcolreg   = goldfish_fb_setcolreg,
 	.fb_pan_display = goldfish_fb_pan_display,
 	.fb_blank	= goldfish_fb_blank,
-	.fb_fillrect    = cfb_fillrect,
-	.fb_copyarea    = cfb_copyarea,
-	.fb_imageblit   = cfb_imageblit,
 };
 
 
@@ -212,8 +201,8 @@ static int goldfish_fb_probe(struct platform_device *pdev)
 	}
 
 	fb->irq = platform_get_irq(pdev, 0);
-	if (fb->irq <= 0) {
-		ret = -ENODEV;
+	if (fb->irq < 0) {
+		ret = fb->irq;
 		goto err_no_irq;
 	}
 
@@ -221,7 +210,6 @@ static int goldfish_fb_probe(struct platform_device *pdev)
 	height = readl(fb->reg_base + FB_GET_HEIGHT);
 
 	fb->fb.fbops		= &goldfish_fb_ops;
-	fb->fb.flags		= FBINFO_FLAG_DEFAULT;
 	fb->fb.pseudo_palette	= fb->cmap;
 	fb->fb.fix.type		= FB_TYPE_PACKED_PIXELS;
 	fb->fb.fix.visual = FB_VISUAL_TRUECOLOR;
@@ -292,7 +280,7 @@ err_fb_alloc_failed:
 	return ret;
 }
 
-static int goldfish_fb_remove(struct platform_device *pdev)
+static void goldfish_fb_remove(struct platform_device *pdev)
 {
 	size_t framesize;
 	struct goldfish_fb *fb = platform_get_drvdata(pdev);
@@ -305,7 +293,6 @@ static int goldfish_fb_remove(struct platform_device *pdev)
 						fb->fb.fix.smem_start);
 	iounmap(fb->reg_base);
 	kfree(fb);
-	return 0;
 }
 
 static const struct of_device_id goldfish_fb_of_match[] = {
@@ -314,11 +301,13 @@ static const struct of_device_id goldfish_fb_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, goldfish_fb_of_match);
 
+#ifdef CONFIG_ACPI
 static const struct acpi_device_id goldfish_fb_acpi_match[] = {
 	{ "GFSH0004", 0 },
 	{ },
 };
 MODULE_DEVICE_TABLE(acpi, goldfish_fb_acpi_match);
+#endif
 
 static struct platform_driver goldfish_fb_driver = {
 	.probe		= goldfish_fb_probe,
@@ -332,4 +321,5 @@ static struct platform_driver goldfish_fb_driver = {
 
 module_platform_driver(goldfish_fb_driver);
 
+MODULE_DESCRIPTION("Goldfish Virtual Platform Framebuffer driver");
 MODULE_LICENSE("GPL v2");

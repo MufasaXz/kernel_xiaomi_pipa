@@ -1,17 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * The AEGIS-128 Authenticated-Encryption Algorithm
- *   Glue for AES-NI + SSE2 implementation
+ *   Glue for AES-NI + SSE4.1 implementation
  *
  * Copyright (c) 2017-2018 Ondrej Mosnacek <omosnacek@gmail.com>
  * Copyright (C) 2017-2018 Red Hat, Inc. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
  */
 
-#include <crypto/cryptd.h>
 #include <crypto/internal/aead.h>
 #include <crypto/internal/skcipher.h>
 #include <crypto/scatterwalk.h>
@@ -27,27 +22,6 @@
 #define AEGIS128_MIN_AUTH_SIZE 8
 #define AEGIS128_MAX_AUTH_SIZE 16
 
-asmlinkage void crypto_aegis128_aesni_init(void *state, void *key, void *iv);
-
-asmlinkage void crypto_aegis128_aesni_ad(
-		void *state, unsigned int length, const void *data);
-
-asmlinkage void crypto_aegis128_aesni_enc(
-		void *state, unsigned int length, const void *src, void *dst);
-
-asmlinkage void crypto_aegis128_aesni_dec(
-		void *state, unsigned int length, const void *src, void *dst);
-
-asmlinkage void crypto_aegis128_aesni_enc_tail(
-		void *state, unsigned int length, const void *src, void *dst);
-
-asmlinkage void crypto_aegis128_aesni_dec_tail(
-		void *state, unsigned int length, const void *src, void *dst);
-
-asmlinkage void crypto_aegis128_aesni_final(
-		void *state, void *tag_xor, unsigned int cryptlen,
-		unsigned int assoclen);
-
 struct aegis_block {
 	u8 bytes[AEGIS128_BLOCK_SIZE] __aligned(AEGIS128_BLOCK_ALIGN);
 };
@@ -60,15 +34,31 @@ struct aegis_ctx {
 	struct aegis_block key;
 };
 
-struct aegis_crypt_ops {
-	int (*skcipher_walk_init)(struct skcipher_walk *walk,
-				  struct aead_request *req, bool atomic);
+asmlinkage void aegis128_aesni_init(struct aegis_state *state,
+				    const struct aegis_block *key,
+				    const u8 iv[AEGIS128_NONCE_SIZE]);
 
-	void (*crypt_blocks)(void *state, unsigned int length, const void *src,
-			     void *dst);
-	void (*crypt_tail)(void *state, unsigned int length, const void *src,
-			   void *dst);
-};
+asmlinkage void aegis128_aesni_ad(struct aegis_state *state, const u8 *data,
+				  unsigned int len);
+
+asmlinkage void aegis128_aesni_enc(struct aegis_state *state, const u8 *src,
+				   u8 *dst, unsigned int len);
+
+asmlinkage void aegis128_aesni_dec(struct aegis_state *state, const u8 *src,
+				   u8 *dst, unsigned int len);
+
+asmlinkage void aegis128_aesni_enc_tail(struct aegis_state *state,
+					const u8 *src, u8 *dst,
+					unsigned int len);
+
+asmlinkage void aegis128_aesni_dec_tail(struct aegis_state *state,
+					const u8 *src, u8 *dst,
+					unsigned int len);
+
+asmlinkage void aegis128_aesni_final(struct aegis_state *state,
+				     struct aegis_block *tag_xor,
+				     unsigned int assoclen,
+				     unsigned int cryptlen);
 
 static void crypto_aegis128_aesni_process_ad(
 		struct aegis_state *state, struct scatterlist *sg_src,
@@ -80,25 +70,23 @@ static void crypto_aegis128_aesni_process_ad(
 
 	scatterwalk_start(&walk, sg_src);
 	while (assoclen != 0) {
-		unsigned int size = scatterwalk_clamp(&walk, assoclen);
+		unsigned int size = scatterwalk_next(&walk, assoclen);
+		const u8 *src = walk.addr;
 		unsigned int left = size;
-		void *mapped = scatterwalk_map(&walk);
-		const u8 *src = (const u8 *)mapped;
 
 		if (pos + size >= AEGIS128_BLOCK_SIZE) {
 			if (pos > 0) {
 				unsigned int fill = AEGIS128_BLOCK_SIZE - pos;
 				memcpy(buf.bytes + pos, src, fill);
-				crypto_aegis128_aesni_ad(state,
-							 AEGIS128_BLOCK_SIZE,
-							 buf.bytes);
+				aegis128_aesni_ad(state, buf.bytes,
+						  AEGIS128_BLOCK_SIZE);
 				pos = 0;
 				left -= fill;
 				src += fill;
 			}
 
-			crypto_aegis128_aesni_ad(state, left, src);
-
+			aegis128_aesni_ad(state, src,
+					  left & ~(AEGIS128_BLOCK_SIZE - 1));
 			src += left & ~(AEGIS128_BLOCK_SIZE - 1);
 			left &= AEGIS128_BLOCK_SIZE - 1;
 		}
@@ -107,33 +95,52 @@ static void crypto_aegis128_aesni_process_ad(
 		pos += left;
 		assoclen -= size;
 
-		scatterwalk_unmap(mapped);
-		scatterwalk_advance(&walk, size);
-		scatterwalk_done(&walk, 0, assoclen);
+		scatterwalk_done_src(&walk, size);
 	}
 
 	if (pos > 0) {
 		memset(buf.bytes + pos, 0, AEGIS128_BLOCK_SIZE - pos);
-		crypto_aegis128_aesni_ad(state, AEGIS128_BLOCK_SIZE, buf.bytes);
+		aegis128_aesni_ad(state, buf.bytes, AEGIS128_BLOCK_SIZE);
 	}
 }
 
-static void crypto_aegis128_aesni_process_crypt(
-		struct aegis_state *state, struct skcipher_walk *walk,
-		const struct aegis_crypt_ops *ops)
+static __always_inline int
+crypto_aegis128_aesni_process_crypt(struct aegis_state *state,
+				    struct skcipher_walk *walk, bool enc)
 {
+	int err = 0;
+
 	while (walk->nbytes >= AEGIS128_BLOCK_SIZE) {
-		ops->crypt_blocks(state,
-				  round_down(walk->nbytes, AEGIS128_BLOCK_SIZE),
-				  walk->src.virt.addr, walk->dst.virt.addr);
-		skcipher_walk_done(walk, walk->nbytes % AEGIS128_BLOCK_SIZE);
+		if (enc)
+			aegis128_aesni_enc(state, walk->src.virt.addr,
+					   walk->dst.virt.addr,
+					   round_down(walk->nbytes,
+						      AEGIS128_BLOCK_SIZE));
+		else
+			aegis128_aesni_dec(state, walk->src.virt.addr,
+					   walk->dst.virt.addr,
+					   round_down(walk->nbytes,
+						      AEGIS128_BLOCK_SIZE));
+		kernel_fpu_end();
+		err = skcipher_walk_done(walk,
+					 walk->nbytes % AEGIS128_BLOCK_SIZE);
+		kernel_fpu_begin();
 	}
 
 	if (walk->nbytes) {
-		ops->crypt_tail(state, walk->nbytes, walk->src.virt.addr,
-				walk->dst.virt.addr);
-		skcipher_walk_done(walk, 0);
+		if (enc)
+			aegis128_aesni_enc_tail(state, walk->src.virt.addr,
+						walk->dst.virt.addr,
+						walk->nbytes);
+		else
+			aegis128_aesni_dec_tail(state, walk->src.virt.addr,
+						walk->dst.virt.addr,
+						walk->nbytes);
+		kernel_fpu_end();
+		err = skcipher_walk_done(walk, 0);
+		kernel_fpu_begin();
 	}
+	return err;
 }
 
 static struct aegis_ctx *crypto_aegis128_aesni_ctx(struct crypto_aead *aead)
@@ -148,10 +155,8 @@ static int crypto_aegis128_aesni_setkey(struct crypto_aead *aead, const u8 *key,
 {
 	struct aegis_ctx *ctx = crypto_aegis128_aesni_ctx(aead);
 
-	if (keylen != AEGIS128_KEY_SIZE) {
-		crypto_aead_set_flags(aead, CRYPTO_TFM_RES_BAD_KEY_LEN);
+	if (keylen != AEGIS128_KEY_SIZE)
 		return -EINVAL;
-	}
 
 	memcpy(ctx->key.bytes, key, AEGIS128_KEY_SIZE);
 
@@ -168,42 +173,46 @@ static int crypto_aegis128_aesni_setauthsize(struct crypto_aead *tfm,
 	return 0;
 }
 
-static void crypto_aegis128_aesni_crypt(struct aead_request *req,
-					struct aegis_block *tag_xor,
-					unsigned int cryptlen,
-					const struct aegis_crypt_ops *ops)
+static __always_inline int
+crypto_aegis128_aesni_crypt(struct aead_request *req,
+			    struct aegis_block *tag_xor,
+			    unsigned int cryptlen, bool enc)
 {
 	struct crypto_aead *tfm = crypto_aead_reqtfm(req);
 	struct aegis_ctx *ctx = crypto_aegis128_aesni_ctx(tfm);
 	struct skcipher_walk walk;
 	struct aegis_state state;
+	int err;
 
-	ops->skcipher_walk_init(&walk, req, true);
+	if (enc)
+		err = skcipher_walk_aead_encrypt(&walk, req, false);
+	else
+		err = skcipher_walk_aead_decrypt(&walk, req, false);
+	if (err)
+		return err;
 
 	kernel_fpu_begin();
 
-	crypto_aegis128_aesni_init(&state, ctx->key.bytes, req->iv);
+	aegis128_aesni_init(&state, &ctx->key, req->iv);
 	crypto_aegis128_aesni_process_ad(&state, req->src, req->assoclen);
-	crypto_aegis128_aesni_process_crypt(&state, &walk, ops);
-	crypto_aegis128_aesni_final(&state, tag_xor, req->assoclen, cryptlen);
-
+	err = crypto_aegis128_aesni_process_crypt(&state, &walk, enc);
+	if (err == 0)
+		aegis128_aesni_final(&state, tag_xor, req->assoclen, cryptlen);
 	kernel_fpu_end();
+	return err;
 }
 
 static int crypto_aegis128_aesni_encrypt(struct aead_request *req)
 {
-	static const struct aegis_crypt_ops OPS = {
-		.skcipher_walk_init = skcipher_walk_aead_encrypt,
-		.crypt_blocks = crypto_aegis128_aesni_enc,
-		.crypt_tail = crypto_aegis128_aesni_enc_tail,
-	};
-
 	struct crypto_aead *tfm = crypto_aead_reqtfm(req);
 	struct aegis_block tag = {};
 	unsigned int authsize = crypto_aead_authsize(tfm);
 	unsigned int cryptlen = req->cryptlen;
+	int err;
 
-	crypto_aegis128_aesni_crypt(req, &tag, cryptlen, &OPS);
+	err = crypto_aegis128_aesni_crypt(req, &tag, cryptlen, true);
+	if (err)
+		return err;
 
 	scatterwalk_map_and_copy(tag.bytes, req->dst,
 				 req->assoclen + cryptlen, authsize, 1);
@@ -214,174 +223,58 @@ static int crypto_aegis128_aesni_decrypt(struct aead_request *req)
 {
 	static const struct aegis_block zeros = {};
 
-	static const struct aegis_crypt_ops OPS = {
-		.skcipher_walk_init = skcipher_walk_aead_decrypt,
-		.crypt_blocks = crypto_aegis128_aesni_dec,
-		.crypt_tail = crypto_aegis128_aesni_dec_tail,
-	};
-
 	struct crypto_aead *tfm = crypto_aead_reqtfm(req);
 	struct aegis_block tag;
 	unsigned int authsize = crypto_aead_authsize(tfm);
 	unsigned int cryptlen = req->cryptlen - authsize;
+	int err;
 
 	scatterwalk_map_and_copy(tag.bytes, req->src,
 				 req->assoclen + cryptlen, authsize, 0);
 
-	crypto_aegis128_aesni_crypt(req, &tag, cryptlen, &OPS);
+	err = crypto_aegis128_aesni_crypt(req, &tag, cryptlen, false);
+	if (err)
+		return err;
 
 	return crypto_memneq(tag.bytes, zeros.bytes, authsize) ? -EBADMSG : 0;
 }
 
-static int crypto_aegis128_aesni_init_tfm(struct crypto_aead *aead)
-{
-	return 0;
-}
+static struct aead_alg crypto_aegis128_aesni_alg = {
+	.setkey = crypto_aegis128_aesni_setkey,
+	.setauthsize = crypto_aegis128_aesni_setauthsize,
+	.encrypt = crypto_aegis128_aesni_encrypt,
+	.decrypt = crypto_aegis128_aesni_decrypt,
 
-static void crypto_aegis128_aesni_exit_tfm(struct crypto_aead *aead)
-{
-}
+	.ivsize = AEGIS128_NONCE_SIZE,
+	.maxauthsize = AEGIS128_MAX_AUTH_SIZE,
+	.chunksize = AEGIS128_BLOCK_SIZE,
 
-static int cryptd_aegis128_aesni_setkey(struct crypto_aead *aead,
-					const u8 *key, unsigned int keylen)
-{
-	struct cryptd_aead **ctx = crypto_aead_ctx(aead);
-	struct cryptd_aead *cryptd_tfm = *ctx;
+	.base = {
+		.cra_blocksize = 1,
+		.cra_ctxsize = sizeof(struct aegis_ctx) +
+			       __alignof__(struct aegis_ctx),
+		.cra_priority = 400,
 
-	return crypto_aead_setkey(&cryptd_tfm->base, key, keylen);
-}
+		.cra_name = "aegis128",
+		.cra_driver_name = "aegis128-aesni",
 
-static int cryptd_aegis128_aesni_setauthsize(struct crypto_aead *aead,
-					     unsigned int authsize)
-{
-	struct cryptd_aead **ctx = crypto_aead_ctx(aead);
-	struct cryptd_aead *cryptd_tfm = *ctx;
-
-	return crypto_aead_setauthsize(&cryptd_tfm->base, authsize);
-}
-
-static int cryptd_aegis128_aesni_encrypt(struct aead_request *req)
-{
-	struct crypto_aead *aead = crypto_aead_reqtfm(req);
-	struct cryptd_aead **ctx = crypto_aead_ctx(aead);
-	struct cryptd_aead *cryptd_tfm = *ctx;
-
-	aead = &cryptd_tfm->base;
-	if (irq_fpu_usable() && (!in_atomic() ||
-				 !cryptd_aead_queued(cryptd_tfm)))
-		aead = cryptd_aead_child(cryptd_tfm);
-
-	aead_request_set_tfm(req, aead);
-
-	return crypto_aead_encrypt(req);
-}
-
-static int cryptd_aegis128_aesni_decrypt(struct aead_request *req)
-{
-	struct crypto_aead *aead = crypto_aead_reqtfm(req);
-	struct cryptd_aead **ctx = crypto_aead_ctx(aead);
-	struct cryptd_aead *cryptd_tfm = *ctx;
-
-	aead = &cryptd_tfm->base;
-	if (irq_fpu_usable() && (!in_atomic() ||
-				 !cryptd_aead_queued(cryptd_tfm)))
-		aead = cryptd_aead_child(cryptd_tfm);
-
-	aead_request_set_tfm(req, aead);
-
-	return crypto_aead_decrypt(req);
-}
-
-static int cryptd_aegis128_aesni_init_tfm(struct crypto_aead *aead)
-{
-	struct cryptd_aead *cryptd_tfm;
-	struct cryptd_aead **ctx = crypto_aead_ctx(aead);
-
-	cryptd_tfm = cryptd_alloc_aead("__aegis128-aesni", CRYPTO_ALG_INTERNAL,
-				       CRYPTO_ALG_INTERNAL);
-	if (IS_ERR(cryptd_tfm))
-		return PTR_ERR(cryptd_tfm);
-
-	*ctx = cryptd_tfm;
-	crypto_aead_set_reqsize(aead, crypto_aead_reqsize(&cryptd_tfm->base));
-	return 0;
-}
-
-static void cryptd_aegis128_aesni_exit_tfm(struct crypto_aead *aead)
-{
-	struct cryptd_aead **ctx = crypto_aead_ctx(aead);
-
-	cryptd_free_aead(*ctx);
-}
-
-static struct aead_alg crypto_aegis128_aesni_alg[] = {
-	{
-		.setkey = crypto_aegis128_aesni_setkey,
-		.setauthsize = crypto_aegis128_aesni_setauthsize,
-		.encrypt = crypto_aegis128_aesni_encrypt,
-		.decrypt = crypto_aegis128_aesni_decrypt,
-		.init = crypto_aegis128_aesni_init_tfm,
-		.exit = crypto_aegis128_aesni_exit_tfm,
-
-		.ivsize = AEGIS128_NONCE_SIZE,
-		.maxauthsize = AEGIS128_MAX_AUTH_SIZE,
-		.chunksize = AEGIS128_BLOCK_SIZE,
-
-		.base = {
-			.cra_flags = CRYPTO_ALG_INTERNAL,
-			.cra_blocksize = 1,
-			.cra_ctxsize = sizeof(struct aegis_ctx) +
-				__alignof__(struct aegis_ctx),
-			.cra_alignmask = 0,
-
-			.cra_name = "__aegis128",
-			.cra_driver_name = "__aegis128-aesni",
-
-			.cra_module = THIS_MODULE,
-		}
-	}, {
-		.setkey = cryptd_aegis128_aesni_setkey,
-		.setauthsize = cryptd_aegis128_aesni_setauthsize,
-		.encrypt = cryptd_aegis128_aesni_encrypt,
-		.decrypt = cryptd_aegis128_aesni_decrypt,
-		.init = cryptd_aegis128_aesni_init_tfm,
-		.exit = cryptd_aegis128_aesni_exit_tfm,
-
-		.ivsize = AEGIS128_NONCE_SIZE,
-		.maxauthsize = AEGIS128_MAX_AUTH_SIZE,
-		.chunksize = AEGIS128_BLOCK_SIZE,
-
-		.base = {
-			.cra_flags = CRYPTO_ALG_ASYNC,
-			.cra_blocksize = 1,
-			.cra_ctxsize = sizeof(struct cryptd_aead *),
-			.cra_alignmask = 0,
-
-			.cra_priority = 400,
-
-			.cra_name = "aegis128",
-			.cra_driver_name = "aegis128-aesni",
-
-			.cra_module = THIS_MODULE,
-		}
+		.cra_module = THIS_MODULE,
 	}
 };
 
 static int __init crypto_aegis128_aesni_module_init(void)
 {
-	if (!boot_cpu_has(X86_FEATURE_XMM2) ||
+	if (!boot_cpu_has(X86_FEATURE_XMM4_1) ||
 	    !boot_cpu_has(X86_FEATURE_AES) ||
 	    !cpu_has_xfeatures(XFEATURE_MASK_SSE, NULL))
 		return -ENODEV;
 
-	return crypto_register_aeads(crypto_aegis128_aesni_alg,
-				     ARRAY_SIZE(crypto_aegis128_aesni_alg));
+	return crypto_register_aead(&crypto_aegis128_aesni_alg);
 }
 
 static void __exit crypto_aegis128_aesni_module_exit(void)
 {
-	crypto_unregister_aeads(crypto_aegis128_aesni_alg,
-				ARRAY_SIZE(crypto_aegis128_aesni_alg));
+	crypto_unregister_aead(&crypto_aegis128_aesni_alg);
 }
 
 module_init(crypto_aegis128_aesni_module_init);
@@ -389,6 +282,6 @@ module_exit(crypto_aegis128_aesni_module_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Ondrej Mosnacek <omosnacek@gmail.com>");
-MODULE_DESCRIPTION("AEGIS-128 AEAD algorithm -- AESNI+SSE2 implementation");
+MODULE_DESCRIPTION("AEGIS-128 AEAD algorithm -- AESNI+SSE4.1 implementation");
 MODULE_ALIAS_CRYPTO("aegis128");
 MODULE_ALIAS_CRYPTO("aegis128-aesni");

@@ -297,7 +297,12 @@ static void ath9k_htc_tx_data(struct ath9k_htc_priv *priv,
 		tx_hdr.data_type = ATH9K_HTC_NORMAL;
 	}
 
-	if (ieee80211_is_data_qos(hdr->frame_control)) {
+	/* Transmit all frames that should not be reordered relative
+	 * to each other using the same priority. For other QoS data
+	 * frames extract the priority from the header.
+	 */
+	if (!(tx_info->control.flags & IEEE80211_TX_CTRL_DONT_REORDER) &&
+	    ieee80211_is_data_qos(hdr->frame_control)) {
 		qc = ieee80211_get_qos_ctl(hdr);
 		tx_hdr.tidno = qc[0] & IEEE80211_QOS_CTL_TID_MASK;
 	}
@@ -518,7 +523,7 @@ send_mac80211:
 	}
 
 	/* Send status to mac80211 */
-	ieee80211_tx_status(priv->hw, skb);
+	ieee80211_tx_status_skb(priv->hw, skb);
 }
 
 static inline void ath9k_htc_tx_drainq(struct ath9k_htc_priv *priv,
@@ -570,16 +575,16 @@ void ath9k_htc_tx_drain(struct ath9k_htc_priv *priv)
 	spin_unlock_bh(&priv->tx.tx_lock);
 }
 
-void ath9k_tx_failed_tasklet(unsigned long data)
+void ath9k_tx_failed_tasklet(struct tasklet_struct *t)
 {
-	struct ath9k_htc_priv *priv = (struct ath9k_htc_priv *)data;
+	struct ath9k_htc_priv *priv = from_tasklet(priv, t, tx_failed_tasklet);
 
-	spin_lock_bh(&priv->tx.tx_lock);
+	spin_lock(&priv->tx.tx_lock);
 	if (priv->tx.flags & ATH9K_HTC_OP_TX_DRAIN) {
-		spin_unlock_bh(&priv->tx.tx_lock);
+		spin_unlock(&priv->tx.tx_lock);
 		return;
 	}
-	spin_unlock_bh(&priv->tx.tx_lock);
+	spin_unlock(&priv->tx.tx_lock);
 
 	ath9k_htc_tx_drainq(priv, &priv->tx.tx_failed);
 }
@@ -755,7 +760,8 @@ static void ath9k_htc_tx_cleanup_queue(struct ath9k_htc_priv *priv,
 
 void ath9k_htc_tx_cleanup_timer(struct timer_list *t)
 {
-	struct ath9k_htc_priv *priv = from_timer(priv, t, tx.cleanup_timer);
+	struct ath9k_htc_priv *priv = timer_container_of(priv, t,
+							 tx.cleanup_timer);
 	struct ath_common *common = ath9k_hw_common(priv->ah);
 	struct ath9k_htc_tx_event *event, *tmp;
 	struct sk_buff *skb;
@@ -809,6 +815,7 @@ int ath9k_tx_init(struct ath9k_htc_priv *priv)
 	skb_queue_head_init(&priv->tx.data_vi_queue);
 	skb_queue_head_init(&priv->tx.data_vo_queue);
 	skb_queue_head_init(&priv->tx.tx_failed);
+
 	return 0;
 }
 
@@ -894,7 +901,8 @@ u32 ath9k_htc_calcrxfilter(struct ath9k_htc_priv *priv)
 	if (priv->rxfilter & FIF_PSPOLL)
 		rfilt |= ATH9K_RX_FILTER_PSPOLL;
 
-	if (priv->nvifs > 1 || priv->rxfilter & FIF_OTHER_BSS)
+	if (priv->nvifs > 1 ||
+	    priv->rxfilter & (FIF_OTHER_BSS | FIF_MCAST_ACTION))
 		rfilt |= ATH9K_RX_FILTER_MCAST_BCAST_ALL;
 
 	return rfilt;
@@ -1070,9 +1078,9 @@ rx_next:
 /*
  * FIXME: Handle FLUSH later on.
  */
-void ath9k_rx_tasklet(unsigned long data)
+void ath9k_rx_tasklet(struct tasklet_struct *t)
 {
-	struct ath9k_htc_priv *priv = (struct ath9k_htc_priv *)data;
+	struct ath9k_htc_priv *priv = from_tasklet(priv, t, rx_tasklet);
 	struct ath9k_htc_rxbuf *rxbuf = NULL, *tmp_buf = NULL;
 	struct ieee80211_rx_status rx_status;
 	struct sk_buff *skb;
@@ -1133,6 +1141,10 @@ void ath9k_htc_rxep(void *drv_priv, struct sk_buff *skb,
 	struct ath9k_htc_rxbuf *rxbuf = NULL, *tmp_buf = NULL;
 	unsigned long flags;
 
+	/* Check if ath9k_rx_init() completed. */
+	if (!data_race(priv->rx.initialized))
+		goto err;
+
 	spin_lock_irqsave(&priv->rx.rxbuflock, flags);
 	list_for_each_entry(tmp_buf, &priv->rx.rxbuf, list) {
 		if (!tmp_buf->in_process) {
@@ -1187,6 +1199,10 @@ int ath9k_rx_init(struct ath9k_htc_priv *priv)
 
 		list_add_tail(&rxbuf->list, &priv->rx.rxbuf);
 	}
+
+	/* Allow ath9k_htc_rxep() to operate. */
+	smp_wmb();
+	priv->rx.initialized = true;
 
 	return 0;
 

@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * ACPI watchdog table parsing support.
  *
  * Copyright (C) 2016, Intel Corporation
  * Author: Mika Westerberg <mika.westerberg@linux.intel.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #define pr_fmt(fmt) "ACPI: watchdog: " fmt
@@ -76,6 +73,7 @@ static const struct acpi_table_wdat *acpi_watchdog_get_wdat(void)
 	}
 
 	if (acpi_watchdog_uses_rtc(wdat)) {
+		acpi_put_table((struct acpi_table_header *)wdat);
 		pr_info("Skipping WDAT on this system because it uses RTC SRAM\n");
 		return NULL;
 	}
@@ -83,7 +81,7 @@ static const struct acpi_table_wdat *acpi_watchdog_get_wdat(void)
 	return wdat;
 }
 
-/**
+/*
  * Returns true if this system should prefer ACPI based watchdog instead of
  * the native one (which are typically the same hardware).
  */
@@ -120,12 +118,12 @@ void __init acpi_watchdog_init(void)
 
 	/* Watchdog disabled by BIOS */
 	if (!(wdat->flags & ACPI_WDAT_ENABLED))
-		return;
+		goto fail_put_wdat;
 
 	/* Skip legacy PCI WDT devices */
 	if (wdat->pci_segment != 0xff || wdat->pci_bus != 0xff ||
 	    wdat->pci_device != 0xff || wdat->pci_function != 0xff)
-		return;
+		goto fail_put_wdat;
 
 	INIT_LIST_HEAD(&resource_list);
 
@@ -153,11 +151,7 @@ void __init acpi_watchdog_init(void)
 		found = false;
 		resource_list_for_each_entry(rentry, &resource_list) {
 			if (rentry->res->flags == res.flags &&
-			    resource_overlaps(rentry->res, &res)) {
-				if (res.start < rentry->res->start)
-					rentry->res->start = res.start;
-				if (res.end > rentry->res->end)
-					rentry->res->end = res.end;
+			    resource_union(rentry->res, &res, rentry->res)) {
 				found = true;
 				break;
 			}
@@ -185,10 +179,12 @@ void __init acpi_watchdog_init(void)
 	pdev = platform_device_register_simple("wdat_wdt", PLATFORM_DEVID_NONE,
 					       resources, nresources);
 	if (IS_ERR(pdev))
-		pr_err("Device creation failed: %ld\n", PTR_ERR(pdev));
+		pr_err("Device creation failed: %pe\n", pdev);
 
 	kfree(resources);
 
 fail_free_resource_list:
 	resource_list_free(&resource_list);
+fail_put_wdat:
+	acpi_put_table((struct acpi_table_header *)wdat);
 }

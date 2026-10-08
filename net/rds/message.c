@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006 Oracle.  All rights reserved.
+ * Copyright (c) 2006, 2020 Oracle and/or its affiliates.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -44,8 +44,8 @@ static unsigned int	rds_exthdr_size[__RDS_EXTHDR_MAX] = {
 [RDS_EXTHDR_VERSION]	= sizeof(struct rds_ext_header_version),
 [RDS_EXTHDR_RDMA]	= sizeof(struct rds_ext_header_rdma),
 [RDS_EXTHDR_RDMA_DEST]	= sizeof(struct rds_ext_header_rdma_dest),
-[RDS_EXTHDR_NPATHS]	= sizeof(u16),
-[RDS_EXTHDR_GEN_NUM]	= sizeof(u32),
+[RDS_EXTHDR_NPATHS]	= sizeof(__be16),
+[RDS_EXTHDR_GEN_NUM]	= sizeof(__be32),
 };
 
 void rds_message_addref(struct rds_message *rm)
@@ -162,12 +162,12 @@ static void rds_message_purge(struct rds_message *rm)
 	if (rm->rdma.op_active)
 		rds_rdma_free_op(&rm->rdma);
 	if (rm->rdma.op_rdma_mr)
-		rds_mr_put(rm->rdma.op_rdma_mr);
+		kref_put(&rm->rdma.op_rdma_mr->r_kref, __rds_put_mr_final);
 
 	if (rm->atomic.op_active)
 		rds_atomic_free_op(&rm->atomic);
 	if (rm->atomic.op_rdma_mr)
-		rds_mr_put(rm->atomic.op_rdma_mr);
+		kref_put(&rm->atomic.op_rdma_mr->r_kref, __rds_put_mr_final);
 }
 
 void rds_message_put(struct rds_message *rm)
@@ -313,11 +313,16 @@ struct scatterlist *rds_message_alloc_sgs(struct rds_message *rm, int nents)
 	struct scatterlist *sg_first = (struct scatterlist *) &rm[1];
 	struct scatterlist *sg_ret;
 
-	WARN_ON(rm->m_used_sgs + nents > rm->m_total_sgs);
-	WARN_ON(!nents);
+	if (nents <= 0) {
+		pr_warn("rds: alloc sgs failed! nents <= 0\n");
+		return ERR_PTR(-EINVAL);
+	}
 
-	if (rm->m_used_sgs + nents > rm->m_total_sgs)
-		return NULL;
+	if (rm->m_used_sgs + nents > rm->m_total_sgs) {
+		pr_warn("rds: alloc sgs failed! total %d used %d nents %d\n",
+			rm->m_total_sgs, rm->m_used_sgs, nents);
+		return ERR_PTR(-ENOMEM);
+	}
 
 	sg_ret = &sg_first[rm->m_used_sgs];
 	sg_init_table(sg_ret, nents);
@@ -330,7 +335,7 @@ struct rds_message *rds_message_map_pages(unsigned long *page_addrs, unsigned in
 {
 	struct rds_message *rm;
 	unsigned int i;
-	int num_sgs = ceil(total_len, PAGE_SIZE);
+	int num_sgs = DIV_ROUND_UP(total_len, PAGE_SIZE);
 	int extra_bytes = num_sgs * sizeof(struct scatterlist);
 
 	rm = rds_message_alloc(extra_bytes, GFP_NOWAIT);
@@ -339,16 +344,17 @@ struct rds_message *rds_message_map_pages(unsigned long *page_addrs, unsigned in
 
 	set_bit(RDS_MSG_PAGEVEC, &rm->m_flags);
 	rm->m_inc.i_hdr.h_len = cpu_to_be32(total_len);
-	rm->data.op_nents = ceil(total_len, PAGE_SIZE);
+	rm->data.op_nents = DIV_ROUND_UP(total_len, PAGE_SIZE);
 	rm->data.op_sg = rds_message_alloc_sgs(rm, num_sgs);
-	if (!rm->data.op_sg) {
+	if (IS_ERR(rm->data.op_sg)) {
+		void *err = ERR_CAST(rm->data.op_sg);
 		rds_message_put(rm);
-		return ERR_PTR(-ENOMEM);
+		return err;
 	}
 
 	for (i = 0; i < rm->data.op_nents; ++i) {
 		sg_set_page(&rm->data.op_sg[i],
-				virt_to_page(page_addrs[i]),
+				virt_to_page((void *)page_addrs[i]),
 				PAGE_SIZE, 0);
 	}
 
@@ -360,7 +366,6 @@ static int rds_message_zcopy_from_user(struct rds_message *rm, struct iov_iter *
 	struct scatterlist *sg;
 	int ret = 0;
 	int length = iov_iter_count(from);
-	int total_copied = 0;
 	struct rds_msg_zcopy_info *info;
 
 	rm->m_inc.i_hdr.h_len = cpu_to_be32(iov_iter_count(from));
@@ -385,7 +390,7 @@ static int rds_message_zcopy_from_user(struct rds_message *rm, struct iov_iter *
 		size_t start;
 		ssize_t copied;
 
-		copied = iov_iter_get_pages(from, &pages, PAGE_SIZE,
+		copied = iov_iter_get_pages2(from, &pages, PAGE_SIZE,
 					    1, &start);
 		if (copied < 0) {
 			struct mmpin *mmp;
@@ -398,8 +403,6 @@ static int rds_message_zcopy_from_user(struct rds_message *rm, struct iov_iter *
 			ret = -EFAULT;
 			goto err;
 		}
-		total_copied += copied;
-		iov_iter_advance(from, copied);
 		length -= copied;
 		sg_set_page(sg, pages, copied, start);
 		rm->data.op_nents++;

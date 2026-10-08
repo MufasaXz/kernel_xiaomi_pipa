@@ -105,7 +105,7 @@ static int wait_for_free(struct slot_map *m)
 			left = t;
 		else
 			left = t + (left - n);
-		if (unlikely(signal_pending(current)))
+		if (signal_pending(current))
 			left = -EINTR;
 	} while (left > 0);
 
@@ -168,10 +168,7 @@ static DEFINE_SPINLOCK(orangefs_bufmap_lock);
 static void
 orangefs_bufmap_unmap(struct orangefs_bufmap *bufmap)
 {
-	int i;
-
-	for (i = 0; i < bufmap->page_count; i++)
-		put_page(bufmap->page_array[i]);
+	unpin_user_pages(bufmap->page_array, bufmap->page_count);
 }
 
 static void
@@ -198,18 +195,6 @@ int orangefs_bufmap_size_query(void)
 		size = bufmap->desc_size;
 	spin_unlock(&orangefs_bufmap_lock);
 	return size;
-}
-
-int orangefs_bufmap_shift_query(void)
-{
-	struct orangefs_bufmap *bufmap;
-	int shift = 0;
-	spin_lock(&orangefs_bufmap_lock);
-	bufmap = __orangefs_bufmap;
-	if (bufmap)
-		shift = bufmap->desc_shift;
-	spin_unlock(&orangefs_bufmap_lock);
-	return shift;
 }
 
 static DECLARE_WAIT_QUEUE_HEAD(bufmap_waitq);
@@ -267,8 +252,8 @@ orangefs_bufmap_map(struct orangefs_bufmap *bufmap,
 	int offset = 0, ret, i;
 
 	/* map the pages */
-	ret = get_user_pages_fast((unsigned long)user_desc->ptr,
-			     bufmap->page_count, 1, bufmap->page_array);
+	ret = pin_user_pages_fast((unsigned long)user_desc->ptr,
+			     bufmap->page_count, FOLL_WRITE, bufmap->page_array);
 
 	if (ret < 0)
 		return ret;
@@ -277,10 +262,8 @@ orangefs_bufmap_map(struct orangefs_bufmap *bufmap,
 		gossip_err("orangefs error: asked for %d pages, only got %d.\n",
 				bufmap->page_count, ret);
 
-		for (i = 0; i < ret; i++) {
-			SetPageError(bufmap->page_array[i]);
-			put_page(bufmap->page_array[i]);
-		}
+		for (i = 0; i < ret; i++)
+			unpin_user_page(bufmap->page_array[i]);
 		return -ENOMEM;
 	}
 

@@ -1,9 +1,6 @@
-/**
+// SPDX-License-Identifier: GPL-2.0-only
+/*
  * Copyright (C) 2008, Creative Technology Ltd. All Rights Reserved.
- *
- * This source file is released under GPL v2 license (no other versions).
- * See the COPYING file included in the main directory of this source
- * distribution for the license terms and conditions.
  *
  * @File	ctmixer.c
  *
@@ -12,7 +9,6 @@
  *
  * @Author	Liu Chun
  * @Date 	May 28 2008
- *
  */
 
 
@@ -1223,7 +1219,7 @@ int ct_alsa_mix_create(struct ct_atc *atc,
 	if (err)
 		return err;
 
-	strcpy(atc->card->mixername, device_name);
+	strscpy(atc->card->mixername, device_name);
 
 	return 0;
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Xen leaves the responsibility for maintaining p2m mappings to the
  * guests themselves, but it must also access and update the p2m array
@@ -65,9 +67,10 @@
 #include <linux/hash.h>
 #include <linux/sched.h>
 #include <linux/seq_file.h>
-#include <linux/bootmem.h>
+#include <linux/memblock.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
+#include <linux/acpi.h>
 
 #include <asm/cache.h>
 #include <asm/setup.h>
@@ -78,8 +81,8 @@
 #include <asm/xen/hypervisor.h>
 #include <xen/balloon.h>
 #include <xen/grant_table.h>
+#include <xen/hvc-console.h>
 
-#include "multicalls.h"
 #include "xen-ops.h"
 
 #define P2M_MID_PER_PAGE	(PAGE_SIZE / sizeof(unsigned long *))
@@ -96,8 +99,8 @@ EXPORT_SYMBOL_GPL(xen_p2m_size);
 unsigned long xen_max_p2m_pfn __read_mostly;
 EXPORT_SYMBOL_GPL(xen_max_p2m_pfn);
 
-#ifdef CONFIG_XEN_BALLOON_MEMORY_HOTPLUG_LIMIT
-#define P2M_LIMIT CONFIG_XEN_BALLOON_MEMORY_HOTPLUG_LIMIT
+#ifdef CONFIG_XEN_MEMORY_HOTPLUG_LIMIT
+#define P2M_LIMIT CONFIG_XEN_MEMORY_HOTPLUG_LIMIT
 #else
 #define P2M_LIMIT 0
 #endif
@@ -130,11 +133,6 @@ static inline unsigned p2m_top_index(unsigned long pfn)
 static inline unsigned p2m_mid_index(unsigned long pfn)
 {
 	return (pfn / P2M_PER_PAGE) % P2M_MID_PER_PAGE;
-}
-
-static inline unsigned p2m_index(unsigned long pfn)
-{
-	return pfn % P2M_PER_PAGE;
 }
 
 static void p2m_top_mfn_init(unsigned long *top)
@@ -179,8 +177,9 @@ static void p2m_init_identity(unsigned long *p2m, unsigned long pfn)
 
 static void * __ref alloc_p2m_page(void)
 {
-	if (unlikely(!slab_is_available()))
-		return alloc_bootmem_align(PAGE_SIZE, PAGE_SIZE);
+	if (unlikely(!slab_is_available())) {
+		return memblock_alloc_or_panic(PAGE_SIZE, PAGE_SIZE);
+	}
 
 	return (void *)__get_free_page(GFP_KERNEL);
 }
@@ -188,7 +187,7 @@ static void * __ref alloc_p2m_page(void)
 static void __ref free_p2m_page(void *p)
 {
 	if (unlikely(!slab_is_available())) {
-		free_bootmem((unsigned long)p, PAGE_SIZE);
+		memblock_free(p, PAGE_SIZE);
 		return;
 	}
 
@@ -370,12 +369,8 @@ static void __init xen_rebuild_p2m_list(unsigned long *p2m)
 
 		if (type == P2M_TYPE_PFN || i < chunk) {
 			/* Use initial p2m page contents. */
-#ifdef CONFIG_X86_64
 			mfns = alloc_p2m_page();
 			copy_page(mfns, xen_p2m_addr + pfn);
-#else
-			mfns = xen_p2m_addr + pfn;
-#endif
 			ptep = populate_extra_pte((unsigned long)(p2m + pfn));
 			set_pte(ptep,
 				pfn_pte(PFN_DOWN(__pa(mfns)), PAGE_KERNEL));
@@ -458,7 +453,7 @@ EXPORT_SYMBOL_GPL(get_phys_to_machine);
  * Allocate new pmd(s). It is checked whether the old pmd is still in place.
  * If not, nothing is changed. This is okay as the only reason for allocating
  * a new pmd is to replace p2m_missing_pte or p2m_identity_pte by a individual
- * pmd. In case of PAE/x86-32 there are multiple pmds to allocate!
+ * pmd.
  */
 static pte_t *alloc_p2m_pmd(unsigned long addr, pte_t *pte_pg)
 {
@@ -555,7 +550,6 @@ int xen_alloc_p2m_entry(unsigned long pfn)
 			/* Separately check the mid mfn level */
 			unsigned long missing_mfn;
 			unsigned long mid_mfn_mfn;
-			unsigned long old_mfn;
 
 			mid_mfn = alloc_p2m_page();
 			if (!mid_mfn)
@@ -565,12 +559,12 @@ int xen_alloc_p2m_entry(unsigned long pfn)
 
 			missing_mfn = virt_to_mfn(p2m_mid_missing_mfn);
 			mid_mfn_mfn = virt_to_mfn(mid_mfn);
-			old_mfn = cmpxchg(top_mfn_p, missing_mfn, mid_mfn_mfn);
-			if (old_mfn != missing_mfn) {
-				free_p2m_page(mid_mfn);
-				mid_mfn = mfn_to_virt(old_mfn);
-			} else {
+			/* try_cmpxchg() updates missing_mfn on failure. */
+			if (try_cmpxchg(top_mfn_p, &missing_mfn, mid_mfn_mfn)) {
 				p2m_top_mfn_p[topidx] = mid_mfn;
+			} else {
+				free_p2m_page(mid_mfn);
+				mid_mfn = mfn_to_virt(missing_mfn);
 			}
 		}
 	} else {
@@ -647,15 +641,13 @@ bool __set_phys_to_machine(unsigned long pfn, unsigned long mfn)
 	pte_t *ptep;
 	unsigned int level;
 
-	if (unlikely(pfn >= xen_p2m_size)) {
-		BUG_ON(mfn != INVALID_P2M_ENTRY);
-		return true;
-	}
+	/* Only invalid entries allowed above the highest p2m covered frame. */
+	if (unlikely(pfn >= xen_p2m_size))
+		return mfn == INVALID_P2M_ENTRY;
 
 	/*
 	 * The interface requires atomic updates on p2m elements.
-	 * xen_safe_write_ulong() is using __put_user which does an atomic
-	 * store via asm().
+	 * xen_safe_write_ulong() is using an atomic store via asm().
 	 */
 	if (likely(!xen_safe_write_ulong(xen_p2m_addr + pfn, mfn)))
 		return true;
@@ -694,7 +686,7 @@ int set_foreign_p2m_mapping(struct gnttab_map_grant_ref *map_ops,
 	int i, ret = 0;
 	pte_t *pte;
 
-	if (xen_feature(XENFEAT_auto_translated_physmap))
+	if (!xen_pv_domain())
 		return 0;
 
 	if (kmap_ops) {
@@ -735,7 +727,7 @@ int set_foreign_p2m_mapping(struct gnttab_map_grant_ref *map_ops,
 		map_ops[i].status = GNTST_general_error;
 		unmap[0].host_addr = map_ops[i].host_addr;
 		unmap[0].handle = map_ops[i].handle;
-		map_ops[i].handle = ~0;
+		map_ops[i].handle = INVALID_GRANT_HANDLE;
 		if (map_ops[i].flags & GNTMAP_device_map)
 			unmap[0].dev_bus_addr = map_ops[i].dev_bus_addr;
 		else
@@ -745,7 +737,7 @@ int set_foreign_p2m_mapping(struct gnttab_map_grant_ref *map_ops,
 			kmap_ops[i].status = GNTST_general_error;
 			unmap[1].host_addr = kmap_ops[i].host_addr;
 			unmap[1].handle = kmap_ops[i].handle;
-			kmap_ops[i].handle = ~0;
+			kmap_ops[i].handle = INVALID_GRANT_HANDLE;
 			if (kmap_ops[i].flags & GNTMAP_device_map)
 				unmap[1].dev_bus_addr = kmap_ops[i].dev_bus_addr;
 			else
@@ -770,7 +762,6 @@ int set_foreign_p2m_mapping(struct gnttab_map_grant_ref *map_ops,
 out:
 	return ret;
 }
-EXPORT_SYMBOL_GPL(set_foreign_p2m_mapping);
 
 int clear_foreign_p2m_mapping(struct gnttab_unmap_grant_ref *unmap_ops,
 			      struct gnttab_unmap_grant_ref *kunmap_ops,
@@ -778,7 +769,7 @@ int clear_foreign_p2m_mapping(struct gnttab_unmap_grant_ref *unmap_ops,
 {
 	int i, ret = 0;
 
-	if (xen_feature(XENFEAT_auto_translated_physmap))
+	if (!xen_pv_domain())
 		return 0;
 
 	for (i = 0; i < count; i++) {
@@ -796,11 +787,105 @@ int clear_foreign_p2m_mapping(struct gnttab_unmap_grant_ref *unmap_ops,
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(clear_foreign_p2m_mapping);
+
+/* Remapped non-RAM areas */
+#define NR_NONRAM_REMAP 4
+static struct nonram_remap {
+	phys_addr_t maddr;
+	phys_addr_t paddr;
+	size_t size;
+} xen_nonram_remap[NR_NONRAM_REMAP] __ro_after_init;
+static unsigned int nr_nonram_remap __ro_after_init;
+
+/*
+ * Do the real remapping of non-RAM regions as specified in the
+ * xen_nonram_remap[] array.
+ * In case of an error just crash the system.
+ */
+void __init xen_do_remap_nonram(void)
+{
+	unsigned int i;
+	unsigned int remapped = 0;
+	const struct nonram_remap *remap = xen_nonram_remap;
+	unsigned long pfn, mfn, end_pfn;
+
+	for (i = 0; i < nr_nonram_remap; i++) {
+		end_pfn = PFN_UP(remap->paddr + remap->size);
+		pfn = PFN_DOWN(remap->paddr);
+		mfn = PFN_DOWN(remap->maddr);
+		while (pfn < end_pfn) {
+			if (!set_phys_to_machine(pfn, mfn))
+				panic("Failed to set p2m mapping for pfn=%lx mfn=%lx\n",
+				       pfn, mfn);
+
+			pfn++;
+			mfn++;
+			remapped++;
+		}
+
+		remap++;
+	}
+
+	pr_info("Remapped %u non-RAM page(s)\n", remapped);
+}
+
+#ifdef CONFIG_ACPI
+/*
+ * Xen variant of acpi_os_ioremap() taking potentially remapped non-RAM
+ * regions into account.
+ * Any attempt to map an area crossing a remap boundary will produce a
+ * WARN() splat.
+ * phys is related to remap->maddr on input and will be rebased to remap->paddr.
+ */
+static void __iomem *xen_acpi_os_ioremap(acpi_physical_address phys,
+					 acpi_size size)
+{
+	unsigned int i;
+	const struct nonram_remap *remap = xen_nonram_remap;
+
+	for (i = 0; i < nr_nonram_remap; i++) {
+		if (phys + size > remap->maddr &&
+		    phys < remap->maddr + remap->size) {
+			WARN_ON(phys < remap->maddr ||
+				phys + size > remap->maddr + remap->size);
+			phys += remap->paddr - remap->maddr;
+			break;
+		}
+	}
+
+	return x86_acpi_os_ioremap(phys, size);
+}
+#endif /* CONFIG_ACPI */
+
+/*
+ * Add a new non-RAM remap entry.
+ * In case of no free entry found, just crash the system.
+ */
+void __init xen_add_remap_nonram(phys_addr_t maddr, phys_addr_t paddr,
+				 unsigned long size)
+{
+	BUG_ON((maddr & ~PAGE_MASK) != (paddr & ~PAGE_MASK));
+
+	if (nr_nonram_remap == NR_NONRAM_REMAP) {
+		xen_raw_console_write("Number of required E820 entry remapping actions exceed maximum value\n");
+		BUG();
+	}
+
+#ifdef CONFIG_ACPI
+	/* Switch to the Xen acpi_os_ioremap() variant. */
+	if (nr_nonram_remap == 0)
+		acpi_os_ioremap = xen_acpi_os_ioremap;
+#endif
+
+	xen_nonram_remap[nr_nonram_remap].maddr = maddr;
+	xen_nonram_remap[nr_nonram_remap].paddr = paddr;
+	xen_nonram_remap[nr_nonram_remap].size = size;
+
+	nr_nonram_remap++;
+}
 
 #ifdef CONFIG_XEN_DEBUG_FS
 #include <linux/debugfs.h>
-#include "debugfs.h"
 static int p2m_dump_show(struct seq_file *m, void *v)
 {
 	static const char * const type_name[] = {
@@ -828,26 +913,13 @@ static int p2m_dump_show(struct seq_file *m, void *v)
 	return 0;
 }
 
-static int p2m_dump_open(struct inode *inode, struct file *filp)
-{
-	return single_open(filp, p2m_dump_show, NULL);
-}
-
-static const struct file_operations p2m_dump_fops = {
-	.open		= p2m_dump_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
+DEFINE_SHOW_ATTRIBUTE(p2m_dump);
 
 static struct dentry *d_mmu_debug;
 
 static int __init xen_p2m_debugfs(void)
 {
 	struct dentry *d_xen = xen_init_debugfs();
-
-	if (d_xen == NULL)
-		return -ENOMEM;
 
 	d_mmu_debug = debugfs_create_dir("mmu", d_xen);
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * dvb_net.c
  *
@@ -13,18 +14,6 @@
  *                      and Wolfram Stering <wstering@cosy.sbg.ac.at>
  *
  * ULE Decaps according to RFC 4326.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- * To obtain the license, point your browser to
- * http://www.gnu.org/copyleft/gpl.html
  */
 
 /*
@@ -238,6 +227,9 @@ static int handle_one_ule_extension( struct dvb_net_priv *p )
 	int ext_len = 0;
 	unsigned char hlen = (p->ule_sndu_type & 0x0700) >> 8;
 	unsigned char htype = p->ule_sndu_type & 0x00FF;
+
+	if (htype >= ARRAY_SIZE(ule_mandatory_ext_handlers))
+		return -1;
 
 	/* Discriminate mandatory and optional extension headers. */
 	if (hlen == 0) {
@@ -558,7 +550,7 @@ static int dvb_net_ule_new_payload(struct dvb_net_ule_handle *h)
 		h->priv->ule_sndu_type_1 = 1;
 		h->ts_remain -= 1;
 		h->from_where += 1;
-		/* fallthrough */
+		fallthrough;
 	case 0:
 		h->new_ts = 1;
 		h->ts += TS_SZ;
@@ -1019,7 +1011,7 @@ static u8 mask_promisc[6]={0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
 static int dvb_net_filter_sec_set(struct net_device *dev,
 		   struct dmx_section_filter **secfilter,
-		   u8 *mac, u8 *mac_mask)
+		   const u8 *mac, u8 *mac_mask)
 {
 	struct dvb_net_priv *priv = netdev_priv(dev);
 	int ret;
@@ -1063,7 +1055,7 @@ static int dvb_net_feed_start(struct net_device *dev)
 	int ret = 0, i;
 	struct dvb_net_priv *priv = netdev_priv(dev);
 	struct dmx_demux *demux = priv->demux;
-	unsigned char *mac = (unsigned char *) dev->dev_addr;
+	const unsigned char *mac = (const unsigned char *) dev->dev_addr;
 
 	netdev_dbg(dev, "rx_mode %i\n", priv->rx_mode);
 	mutex_lock(&priv->mutex);
@@ -1084,7 +1076,7 @@ static int dvb_net_feed_start(struct net_device *dev)
 			goto error;
 		}
 
-		ret = priv->secfeed->set(priv->secfeed, priv->pid, 32768, 1);
+		ret = priv->secfeed->set(priv->secfeed, priv->pid, 1);
 
 		if (ret<0) {
 			pr_err("%s: could not set section feed\n", dev->name);
@@ -1122,7 +1114,7 @@ static int dvb_net_feed_start(struct net_device *dev)
 		netdev_dbg(dev, "start filtering\n");
 		priv->secfeed->start_filtering(priv->secfeed);
 	} else if (priv->feedtype == DVB_NET_FEEDTYPE_ULE) {
-		ktime_t timeout = ktime_set(0, 10*NSEC_PER_MSEC); // 10 msec
+		ktime_t timeout = ns_to_ktime(10 * NSEC_PER_MSEC);
 
 		/* we have payloads encapsulated in TS */
 		netdev_dbg(dev, "alloc tsfeed\n");
@@ -1138,7 +1130,6 @@ static int dvb_net_feed_start(struct net_device *dev)
 					priv->pid, /* pid */
 					TS_PACKET, /* type */
 					DMX_PES_OTHER, /* pes type */
-					32768,     /* circular buffer size */
 					timeout    /* timeout */
 					);
 
@@ -1284,7 +1275,7 @@ static int dvb_net_set_mac (struct net_device *dev, void *p)
 	struct dvb_net_priv *priv = netdev_priv(dev);
 	struct sockaddr *addr=p;
 
-	memcpy(dev->dev_addr, addr->sa_data, dev->addr_len);
+	eth_hw_addr_set(dev, addr->sa_data);
 
 	if (netif_running(dev))
 		schedule_work(&priv->restart_net_feed_wq);
@@ -1379,7 +1370,7 @@ static int dvb_net_add_if(struct dvb_net *dvbnet, u16 pid, u8 feedtype)
 			 dvbnet->dvbdev->adapter->num, if_num);
 
 	net->addr_len = 6;
-	memcpy(net->dev_addr, dvbnet->dvbdev->adapter->proposed_mac, 6);
+	eth_hw_addr_set(net, dvbnet->dvbdev->adapter->proposed_mac);
 
 	dvbnet->device[if_num] = net;
 

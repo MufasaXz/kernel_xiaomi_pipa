@@ -1,21 +1,13 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * v4l2-fh.h
  *
  * V4L2 file handle. Store per file handle data for the V4L2
- * framework. Using file handles is optional for the drivers.
+ * framework. Using file handles is mandatory for the drivers.
  *
  * Copyright (C) 2009--2010 Nokia Corporation.
  *
  * Contact: Sakari Ailus <sakari.ailus@iki.fi>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
  */
 
 #ifndef V4L2_FH_H
@@ -61,10 +53,22 @@ struct v4l2_fh {
 	unsigned int		navailable;
 	u32			sequence;
 
-#if IS_ENABLED(CONFIG_V4L2_MEM2MEM_DEV)
 	struct v4l2_m2m_ctx	*m2m_ctx;
-#endif
 };
+
+/**
+ * file_to_v4l2_fh - Return the v4l2_fh associated with a struct file
+ *
+ * @filp: pointer to &struct file
+ *
+ * This function should be used by drivers to retrieve the &struct v4l2_fh
+ * instance pointer stored in the file private_data instead of accessing the
+ * private_data field directly.
+ */
+static inline struct v4l2_fh *file_to_v4l2_fh(struct file *filp)
+{
+	return filp->private_data;
+}
 
 /**
  * v4l2_fh_init - Initialise the file handle.
@@ -83,11 +87,14 @@ void v4l2_fh_init(struct v4l2_fh *fh, struct video_device *vdev);
  * v4l2_fh_add - Add the fh to the list of file handles on a video_device.
  *
  * @fh: pointer to &struct v4l2_fh
+ * @filp: pointer to &struct file associated with @fh
+ *
+ * The function sets filp->private_data to point to @fh.
  *
  * .. note::
  *    The @fh file handle must be initialised first.
  */
-void v4l2_fh_add(struct v4l2_fh *fh);
+void v4l2_fh_add(struct v4l2_fh *fh, struct file *filp);
 
 /**
  * v4l2_fh_open - Ancillary routine that can be used as the open\(\) op
@@ -97,6 +104,9 @@ void v4l2_fh_add(struct v4l2_fh *fh);
  *
  * It allocates a v4l2_fh and inits and adds it to the &struct video_device
  * associated with the file pointer.
+ *
+ * On error filp->private_data will be %NULL, otherwise it will point to
+ * the &struct v4l2_fh.
  */
 int v4l2_fh_open(struct file *filp);
 
@@ -104,15 +114,15 @@ int v4l2_fh_open(struct file *filp);
  * v4l2_fh_del - Remove file handle from the list of file handles.
  *
  * @fh: pointer to &struct v4l2_fh
+ * @filp: pointer to &struct file associated with @fh
  *
- * On error filp->private_data will be %NULL, otherwise it will point to
- * the &struct v4l2_fh.
+ * The function resets filp->private_data to NULL.
  *
  * .. note::
  *    Must be called in v4l2_file_operations->release\(\) handler if the driver
  *    uses &struct v4l2_fh.
  */
-void v4l2_fh_del(struct v4l2_fh *fh);
+void v4l2_fh_del(struct v4l2_fh *fh, struct file *filp);
 
 /**
  * v4l2_fh_exit - Release resources related to a file handle.

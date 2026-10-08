@@ -1,17 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * WMI embedded Binary MOF driver
  *
  * Copyright (c) 2015 Andrew Lutomirski
  * Copyright (C) 2017 VMware, Inc. All Rights Reserved.
- *
- *  This program is free software; you can redistribute it and/or modify it
- *  under the terms of the GNU General Public License version 2 as published
- *  by the Free Software Foundation.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -28,79 +20,66 @@
 
 #define WMI_BMOF_GUID "05901221-D566-11D1-B2F0-00A0C9062910"
 
-struct bmof_priv {
-	union acpi_object *bmofdata;
-	struct bin_attribute bmof_bin_attr;
-};
-
-static ssize_t
-read_bmof(struct file *filp, struct kobject *kobj,
-	 struct bin_attribute *attr,
-	 char *buf, loff_t off, size_t count)
+static ssize_t bmof_read(struct file *filp, struct kobject *kobj, const struct bin_attribute *attr,
+			 char *buf, loff_t off, size_t count)
 {
-	struct bmof_priv *priv =
-		container_of(attr, struct bmof_priv, bmof_bin_attr);
+	struct device *dev = kobj_to_dev(kobj);
+	union acpi_object *obj = dev_get_drvdata(dev);
 
-	if (off < 0)
-		return -EINVAL;
-
-	if (off >= priv->bmofdata->buffer.length)
-		return 0;
-
-	if (count > priv->bmofdata->buffer.length - off)
-		count = priv->bmofdata->buffer.length - off;
-
-	memcpy(buf, priv->bmofdata->buffer.pointer + off, count);
-	return count;
+	return memory_read_from_buffer(buf, count, &off, obj->buffer.pointer, obj->buffer.length);
 }
 
-static int wmi_bmof_probe(struct wmi_device *wdev)
+static const BIN_ATTR_ADMIN_RO(bmof, 0);
+
+static const struct bin_attribute * const bmof_attrs[] = {
+	&bin_attr_bmof,
+	NULL
+};
+
+static size_t bmof_bin_size(struct kobject *kobj, const struct bin_attribute *attr, int n)
 {
-	struct bmof_priv *priv;
-	int ret;
+	struct device *dev = kobj_to_dev(kobj);
+	union acpi_object *obj = dev_get_drvdata(dev);
 
-	priv = devm_kzalloc(&wdev->dev, sizeof(struct bmof_priv), GFP_KERNEL);
-	if (!priv)
-		return -ENOMEM;
+	return obj->buffer.length;
+}
 
-	dev_set_drvdata(&wdev->dev, priv);
+static const struct attribute_group bmof_group = {
+	.bin_size = bmof_bin_size,
+	.bin_attrs = bmof_attrs,
+};
 
-	priv->bmofdata = wmidev_block_query(wdev, 0);
-	if (!priv->bmofdata) {
+static const struct attribute_group *bmof_groups[] = {
+	&bmof_group,
+	NULL
+};
+
+static int wmi_bmof_probe(struct wmi_device *wdev, const void *context)
+{
+	union acpi_object *obj;
+
+	obj = wmidev_block_query(wdev, 0);
+	if (!obj) {
 		dev_err(&wdev->dev, "failed to read Binary MOF\n");
 		return -EIO;
 	}
 
-	if (priv->bmofdata->type != ACPI_TYPE_BUFFER) {
+	if (obj->type != ACPI_TYPE_BUFFER) {
 		dev_err(&wdev->dev, "Binary MOF is not a buffer\n");
-		ret = -EIO;
-		goto err_free;
+		kfree(obj);
+		return -EIO;
 	}
 
-	sysfs_bin_attr_init(&priv->bmof_bin_attr);
-	priv->bmof_bin_attr.attr.name = "bmof";
-	priv->bmof_bin_attr.attr.mode = 0400;
-	priv->bmof_bin_attr.read = read_bmof;
-	priv->bmof_bin_attr.size = priv->bmofdata->buffer.length;
-
-	ret = sysfs_create_bin_file(&wdev->dev.kobj, &priv->bmof_bin_attr);
-	if (ret)
-		goto err_free;
+	dev_set_drvdata(&wdev->dev, obj);
 
 	return 0;
-
- err_free:
-	kfree(priv->bmofdata);
-	return ret;
 }
 
-static int wmi_bmof_remove(struct wmi_device *wdev)
+static void wmi_bmof_remove(struct wmi_device *wdev)
 {
-	struct bmof_priv *priv = dev_get_drvdata(&wdev->dev);
+	union acpi_object *obj = dev_get_drvdata(&wdev->dev);
 
-	sysfs_remove_bin_file(&wdev->dev.kobj, &priv->bmof_bin_attr);
-	kfree(priv->bmofdata);
-	return 0;
+	kfree(obj);
 }
 
 static const struct wmi_device_id wmi_bmof_id_table[] = {
@@ -111,15 +90,17 @@ static const struct wmi_device_id wmi_bmof_id_table[] = {
 static struct wmi_driver wmi_bmof_driver = {
 	.driver = {
 		.name = "wmi-bmof",
+		.dev_groups = bmof_groups,
 	},
 	.probe = wmi_bmof_probe,
 	.remove = wmi_bmof_remove,
 	.id_table = wmi_bmof_id_table,
+	.no_singleton = true,
 };
 
 module_wmi_driver(wmi_bmof_driver);
 
-MODULE_ALIAS("wmi:" WMI_BMOF_GUID);
+MODULE_DEVICE_TABLE(wmi, wmi_bmof_id_table);
 MODULE_AUTHOR("Andrew Lutomirski <luto@kernel.org>");
 MODULE_DESCRIPTION("WMI embedded Binary MOF driver");
 MODULE_LICENSE("GPL");

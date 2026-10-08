@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #define KMSG_COMPONENT "IPVS"
 #define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
@@ -184,3 +185,4 @@ static void __exit ip_vs_sip_cleanup(void)
 module_init(ip_vs_sip_init);
 module_exit(ip_vs_sip_cleanup);
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("ipvs sip helper");

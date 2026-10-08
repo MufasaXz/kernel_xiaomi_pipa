@@ -7,6 +7,7 @@
 #include <linux/module.h>	/* for MODULE_NAME_LEN via KSYM_SYMBOL_LEN */
 #include <linux/ftrace.h>
 #include <linux/perf_event.h>
+#include <linux/xarray.h>
 #include <asm/syscall.h>
 
 #include "trace_output.h"
@@ -30,6 +31,7 @@ syscall_get_enter_fields(struct trace_event_call *call)
 extern struct syscall_metadata *__start_syscalls_metadata[];
 extern struct syscall_metadata *__stop_syscalls_metadata[];
 
+static DEFINE_XARRAY(syscalls_metadata_sparse);
 static struct syscall_metadata **syscalls_metadata;
 
 #ifndef ARCH_HAS_SYSCALL_MATCH_SYM_NAME
@@ -101,6 +103,9 @@ find_syscall_meta(unsigned long syscall)
 
 static struct syscall_metadata *syscall_nr_to_meta(int nr)
 {
+	if (IS_ENABLED(CONFIG_HAVE_SPARSE_SYSCALL_NR))
+		return xa_load(&syscalls_metadata_sparse, (unsigned long)nr);
+
 	if (!syscalls_metadata || nr >= NR_syscalls || nr < 0)
 		return NULL;
 
@@ -148,14 +153,20 @@ print_syscall_enter(struct trace_iterator *iter, int flags,
 		if (trace_seq_has_overflowed(s))
 			goto end;
 
+		if (i)
+			trace_seq_puts(s, ", ");
+
 		/* parameter types */
-		if (tr->trace_flags & TRACE_ITER_VERBOSE)
+		if (tr && tr->trace_flags & TRACE_ITER_VERBOSE)
 			trace_seq_printf(s, "%s ", entry->types[i]);
 
 		/* parameter values */
-		trace_seq_printf(s, "%s: %lx%s", entry->args[i],
-				 trace->args[i],
-				 i == entry->nb_args - 1 ? "" : ", ");
+		if (trace->args[i] < 10)
+			trace_seq_printf(s, "%s: %lu", entry->args[i],
+					 trace->args[i]);
+		else
+			trace_seq_printf(s, "%s: 0x%lx", entry->args[i],
+					 trace->args[i]);
 	}
 
 	trace_seq_putc(s, ')');
@@ -196,13 +207,10 @@ print_syscall_exit(struct trace_iterator *iter, int flags,
 	return trace_handle_return(s);
 }
 
-extern char *__bad_type_size(void);
-
-#define SYSCALL_FIELD(type, field, name)				\
-	sizeof(type) != sizeof(trace.field) ?				\
-		__bad_type_size() :					\
-		#type, #name, offsetof(typeof(trace), field),		\
-		sizeof(trace.field), is_signed_type(type)
+#define SYSCALL_FIELD(_type, _name) {					\
+	.type = #_type, .name = #_name,					\
+	.size = sizeof(_type), .align = __alignof__(_type),		\
+	.is_signed = is_signed_type(_type), .filter_type = FILTER_OTHER }
 
 static int __init
 __set_enter_print_fmt(struct syscall_metadata *entry, char *buf, int len)
@@ -269,38 +277,19 @@ static int __init syscall_enter_define_fields(struct trace_event_call *call)
 {
 	struct syscall_trace_enter trace;
 	struct syscall_metadata *meta = call->data;
-	int ret;
-	int i;
 	int offset = offsetof(typeof(trace), args);
-
-	ret = trace_define_field(call, SYSCALL_FIELD(int, nr, __syscall_nr),
-				 FILTER_OTHER);
-	if (ret)
-		return ret;
+	int ret = 0;
+	int i;
 
 	for (i = 0; i < meta->nb_args; i++) {
 		ret = trace_define_field(call, meta->types[i],
 					 meta->args[i], offset,
 					 sizeof(unsigned long), 0,
 					 FILTER_OTHER);
+		if (ret)
+			break;
 		offset += sizeof(unsigned long);
 	}
-
-	return ret;
-}
-
-static int __init syscall_exit_define_fields(struct trace_event_call *call)
-{
-	struct syscall_trace_exit trace;
-	int ret;
-
-	ret = trace_define_field(call, SYSCALL_FIELD(int, nr, __syscall_nr),
-				 FILTER_OTHER);
-	if (ret)
-		return ret;
-
-	ret = trace_define_field(call, SYSCALL_FIELD(long, ret, ret),
-				 FILTER_OTHER);
 
 	return ret;
 }
@@ -311,19 +300,23 @@ static void ftrace_syscall_enter(void *data, struct pt_regs *regs, long id)
 	struct trace_event_file *trace_file;
 	struct syscall_trace_enter *entry;
 	struct syscall_metadata *sys_data;
-	struct ring_buffer_event *event;
-	struct ring_buffer *buffer;
-	unsigned long irq_flags;
-	int pc;
+	struct trace_event_buffer fbuffer;
+	unsigned long args[6];
 	int syscall_nr;
 	int size;
+
+	/*
+	 * Syscall probe called with preemption enabled, but the ring
+	 * buffer and per-cpu data require preemption to be disabled.
+	 */
+	might_fault();
+	guard(preempt_notrace)();
 
 	syscall_nr = trace_get_syscall_nr(current, regs);
 	if (syscall_nr < 0 || syscall_nr >= NR_syscalls)
 		return;
 
-	/* Here we're inside tp handler's rcu_read_lock_sched (__DO_TRACE) */
-	trace_file = rcu_dereference_sched(tr->enter_syscall_files[syscall_nr]);
+	trace_file = READ_ONCE(tr->enter_syscall_files[syscall_nr]);
 	if (!trace_file)
 		return;
 
@@ -336,21 +329,16 @@ static void ftrace_syscall_enter(void *data, struct pt_regs *regs, long id)
 
 	size = sizeof(*entry) + sizeof(unsigned long) * sys_data->nb_args;
 
-	local_save_flags(irq_flags);
-	pc = preempt_count();
-
-	buffer = tr->trace_buffer.buffer;
-	event = trace_buffer_lock_reserve(buffer,
-			sys_data->enter_event->event.type, size, irq_flags, pc);
-	if (!event)
+	entry = trace_event_buffer_reserve(&fbuffer, trace_file, size);
+	if (!entry)
 		return;
 
-	entry = ring_buffer_event_data(event);
+	entry = ring_buffer_event_data(fbuffer.event);
 	entry->nr = syscall_nr;
-	syscall_get_arguments(current, regs, 0, sys_data->nb_args, entry->args);
+	syscall_get_arguments(current, regs, args);
+	memcpy(entry->args, args, sizeof(unsigned long) * sys_data->nb_args);
 
-	event_trigger_unlock_commit(trace_file, buffer, event, entry,
-				    irq_flags, pc, 0);
+	trace_event_buffer_commit(&fbuffer);
 }
 
 static void ftrace_syscall_exit(void *data, struct pt_regs *regs, long ret)
@@ -359,18 +347,21 @@ static void ftrace_syscall_exit(void *data, struct pt_regs *regs, long ret)
 	struct trace_event_file *trace_file;
 	struct syscall_trace_exit *entry;
 	struct syscall_metadata *sys_data;
-	struct ring_buffer_event *event;
-	struct ring_buffer *buffer;
-	unsigned long irq_flags;
-	int pc;
+	struct trace_event_buffer fbuffer;
 	int syscall_nr;
+
+	/*
+	 * Syscall probe called with preemption enabled, but the ring
+	 * buffer and per-cpu data require preemption to be disabled.
+	 */
+	might_fault();
+	guard(preempt_notrace)();
 
 	syscall_nr = trace_get_syscall_nr(current, regs);
 	if (syscall_nr < 0 || syscall_nr >= NR_syscalls)
 		return;
 
-	/* Here we're inside tp handler's rcu_read_lock_sched (__DO_TRACE()) */
-	trace_file = rcu_dereference_sched(tr->exit_syscall_files[syscall_nr]);
+	trace_file = READ_ONCE(tr->exit_syscall_files[syscall_nr]);
 	if (!trace_file)
 		return;
 
@@ -381,22 +372,15 @@ static void ftrace_syscall_exit(void *data, struct pt_regs *regs, long ret)
 	if (!sys_data)
 		return;
 
-	local_save_flags(irq_flags);
-	pc = preempt_count();
-
-	buffer = tr->trace_buffer.buffer;
-	event = trace_buffer_lock_reserve(buffer,
-			sys_data->exit_event->event.type, sizeof(*entry),
-			irq_flags, pc);
-	if (!event)
+	entry = trace_event_buffer_reserve(&fbuffer, trace_file, sizeof(*entry));
+	if (!entry)
 		return;
 
-	entry = ring_buffer_event_data(event);
+	entry = ring_buffer_event_data(fbuffer.event);
 	entry->nr = syscall_nr;
 	entry->ret = syscall_get_return_value(current, regs);
 
-	event_trigger_unlock_commit(trace_file, buffer, event, entry,
-				    irq_flags, pc, 0);
+	trace_event_buffer_commit(&fbuffer);
 }
 
 static int reg_event_syscall_enter(struct trace_event_file *file,
@@ -413,7 +397,7 @@ static int reg_event_syscall_enter(struct trace_event_file *file,
 	if (!tr->sys_refcount_enter)
 		ret = register_trace_sys_enter(ftrace_syscall_enter, tr);
 	if (!ret) {
-		rcu_assign_pointer(tr->enter_syscall_files[num], file);
+		WRITE_ONCE(tr->enter_syscall_files[num], file);
 		tr->sys_refcount_enter++;
 	}
 	mutex_unlock(&syscall_trace_lock);
@@ -431,7 +415,7 @@ static void unreg_event_syscall_enter(struct trace_event_file *file,
 		return;
 	mutex_lock(&syscall_trace_lock);
 	tr->sys_refcount_enter--;
-	RCU_INIT_POINTER(tr->enter_syscall_files[num], NULL);
+	WRITE_ONCE(tr->enter_syscall_files[num], NULL);
 	if (!tr->sys_refcount_enter)
 		unregister_trace_sys_enter(ftrace_syscall_enter, tr);
 	mutex_unlock(&syscall_trace_lock);
@@ -451,7 +435,7 @@ static int reg_event_syscall_exit(struct trace_event_file *file,
 	if (!tr->sys_refcount_exit)
 		ret = register_trace_sys_exit(ftrace_syscall_exit, tr);
 	if (!ret) {
-		rcu_assign_pointer(tr->exit_syscall_files[num], file);
+		WRITE_ONCE(tr->exit_syscall_files[num], file);
 		tr->sys_refcount_exit++;
 	}
 	mutex_unlock(&syscall_trace_lock);
@@ -469,7 +453,7 @@ static void unreg_event_syscall_exit(struct trace_event_file *file,
 		return;
 	mutex_lock(&syscall_trace_lock);
 	tr->sys_refcount_exit--;
-	RCU_INIT_POINTER(tr->exit_syscall_files[num], NULL);
+	WRITE_ONCE(tr->exit_syscall_files[num], NULL);
 	if (!tr->sys_refcount_exit)
 		unregister_trace_sys_exit(ftrace_syscall_exit, tr);
 	mutex_unlock(&syscall_trace_lock);
@@ -500,6 +484,13 @@ static int __init init_syscall_trace(struct trace_event_call *call)
 	return id;
 }
 
+static struct trace_event_fields __refdata syscall_enter_fields_array[] = {
+	SYSCALL_FIELD(int, __syscall_nr),
+	{ .type = TRACE_FUNCTION_TYPE,
+	  .define_fields = syscall_enter_define_fields },
+	{}
+};
+
 struct trace_event_functions enter_syscall_print_funcs = {
 	.trace		= print_syscall_enter,
 };
@@ -511,7 +502,7 @@ struct trace_event_functions exit_syscall_print_funcs = {
 struct trace_event_class __refdata event_class_syscall_enter = {
 	.system		= "syscalls",
 	.reg		= syscall_enter_register,
-	.define_fields	= syscall_enter_define_fields,
+	.fields_array	= syscall_enter_fields_array,
 	.get_fields	= syscall_get_enter_fields,
 	.raw_init	= init_syscall_trace,
 };
@@ -519,7 +510,11 @@ struct trace_event_class __refdata event_class_syscall_enter = {
 struct trace_event_class __refdata event_class_syscall_exit = {
 	.system		= "syscalls",
 	.reg		= syscall_exit_register,
-	.define_fields	= syscall_exit_define_fields,
+	.fields_array	= (struct trace_event_fields[]){
+		SYSCALL_FIELD(int, __syscall_nr),
+		SYSCALL_FIELD(long, ret),
+		{}
+	},
 	.fields		= LIST_HEAD_INIT(event_class_syscall_exit.fields),
 	.raw_init	= init_syscall_trace,
 };
@@ -534,12 +529,16 @@ void __init init_ftrace_syscalls(void)
 	struct syscall_metadata *meta;
 	unsigned long addr;
 	int i;
+	void *ret;
 
-	syscalls_metadata = kcalloc(NR_syscalls, sizeof(*syscalls_metadata),
-				    GFP_KERNEL);
-	if (!syscalls_metadata) {
-		WARN_ON(1);
-		return;
+	if (!IS_ENABLED(CONFIG_HAVE_SPARSE_SYSCALL_NR)) {
+		syscalls_metadata = kcalloc(NR_syscalls,
+					sizeof(*syscalls_metadata),
+					GFP_KERNEL);
+		if (!syscalls_metadata) {
+			WARN_ON(1);
+			return;
+		}
 	}
 
 	for (i = 0; i < NR_syscalls; i++) {
@@ -549,7 +548,16 @@ void __init init_ftrace_syscalls(void)
 			continue;
 
 		meta->syscall_nr = i;
-		syscalls_metadata[i] = meta;
+
+		if (!IS_ENABLED(CONFIG_HAVE_SPARSE_SYSCALL_NR)) {
+			syscalls_metadata[i] = meta;
+		} else {
+			ret = xa_store(&syscalls_metadata_sparse, i, meta,
+					GFP_KERNEL);
+			WARN(xa_is_err(ret),
+				"Syscall memory allocation failed\n");
+		}
+
 	}
 }
 
@@ -565,12 +573,16 @@ static int perf_call_bpf_enter(struct trace_event_call *call, struct pt_regs *re
 			       struct syscall_trace_enter *rec)
 {
 	struct syscall_tp_t {
-		unsigned long long regs;
-		unsigned long syscall_nr;
+		struct trace_entry ent;
+		int syscall_nr;
 		unsigned long args[SYSCALL_DEFINE_MAXARGS];
-	} param;
+	} __aligned(8) param;
 	int i;
 
+	BUILD_BUG_ON(sizeof(param.ent) < sizeof(void *));
+
+	/* bpf prog requires 'regs' to be the first member in the ctx (a.k.a. &param) */
+	perf_fetch_caller_regs(regs);
 	*(struct pt_regs **)&param = regs;
 	param.syscall_nr = rec->nr;
 	for (i = 0; i < sys_data->nb_args; i++)
@@ -582,11 +594,20 @@ static void perf_syscall_enter(void *ignore, struct pt_regs *regs, long id)
 {
 	struct syscall_metadata *sys_data;
 	struct syscall_trace_enter *rec;
+	struct pt_regs *fake_regs;
 	struct hlist_head *head;
+	unsigned long args[6];
 	bool valid_prog_array;
 	int syscall_nr;
 	int rctx;
 	int size;
+
+	/*
+	 * Syscall probe called with preemption enabled, but the ring
+	 * buffer and per-cpu data require preemption to be disabled.
+	 */
+	might_fault();
+	guard(preempt_notrace)();
 
 	syscall_nr = trace_get_syscall_nr(current, regs);
 	if (syscall_nr < 0 || syscall_nr >= NR_syscalls)
@@ -608,16 +629,16 @@ static void perf_syscall_enter(void *ignore, struct pt_regs *regs, long id)
 	size = ALIGN(size + sizeof(u32), sizeof(u64));
 	size -= sizeof(u32);
 
-	rec = perf_trace_buf_alloc(size, NULL, &rctx);
+	rec = perf_trace_buf_alloc(size, &fake_regs, &rctx);
 	if (!rec)
 		return;
 
 	rec->nr = syscall_nr;
-	syscall_get_arguments(current, regs, 0, sys_data->nb_args,
-			       (unsigned long *)&rec->args);
+	syscall_get_arguments(current, regs, args);
+	memcpy(&rec->args, args, sizeof(unsigned long) * sys_data->nb_args);
 
 	if ((valid_prog_array &&
-	     !perf_call_bpf_enter(sys_data->enter_event, regs, sys_data, rec)) ||
+	     !perf_call_bpf_enter(sys_data->enter_event, fake_regs, sys_data, rec)) ||
 	    hlist_empty(head)) {
 		perf_swevent_put_recursion_context(rctx);
 		return;
@@ -666,11 +687,13 @@ static int perf_call_bpf_exit(struct trace_event_call *call, struct pt_regs *reg
 			      struct syscall_trace_exit *rec)
 {
 	struct syscall_tp_t {
-		unsigned long long regs;
-		unsigned long syscall_nr;
+		struct trace_entry ent;
+		int syscall_nr;
 		unsigned long ret;
-	} param;
+	} __aligned(8) param;
 
+	/* bpf prog requires 'regs' to be the first member in the ctx (a.k.a. &param) */
+	perf_fetch_caller_regs(regs);
 	*(struct pt_regs **)&param = regs;
 	param.syscall_nr = rec->nr;
 	param.ret = rec->ret;
@@ -681,11 +704,19 @@ static void perf_syscall_exit(void *ignore, struct pt_regs *regs, long ret)
 {
 	struct syscall_metadata *sys_data;
 	struct syscall_trace_exit *rec;
+	struct pt_regs *fake_regs;
 	struct hlist_head *head;
 	bool valid_prog_array;
 	int syscall_nr;
 	int rctx;
 	int size;
+
+	/*
+	 * Syscall probe called with preemption enabled, but the ring
+	 * buffer and per-cpu data require preemption to be disabled.
+	 */
+	might_fault();
+	guard(preempt_notrace)();
 
 	syscall_nr = trace_get_syscall_nr(current, regs);
 	if (syscall_nr < 0 || syscall_nr >= NR_syscalls)
@@ -706,7 +737,7 @@ static void perf_syscall_exit(void *ignore, struct pt_regs *regs, long ret)
 	size = ALIGN(sizeof(*rec) + sizeof(u32), sizeof(u64));
 	size -= sizeof(u32);
 
-	rec = perf_trace_buf_alloc(size, NULL, &rctx);
+	rec = perf_trace_buf_alloc(size, &fake_regs, &rctx);
 	if (!rec)
 		return;
 
@@ -714,7 +745,7 @@ static void perf_syscall_exit(void *ignore, struct pt_regs *regs, long ret)
 	rec->ret = syscall_get_return_value(current, regs);
 
 	if ((valid_prog_array &&
-	     !perf_call_bpf_exit(sys_data->exit_event, regs, rec)) ||
+	     !perf_call_bpf_exit(sys_data->exit_event, fake_regs, rec)) ||
 	    hlist_empty(head)) {
 		perf_swevent_put_recursion_context(rctx);
 		return;

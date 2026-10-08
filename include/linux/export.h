@@ -1,87 +1,42 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef _LINUX_EXPORT_H
 #define _LINUX_EXPORT_H
 
-/*
- * Export symbols from the kernel to modules.  Forked from module.h
- * to reduce the amount of pointless cruft we feed to gcc when only
- * exporting a simple symbol or two.
- *
- * Try not to add #includes here.  It slows compilation and makes kernel
- * hackers place grumpy comments in header files.
- */
-
-#ifndef __ASSEMBLY__
-#ifdef MODULE
-extern struct module __this_module;
-#define THIS_MODULE (&__this_module)
-#else
-#define THIS_MODULE ((struct module *)0)
-#endif
-
-#ifdef CONFIG_MODULES
-
-#if defined(__KERNEL__) && !defined(__GENKSYMS__)
-#ifdef CONFIG_MODVERSIONS
-/* Mark the CRC weak since genksyms apparently decides not to
- * generate a checksums for some symbols */
-#if defined(CONFIG_MODULE_REL_CRCS)
-#define __CRC_SYMBOL(sym, sec)						\
-	asm("	.section \"___kcrctab" sec "+" #sym "\", \"a\"	\n"	\
-	    "	.weak	__crc_" #sym "				\n"	\
-	    "	.long	__crc_" #sym " - .			\n"	\
-	    "	.previous					\n");
-#else
-#define __CRC_SYMBOL(sym, sec)						\
-	asm("	.section \"___kcrctab" sec "+" #sym "\", \"a\"	\n"	\
-	    "	.weak	__crc_" #sym "				\n"	\
-	    "	.long	__crc_" #sym "				\n"	\
-	    "	.previous					\n");
-#endif
-#else
-#define __CRC_SYMBOL(sym, sec)
-#endif
-
-#ifdef CONFIG_HAVE_ARCH_PREL32_RELOCATIONS
 #include <linux/compiler.h>
+#include <linux/linkage.h>
+#include <linux/stringify.h>
+
 /*
- * Emit the ksymtab entry as a pair of relative references: this reduces
- * the size by half on 64-bit architectures, and eliminates the need for
- * absolute relocations that require runtime processing on relocatable
- * kernels.
+ * This comment block is used by fixdep. Please do not remove.
+ *
+ * When CONFIG_MODVERSIONS is changed from n to y, all source files having
+ * EXPORT_SYMBOL variants must be re-compiled because genksyms is run as a
+ * side effect of the *.o build rule.
  */
-#define __KSYMTAB_ENTRY(sym, sec)					\
-	__ADDRESSABLE(sym)						\
-	asm("	.section \"___ksymtab" sec "+" #sym "\", \"a\"	\n"	\
-	    "	.balign	8					\n"	\
-	    "__ksymtab_" #sym ":				\n"	\
-	    "	.long	" #sym "- .				\n"	\
-	    "	.long	__kstrtab_" #sym "- .			\n"	\
-	    "	.previous					\n")
 
-struct kernel_symbol {
-	int value_offset;
-	int name_offset;
-};
+#ifdef CONFIG_64BIT
+#define __EXPORT_SYMBOL_REF(sym)			\
+	.balign 8				ASM_NL	\
+	.quad sym
 #else
-#define __KSYMTAB_ENTRY(sym, sec)					\
-	static const struct kernel_symbol __ksymtab_##sym		\
-	__attribute__((section("___ksymtab" sec "+" #sym), used))	\
-	= { (unsigned long)&sym, __kstrtab_##sym }
-
-struct kernel_symbol {
-	unsigned long value;
-	const char *name;
-};
+#define __EXPORT_SYMBOL_REF(sym)			\
+	.balign 4				ASM_NL	\
+	.long sym
 #endif
 
-/* For every exported symbol, place a struct in the __ksymtab section */
-#define ___EXPORT_SYMBOL(sym, sec)					\
-	extern typeof(sym) sym;						\
-	__CRC_SYMBOL(sym, sec)						\
-	static const char __kstrtab_##sym[]				\
-	__attribute__((section("__ksymtab_strings"), used, aligned(1)))	\
-	= #sym;								\
-	__KSYMTAB_ENTRY(sym, sec)
+/*
+ * LLVM integrated assembler cam merge adjacent string literals (like
+ * C and GNU-as) passed to '.ascii', but not to '.asciz' and chokes on:
+ *
+ *   .asciz "MODULE_" "kvm" ;
+ */
+#define ___EXPORT_SYMBOL(sym, license, ns...)		\
+	.section ".export_symbol","a"		ASM_NL	\
+	__export_symbol_##sym:			ASM_NL	\
+		.asciz license			ASM_NL	\
+		.ascii ns "\0"			ASM_NL	\
+		__EXPORT_SYMBOL_REF(sym)	ASM_NL	\
+	.previous
 
 #if defined(__DISABLE_EXPORTS)
 
@@ -90,64 +45,52 @@ struct kernel_symbol {
  * be reused in other execution contexts such as the UEFI stub or the
  * decompressor.
  */
-#define __EXPORT_SYMBOL(sym, sec)
+#define __EXPORT_SYMBOL(sym, license, ns)
 
-#elif defined(__KSYM_DEPS__)
+#elif defined(__GENKSYMS__)
 
+#define __EXPORT_SYMBOL(sym, license, ns)	__GENKSYMS_EXPORT_SYMBOL(sym)
+
+#elif defined(__ASSEMBLY__)
+
+#define __EXPORT_SYMBOL(sym, license, ns) \
+	___EXPORT_SYMBOL(sym, license, ns)
+
+#else
+
+#ifdef CONFIG_GENDWARFKSYMS
 /*
- * For fine grained build dependencies, we want to tell the build system
- * about each possible exported symbol even if they're not actually exported.
- * We use a string pattern that is unlikely to be valid code that the build
- * system filters out from the preprocessor output (see ksym_dep_filter
- * in scripts/Kbuild.include).
+ * With CONFIG_GENDWARFKSYMS, ensure the compiler emits debugging
+ * information for all exported symbols, including those defined in
+ * different TUs, by adding a __gendwarfksyms_ptr_<symbol> pointer
+ * that's discarded during the final link.
  */
-#define __EXPORT_SYMBOL(sym, sec)	=== __KSYM_##sym ===
-
-#elif defined(CONFIG_TRIM_UNUSED_KSYMS) && !defined(MODULE)
-
-#include <generated/autoksyms.h>
-
-#define __EXPORT_SYMBOL(sym, sec)				\
-	__cond_export_sym(sym, sec, __is_defined(__KSYM_##sym))
-#define __cond_export_sym(sym, sec, conf)			\
-	___cond_export_sym(sym, sec, conf)
-#define ___cond_export_sym(sym, sec, enabled)			\
-	__cond_export_sym_##enabled(sym, sec)
-#define __cond_export_sym_1(sym, sec) ___EXPORT_SYMBOL(sym, sec)
-#define __cond_export_sym_0(sym, sec) /* nothing */
-
+#define __GENDWARFKSYMS_EXPORT(sym)				\
+	static typeof(sym) *__gendwarfksyms_ptr_##sym __used	\
+		__section(".discard.gendwarfksyms") = &sym;
 #else
-#define __EXPORT_SYMBOL ___EXPORT_SYMBOL
+#define __GENDWARFKSYMS_EXPORT(sym)
 #endif
 
-#define EXPORT_SYMBOL(sym)					\
-	__EXPORT_SYMBOL(sym, "")
+#define __EXPORT_SYMBOL(sym, license, ns)			\
+	extern typeof(sym) sym;					\
+	__ADDRESSABLE(sym)					\
+	__GENDWARFKSYMS_EXPORT(sym)				\
+	asm(__stringify(___EXPORT_SYMBOL(sym, license, ns)))
 
-#define EXPORT_SYMBOL_GPL(sym)					\
-	__EXPORT_SYMBOL(sym, "_gpl")
-
-#define EXPORT_SYMBOL_GPL_FUTURE(sym)				\
-	__EXPORT_SYMBOL(sym, "_gpl_future")
-
-#ifdef CONFIG_UNUSED_SYMBOLS
-#define EXPORT_UNUSED_SYMBOL(sym) __EXPORT_SYMBOL(sym, "_unused")
-#define EXPORT_UNUSED_SYMBOL_GPL(sym) __EXPORT_SYMBOL(sym, "_unused_gpl")
-#else
-#define EXPORT_UNUSED_SYMBOL(sym)
-#define EXPORT_UNUSED_SYMBOL_GPL(sym)
 #endif
 
-#endif	/* __GENKSYMS__ */
+#ifdef DEFAULT_SYMBOL_NAMESPACE
+#define _EXPORT_SYMBOL(sym, license)	__EXPORT_SYMBOL(sym, license, DEFAULT_SYMBOL_NAMESPACE)
+#else
+#define _EXPORT_SYMBOL(sym, license)	__EXPORT_SYMBOL(sym, license, "")
+#endif
 
-#else /* !CONFIG_MODULES... */
+#define EXPORT_SYMBOL(sym)		_EXPORT_SYMBOL(sym, "")
+#define EXPORT_SYMBOL_GPL(sym)		_EXPORT_SYMBOL(sym, "GPL")
+#define EXPORT_SYMBOL_NS(sym, ns)	__EXPORT_SYMBOL(sym, "", ns)
+#define EXPORT_SYMBOL_NS_GPL(sym, ns)	__EXPORT_SYMBOL(sym, "GPL", ns)
 
-#define EXPORT_SYMBOL(sym)
-#define EXPORT_SYMBOL_GPL(sym)
-#define EXPORT_SYMBOL_GPL_FUTURE(sym)
-#define EXPORT_UNUSED_SYMBOL(sym)
-#define EXPORT_UNUSED_SYMBOL_GPL(sym)
-
-#endif /* CONFIG_MODULES */
-#endif /* !__ASSEMBLY__ */
+#define EXPORT_SYMBOL_FOR_MODULES(sym, mods) __EXPORT_SYMBOL(sym, "GPL", "module:" mods)
 
 #endif /* _LINUX_EXPORT_H */

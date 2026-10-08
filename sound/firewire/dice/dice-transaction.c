@@ -1,10 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * dice_transaction.c - a part of driver for Dice based devices
  *
  * Copyright (c) Clemens Ladisch
  * Copyright (c) 2014 Takashi Sakamoto
- *
- * Licensed under the terms of the GNU General Public License, version 2.
  */
 
 #include "dice.h"
@@ -137,7 +136,6 @@ static void dice_notification(struct fw_card *card, struct fw_request *request,
 {
 	struct snd_dice *dice = callback_data;
 	u32 bits;
-	unsigned long flags;
 
 	if (tcode != TCODE_WRITE_QUADLET_REQUEST) {
 		fw_send_response(card, request, RCODE_TYPE_ERROR);
@@ -150,13 +148,13 @@ static void dice_notification(struct fw_card *card, struct fw_request *request,
 
 	bits = be32_to_cpup(data);
 
-	spin_lock_irqsave(&dice->lock, flags);
-	dice->notification_bits |= bits;
-	spin_unlock_irqrestore(&dice->lock, flags);
+	scoped_guard(spinlock_irqsave, &dice->lock) {
+		dice->notification_bits |= bits;
+	}
 
 	fw_send_response(card, request, RCODE_COMPLETE);
 
-	if (bits & NOTIFY_LOCK_CHG)
+	if (bits & NOTIFY_CLOCK_ACCEPTED)
 		complete(&dice->clock_accepted);
 	wake_up(&dice->hwdep_wait);
 }

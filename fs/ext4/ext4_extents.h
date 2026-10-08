@@ -31,13 +31,6 @@
 #define CHECK_BINSEARCH__
 
 /*
- * If EXT_STATS is defined then stats numbers are collected.
- * These number will be displayed at umount time.
- */
-#define EXT_STATS_
-
-
-/*
  * ext4_inode has i_block array (60 bytes total).
  * The first 12 bytes store ext4_extent_header;
  * the remainder stores an array of ext4_extent.
@@ -120,6 +113,19 @@ struct ext4_ext_path {
 };
 
 /*
+ * Used to record a portion of a cluster found at the beginning or end
+ * of an extent while traversing the extent tree during space removal.
+ * A partial cluster may be removed if it does not contain blocks shared
+ * with extents that aren't being deleted (tofree state).  Otherwise,
+ * it cannot be removed (nofree state).
+ */
+struct partial_cluster {
+	ext4_fsblk_t pclu;  /* physical cluster number */
+	ext4_lblk_t lblk;   /* logical block number within logical cluster */
+	enum {initial, tofree, nofree} state;
+};
+
+/*
  * structure for external API
  */
 
@@ -160,10 +166,11 @@ struct ext4_ext_path {
 #define EXT_MAX_EXTENT(__hdr__)	\
 	((le16_to_cpu((__hdr__)->eh_max)) ? \
 	((EXT_FIRST_EXTENT((__hdr__)) + le16_to_cpu((__hdr__)->eh_max) - 1)) \
-					: 0)
+					: NULL)
 #define EXT_MAX_INDEX(__hdr__) \
 	((le16_to_cpu((__hdr__)->eh_max)) ? \
-	((EXT_FIRST_INDEX((__hdr__)) + le16_to_cpu((__hdr__)->eh_max) - 1)) : 0)
+	((EXT_FIRST_INDEX((__hdr__)) + le16_to_cpu((__hdr__)->eh_max) - 1)) \
+					: NULL)
 
 static inline struct ext4_extent_header *ext_inode_hdr(struct inode *inode)
 {
@@ -256,11 +263,6 @@ static inline void ext4_idx_store_pblock(struct ext4_extent_idx *ix,
 	ix->ei_leaf_hi = cpu_to_le16((unsigned long) ((pb >> 31) >> 1) &
 				     0xffff);
 }
-
-#define ext4_ext_dirty(handle, inode, path) \
-		__ext4_ext_dirty(__func__, __LINE__, (handle), (inode), (path))
-int __ext4_ext_dirty(const char *where, unsigned int line, handle_t *handle,
-		     struct inode *inode, struct ext4_ext_path *path);
 
 #endif /* _EXT4_EXTENTS */
 

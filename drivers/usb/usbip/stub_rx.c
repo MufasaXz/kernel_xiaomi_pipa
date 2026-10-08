@@ -18,9 +18,9 @@ static int is_clear_halt_cmd(struct urb *urb)
 
 	req = (struct usb_ctrlrequest *) urb->setup_packet;
 
-	 return (req->bRequest == USB_REQ_CLEAR_FEATURE) &&
-		 (req->bRequestType == USB_RECIP_ENDPOINT) &&
-		 (req->wValue == USB_ENDPOINT_HALT);
+	return (req->bRequest == USB_REQ_CLEAR_FEATURE) &&
+	       (req->bRequestType == USB_RECIP_ENDPOINT) &&
+	       (req->wValue == USB_ENDPOINT_HALT);
 }
 
 static int is_set_interface_cmd(struct urb *urb)
@@ -269,7 +269,7 @@ static int stub_recv_cmd_unlink(struct stub_device *sdev,
 		return 0;
 	}
 
-	usbip_dbg_stub_rx("seqnum %d is not pending\n",
+	usbip_dbg_stub_rx("seqnum %u is not pending\n",
 			  pdu->u.cmd_unlink.seqnum);
 
 	/*
@@ -435,7 +435,7 @@ static void masking_bogus_flags(struct urb *urb)
 	case USB_ENDPOINT_XFER_BULK:
 		if (is_out)
 			allowed |= URB_ZERO_PACKET;
-		/* FALLTHROUGH */
+		fallthrough;
 	default:			/* all non-iso endpoints */
 		if (!is_out)
 			allowed |= URB_SHORT_NOT_OK;
@@ -473,7 +473,7 @@ static void stub_recv_cmd_submit(struct stub_device *sdev,
 	int nents;
 	int num_urbs = 1;
 	int pipe = get_pipe(sdev, pdu);
-	int use_sg = pdu->u.cmd_submit.transfer_flags & URB_DMA_MAP_SG;
+	int use_sg = pdu->u.cmd_submit.transfer_flags & USBIP_URB_DMA_MAP_SG;
 	int support_sg = 1;
 	int np = 0;
 	int ret, i;
@@ -524,7 +524,7 @@ static void stub_recv_cmd_submit(struct stub_device *sdev,
 				num_urbs = nents;
 				priv->completed_urbs = 0;
 				pdu->u.cmd_submit.transfer_flags &=
-								~URB_DMA_MAP_SG;
+								~USBIP_URB_DMA_MAP_SG;
 			}
 		} else {
 			buffer = kzalloc(buf_len, GFP_KERNEL);

@@ -48,13 +48,14 @@ struct xen_pcibk_dev_data {
 	struct list_head config_fields;
 	struct pci_saved_state *pci_saved_state;
 	unsigned int permissive:1;
+	unsigned int allow_interrupt_control:1;
 	unsigned int warned_on_write:1;
 	unsigned int enable_intx:1;
 	unsigned int isr_on:1; /* Whether the IRQ handler is installed. */
 	unsigned int ack_intr:1; /* .. and ACK-ing */
 	unsigned long handled;
 	unsigned int irq; /* Saved in case device transitions to MSI/MSI-X */
-	char irq_name[0]; /* xen-pcibk[000:04:00.0] */
+	char irq_name[]; /* xen-pcibk[000:04:00.0] */
 };
 
 /* Used by XenBus and xen_pcibk_ops.c */
@@ -66,9 +67,12 @@ extern struct list_head xen_pcibk_quirks;
 struct pci_dev *pcistub_get_pci_dev_by_slot(struct xen_pcibk_device *pdev,
 					    int domain, int bus,
 					    int slot, int func);
-struct pci_dev *pcistub_get_pci_dev(struct xen_pcibk_device *pdev,
-				    struct pci_dev *dev);
 void pcistub_put_pci_dev(struct pci_dev *dev);
+
+static inline bool xen_pcibk_pv_support(void)
+{
+	return IS_ENABLED(CONFIG_XEN_PCIDEV_BACKEND);
+}
 
 /* Ensure a device is turned off or reset */
 void xen_pcibk_reset_device(struct pci_dev *pdev);
@@ -194,9 +198,4 @@ static inline void xen_pcibk_lateeoi(struct xen_pcibk_device *pdev,
 
 int xen_pcibk_xenbus_register(void);
 void xen_pcibk_xenbus_unregister(void);
-
-extern int verbose_request;
 #endif
-
-/* Handles shared IRQs that can to device domain and control domain. */
-void xen_pcibk_irq_handler(struct pci_dev *dev, int reset);

@@ -38,6 +38,7 @@
 #include <linux/if_vlan.h>
 #include <linux/udp.h>
 #include <linux/highmem.h>
+#include <linux/skbuff_ref.h>
 
 #include <net/tcp.h>
 
@@ -96,6 +97,13 @@ unsigned int xenvif_hash_cache_size = XENVIF_HASH_CACHE_SIZE_DEFAULT;
 module_param_named(hash_cache_size, xenvif_hash_cache_size, uint, 0644);
 MODULE_PARM_DESC(hash_cache_size, "Number of flows in the hash cache");
 
+/* The module parameter tells that we have to put data
+ * for xen-netfront with the XDP_PACKET_HEADROOM offset
+ * needed for XDP processing
+ */
+bool provides_xdp_headroom = true;
+module_param(provides_xdp_headroom, bool, 0644);
+
 static void xenvif_idx_release(struct xenvif_queue *queue, u16 pending_idx,
 			       s8 status);
 
@@ -125,7 +133,7 @@ static inline unsigned long idx_to_kaddr(struct xenvif_queue *queue,
 
 /* Find the containing VIF's structure from a pointer in pending_tx_info array
  */
-static inline struct xenvif_queue *ubuf_to_queue(const struct ubuf_info *ubuf)
+static inline struct xenvif_queue *ubuf_to_queue(const struct ubuf_info_msgzc *ubuf)
 {
 	u16 pending_idx = ubuf->desc;
 	struct pending_tx_info *temp =
@@ -137,12 +145,12 @@ static inline struct xenvif_queue *ubuf_to_queue(const struct ubuf_info *ubuf)
 
 static u16 frag_get_pending_idx(skb_frag_t *frag)
 {
-	return (u16)frag->page_offset;
+	return (u16)skb_frag_off(frag);
 }
 
 static void frag_set_pending_idx(skb_frag_t *frag, u16 pending_idx)
 {
-	frag->page_offset = pending_idx;
+	skb_frag_off_set(frag, pending_idx);
 }
 
 static inline pending_ring_idx_t pending_index(unsigned i)
@@ -190,7 +198,8 @@ static void tx_add_credit(struct xenvif_queue *queue)
 
 void xenvif_tx_credit_callback(struct timer_list *t)
 {
-	struct xenvif_queue *queue = from_timer(queue, t, credit_timeout);
+	struct xenvif_queue *queue = timer_container_of(queue, t,
+							credit_timeout);
 	tx_add_credit(queue);
 	xenvif_napi_schedule_or_enable_events(queue);
 }
@@ -665,8 +674,8 @@ check_frags:
 	}
 
 	if (skb_has_frag_list(skb) && !first_shinfo) {
-		first_shinfo = skb_shinfo(skb);
-		shinfo = skb_shinfo(skb_shinfo(skb)->frag_list);
+		first_shinfo = shinfo;
+		shinfo = skb_shinfo(shinfo->frag_list);
 		nr_frags = shinfo->nr_frags;
 
 		goto check_frags;
@@ -703,7 +712,7 @@ static void xenvif_fill_frags(struct xenvif_queue *queue, struct sk_buff *skb)
 		prev_pending_idx = pending_idx;
 
 		txp = &queue->pending_tx_info[pending_idx].req;
-		page = virt_to_page(idx_to_kaddr(queue, pending_idx));
+		page = virt_to_page((void *)idx_to_kaddr(queue, pending_idx));
 		__skb_fill_page_desc(skb, i, page, txp->offset, txp->size);
 		skb->len += txp->size;
 		skb->data_len += txp->size;
@@ -918,11 +927,9 @@ static void xenvif_tx_build_gops(struct xenvif_queue *queue,
 		struct xen_netif_tx_request txfrags[XEN_NETBK_LEGACY_SLOTS_MAX];
 		struct xen_netif_extra_info extras[XEN_NETIF_EXTRA_TYPE_MAX-1];
 		unsigned int extra_count;
-		u16 pending_idx;
 		RING_IDX idx;
 		int work_to_do;
 		unsigned int data_len;
-		pending_ring_idx_t index;
 
 		if (queue->tx.sring->req_prod - queue->tx.req_cons >
 		    XEN_NETIF_TX_RING_SIZE) {
@@ -935,7 +942,7 @@ static void xenvif_tx_build_gops(struct xenvif_queue *queue,
 			break;
 		}
 
-		work_to_do = RING_HAS_UNCONSUMED_REQUESTS(&queue->tx);
+		work_to_do = XEN_RING_NR_UNCONSUMED_REQUESTS(&queue->tx);
 		if (!work_to_do)
 			break;
 
@@ -1013,9 +1020,6 @@ static void xenvif_tx_build_gops(struct xenvif_queue *queue,
 			xenvif_fatal_tx_err(queue->vif);
 			break;
 		}
-
-		index = pending_index(queue->pending_cons);
-		pending_idx = queue->pending_ring[index];
 
 		if (ret >= XEN_NETBK_LEGACY_SLOTS_MAX - 1 && data_len < txreq.size)
 			data_len = txreq.size;
@@ -1097,10 +1101,6 @@ static void xenvif_tx_build_gops(struct xenvif_queue *queue,
 		__skb_queue_tail(&queue->tx_queue, skb);
 
 		queue->tx.req_cons = idx;
-
-		if ((*map_ops >= ARRAY_SIZE(queue->tx_map_ops)) ||
-		    (*copy_ops >= ARRAY_SIZE(queue->tx_copy_ops)))
-			break;
 	}
 
 	return;
@@ -1137,7 +1137,7 @@ static int xenvif_handle_frag_list(struct xenvif_queue *queue, struct sk_buff *s
 			int j;
 			skb->truesize += skb->data_len;
 			for (j = 0; j < i; j++)
-				put_page(frags[j].page.p);
+				put_page(skb_frag_page(&frags[j]));
 			return -ENOMEM;
 		}
 
@@ -1149,9 +1149,7 @@ static int xenvif_handle_frag_list(struct xenvif_queue *queue, struct sk_buff *s
 			BUG();
 
 		offset += len;
-		frags[i].page.p = page;
-		frags[i].page_offset = 0;
-		skb_frag_size_set(&frags[i], len);
+		skb_frag_fill_page_desc(&frags[i], page, 0, len);
 	}
 
 	/* Release all the original (foreign) frags. */
@@ -1160,7 +1158,7 @@ static int xenvif_handle_frag_list(struct xenvif_queue *queue, struct sk_buff *s
 	uarg = skb_shinfo(skb)->destructor_arg;
 	/* increase inflight counter to offset decrement in callback */
 	atomic_inc(&queue->inflight_packets);
-	uarg->callback(uarg, true);
+	uarg->ops->complete(NULL, uarg, true);
 	skb_shinfo(skb)->destructor_arg = NULL;
 
 	/* Fill the skb with the new (local) frags. */
@@ -1238,17 +1236,24 @@ static int xenvif_tx_submit(struct xenvif_queue *queue)
 			continue;
 		}
 
-		skb_probe_transport_header(skb, 0);
+		skb_probe_transport_header(skb);
 
 		/* If the packet is GSO then we will have just set up the
 		 * transport header offset in checksum_setup so it's now
 		 * straightforward to calculate gso_segs.
 		 */
 		if (skb_is_gso(skb)) {
-			int mss = skb_shinfo(skb)->gso_size;
-			int hdrlen = skb_transport_header(skb) -
-				skb_mac_header(skb) +
-				tcp_hdrlen(skb);
+			int mss, hdrlen;
+
+			/* GSO implies having the L4 header. */
+			WARN_ON_ONCE(!skb_transport_header_was_set(skb));
+			if (unlikely(!skb_transport_header_was_set(skb))) {
+				kfree_skb(skb);
+				continue;
+			}
+
+			mss = skb_shinfo(skb)->gso_size;
+			hdrlen = skb_tcp_all_headers(skb);
 
 			skb_shinfo(skb)->gso_segs =
 				DIV_ROUND_UP(skb->len - hdrlen, mss);
@@ -1275,10 +1280,13 @@ static int xenvif_tx_submit(struct xenvif_queue *queue)
 	return work_done;
 }
 
-void xenvif_zerocopy_callback(struct ubuf_info *ubuf, bool zerocopy_success)
+static void xenvif_zerocopy_callback(struct sk_buff *skb,
+				     struct ubuf_info *ubuf_base,
+				     bool zerocopy_success)
 {
 	unsigned long flags;
 	pending_ring_idx_t index;
+	struct ubuf_info_msgzc *ubuf = uarg_to_msgzc(ubuf_base);
 	struct xenvif_queue *queue = ubuf_to_queue(ubuf);
 
 	/* This is the only place where we grab this lock, to protect callbacks
@@ -1287,7 +1295,7 @@ void xenvif_zerocopy_callback(struct ubuf_info *ubuf, bool zerocopy_success)
 	spin_lock_irqsave(&queue->callback_lock, flags);
 	do {
 		u16 pending_idx = ubuf->desc;
-		ubuf = (struct ubuf_info *) ubuf->ctx;
+		ubuf = (struct ubuf_info_msgzc *) ubuf->ctx;
 		BUG_ON(queue->dealloc_prod - queue->dealloc_cons >=
 			MAX_PENDING_REQS);
 		index = pending_index(queue->dealloc_prod);
@@ -1306,6 +1314,10 @@ void xenvif_zerocopy_callback(struct ubuf_info *ubuf, bool zerocopy_success)
 		queue->stats.tx_zerocopy_fail++;
 	xenvif_skb_zerocopy_complete(queue);
 }
+
+const struct ubuf_info_ops xenvif_ubuf_ops = {
+	.complete = xenvif_zerocopy_callback,
+};
 
 static inline void xenvif_tx_dealloc_action(struct xenvif_queue *queue)
 {
@@ -1533,8 +1545,8 @@ int xenvif_map_frontend_data_rings(struct xenvif_queue *queue,
 	void *addr;
 	struct xen_netif_tx_sring *txs;
 	struct xen_netif_rx_sring *rxs;
-
-	int err = -ENOMEM;
+	RING_IDX rsp_prod, req_prod;
+	int err;
 
 	err = xenbus_map_ring_valloc(xenvif_to_xenbus_device(queue->vif),
 				     &tx_ring_ref, 1, &addr);
@@ -1542,7 +1554,14 @@ int xenvif_map_frontend_data_rings(struct xenvif_queue *queue,
 		goto err;
 
 	txs = (struct xen_netif_tx_sring *)addr;
-	BACK_RING_INIT(&queue->tx, txs, XEN_PAGE_SIZE);
+	rsp_prod = READ_ONCE(txs->rsp_prod);
+	req_prod = READ_ONCE(txs->req_prod);
+
+	BACK_RING_ATTACH(&queue->tx, txs, rsp_prod, XEN_PAGE_SIZE);
+
+	err = -EIO;
+	if (req_prod - rsp_prod > RING_SIZE(&queue->tx))
+		goto err;
 
 	err = xenbus_map_ring_valloc(xenvif_to_xenbus_device(queue->vif),
 				     &rx_ring_ref, 1, &addr);
@@ -1550,7 +1569,14 @@ int xenvif_map_frontend_data_rings(struct xenvif_queue *queue,
 		goto err;
 
 	rxs = (struct xen_netif_rx_sring *)addr;
-	BACK_RING_INIT(&queue->rx, rxs, XEN_PAGE_SIZE);
+	rsp_prod = READ_ONCE(rxs->rsp_prod);
+	req_prod = READ_ONCE(rxs->req_prod);
+
+	BACK_RING_ATTACH(&queue->rx, rxs, rsp_prod, XEN_PAGE_SIZE);
+
+	err = -EIO;
+	if (req_prod - rsp_prod > RING_SIZE(&queue->rx))
+		goto err;
 
 	return 0;
 
@@ -1740,9 +1766,6 @@ static int __init netback_init(void)
 
 #ifdef CONFIG_DEBUG_FS
 	xen_netback_dbg_root = debugfs_create_dir("xen-netback", NULL);
-	if (IS_ERR_OR_NULL(xen_netback_dbg_root))
-		pr_warn("Init of debugfs returned %ld!\n",
-			PTR_ERR(xen_netback_dbg_root));
 #endif /* CONFIG_DEBUG_FS */
 
 	return 0;
@@ -1756,12 +1779,12 @@ module_init(netback_init);
 static void __exit netback_fini(void)
 {
 #ifdef CONFIG_DEBUG_FS
-	if (!IS_ERR_OR_NULL(xen_netback_dbg_root))
-		debugfs_remove_recursive(xen_netback_dbg_root);
+	debugfs_remove_recursive(xen_netback_dbg_root);
 #endif /* CONFIG_DEBUG_FS */
 	xenvif_xenbus_fini();
 }
 module_exit(netback_fini);
 
+MODULE_DESCRIPTION("Xen backend network device module");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_ALIAS("xen-backend:vif");

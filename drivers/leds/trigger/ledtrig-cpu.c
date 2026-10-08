@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * ledtrig-cpu.c - LED trigger based on CPU activity
  *
@@ -16,11 +17,6 @@
  *
  * Copyright 2011 Linus Walleij <linus.walleij@linaro.org>
  * Copyright 2011 - 2012 Bryan Wu <bryan.wu@canonical.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 
 #include <linux/kernel.h>
@@ -47,7 +43,7 @@ static atomic_t num_active_cpus = ATOMIC_INIT(0);
 
 /**
  * ledtrig_cpu - emit a CPU event as a trigger
- * @evt: CPU event to be emitted
+ * @ledevt: CPU event to be emitted
  *
  * Emit a CPU event on a CPU core, which will trigger a
  * bound LED to turn on or turn off.

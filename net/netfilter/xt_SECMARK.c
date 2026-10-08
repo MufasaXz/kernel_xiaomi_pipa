@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Module for modifying the secmark field of the skb, for use by
  * security subsystems.
@@ -6,11 +7,6 @@
  * (C) 1999-2001 Marc Boucher <marc@mbsi.ca>
  *
  * (C) 2006,2008 Red Hat, Inc., James Morris <jmorris@redhat.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/module.h>
@@ -25,16 +21,12 @@ MODULE_DESCRIPTION("Xtables: packet security mark modification");
 MODULE_ALIAS("ipt_SECMARK");
 MODULE_ALIAS("ip6t_SECMARK");
 
-#define PFX "SECMARK: "
-
 static u8 mode;
 
 static unsigned int
 secmark_tg(struct sk_buff *skb, const struct xt_secmark_target_info_v1 *info)
 {
 	u32 secmark = 0;
-
-	BUG_ON(info->mode != mode);
 
 	switch (mode) {
 	case SECMARK_MODE_SEL:
@@ -165,7 +157,7 @@ static struct xt_target secmark_tg_reg[] __read_mostly = {
 	{
 		.name		= "SECMARK",
 		.revision	= 0,
-		.family		= NFPROTO_UNSPEC,
+		.family		= NFPROTO_IPV4,
 		.checkentry	= secmark_tg_check_v0,
 		.destroy	= secmark_tg_destroy,
 		.target		= secmark_tg_v0,
@@ -175,7 +167,7 @@ static struct xt_target secmark_tg_reg[] __read_mostly = {
 	{
 		.name		= "SECMARK",
 		.revision	= 1,
-		.family		= NFPROTO_UNSPEC,
+		.family		= NFPROTO_IPV4,
 		.checkentry	= secmark_tg_check_v1,
 		.destroy	= secmark_tg_destroy,
 		.target		= secmark_tg_v1,
@@ -183,6 +175,29 @@ static struct xt_target secmark_tg_reg[] __read_mostly = {
 		.usersize	= offsetof(struct xt_secmark_target_info_v1, secid),
 		.me		= THIS_MODULE,
 	},
+#if IS_ENABLED(CONFIG_IP6_NF_IPTABLES)
+	{
+		.name		= "SECMARK",
+		.revision	= 0,
+		.family		= NFPROTO_IPV6,
+		.checkentry	= secmark_tg_check_v0,
+		.destroy	= secmark_tg_destroy,
+		.target		= secmark_tg_v0,
+		.targetsize	= sizeof(struct xt_secmark_target_info),
+		.me		= THIS_MODULE,
+	},
+	{
+		.name		= "SECMARK",
+		.revision	= 1,
+		.family		= NFPROTO_IPV6,
+		.checkentry	= secmark_tg_check_v1,
+		.destroy	= secmark_tg_destroy,
+		.target		= secmark_tg_v1,
+		.targetsize	= sizeof(struct xt_secmark_target_info_v1),
+		.usersize	= offsetof(struct xt_secmark_target_info_v1, secid),
+		.me		= THIS_MODULE,
+	},
+#endif
 };
 
 static int __init secmark_tg_init(void)

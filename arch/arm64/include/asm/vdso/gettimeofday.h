@@ -5,15 +5,17 @@
 #ifndef __ASM_VDSO_GETTIMEOFDAY_H
 #define __ASM_VDSO_GETTIMEOFDAY_H
 
+#ifdef __aarch64__
+
 #ifndef __ASSEMBLY__
 
+#include <asm/alternative.h>
+#include <asm/arch_timer.h>
+#include <asm/barrier.h>
 #include <asm/unistd.h>
-
-#define __VDSO_USE_SYSCALL		ULLONG_MAX
+#include <asm/sysreg.h>
 
 #define VDSO_HAS_CLOCK_GETRES		1
-
-#define VDSO_HAS_TIME			1
 
 static __always_inline
 int gettimeofday_fallback(struct __kernel_old_timeval *_tv,
@@ -67,38 +69,39 @@ int clock_getres_fallback(clockid_t _clkid, struct __kernel_timespec *_ts)
 	return ret;
 }
 
-static __always_inline u64 __arch_get_hw_counter(s32 clock_mode)
+static __always_inline u64 __arch_get_hw_counter(s32 clock_mode,
+						 const struct vdso_time_data *vd)
 {
-	u64 res;
-
 	/*
-	 * clock_mode == 0 implies that vDSO are enabled otherwise
-	 * fallback on syscall.
+	 * Core checks for mode already, so this raced against a concurrent
+	 * update. Return something. Core will do another round and then
+	 * see the mode change and fallback to the syscall.
 	 */
-	if (clock_mode)
-		return __VDSO_USE_SYSCALL;
+	if (clock_mode == VDSO_CLOCKMODE_NONE)
+		return 0;
 
-	/*
-	 * This isb() is required to prevent that the counter value
-	 * is speculated.
-	 */
-	isb();
-	asm volatile("mrs %0, cntvct_el0" : "=r" (res) :: "memory");
-	/*
-	 * This isb() is required to prevent that the seq lock is
-	 * speculated.#
-	 */
-	isb();
-
-	return res;
+	return __arch_counter_get_cntvct();
 }
 
-static __always_inline
-const struct vdso_data *__arch_get_vdso_data(void)
+#if IS_ENABLED(CONFIG_CC_IS_GCC) && IS_ENABLED(CONFIG_PAGE_SIZE_64KB)
+static __always_inline const struct vdso_time_data *__arch_get_vdso_u_time_data(void)
 {
-	return _vdso_data;
+	const struct vdso_time_data *ret = &vdso_u_time_data;
+
+	/* Work around invalid absolute relocations */
+	OPTIMIZER_HIDE_VAR(ret);
+
+	return ret;
 }
+#define __arch_get_vdso_u_time_data __arch_get_vdso_u_time_data
+#endif /* IS_ENABLED(CONFIG_CC_IS_GCC) && IS_ENABLED(CONFIG_PAGE_SIZE_64KB) */
 
 #endif /* !__ASSEMBLY__ */
+
+#else /* !__aarch64__ */
+
+#include "compat_gettimeofday.h"
+
+#endif /* __aarch64__ */
 
 #endif /* __ASM_VDSO_GETTIMEOFDAY_H */

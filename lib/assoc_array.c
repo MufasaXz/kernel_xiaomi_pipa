@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Generic associative array implementation.
  *
  * See Documentation/core-api/assoc_array.rst for information.
  *
  * Copyright (C) 2013 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public Licence
- * as published by the Free Software Foundation; either version
- * 2 of the Licence, or (at your option) any later version.
  */
 //#define DEBUG
 #include <linux/rcupdate.h>
@@ -745,8 +741,7 @@ all_leaves_cluster_together:
 	keylen = round_up(diff, ASSOC_ARRAY_KEY_CHUNK_SIZE);
 	keylen >>= ASSOC_ARRAY_KEY_CHUNK_SHIFT;
 
-	new_s0 = kzalloc(sizeof(struct assoc_array_shortcut) +
-			 keylen * sizeof(unsigned long), GFP_KERNEL);
+	new_s0 = kzalloc(struct_size(new_s0, index_key, keylen), GFP_KERNEL);
 	if (!new_s0)
 		return false;
 	edit->new_meta[2] = assoc_array_shortcut_to_ptr(new_s0);
@@ -853,8 +848,8 @@ static bool assoc_array_insert_mid_shortcut(struct assoc_array_edit *edit,
 		keylen = round_up(diff, ASSOC_ARRAY_KEY_CHUNK_SIZE);
 		keylen >>= ASSOC_ARRAY_KEY_CHUNK_SHIFT;
 
-		new_s0 = kzalloc(sizeof(struct assoc_array_shortcut) +
-				 keylen * sizeof(unsigned long), GFP_KERNEL);
+		new_s0 = kzalloc(struct_size(new_s0, index_key, keylen),
+				 GFP_KERNEL);
 		if (!new_s0)
 			return false;
 		edit->new_meta[1] = assoc_array_shortcut_to_ptr(new_s0);
@@ -868,7 +863,7 @@ static bool assoc_array_insert_mid_shortcut(struct assoc_array_edit *edit,
 		new_n0->parent_slot = 0;
 
 		memcpy(new_s0->index_key, shortcut->index_key,
-		       keylen * sizeof(unsigned long));
+		       flex_array_size(new_s0, index_key, keylen));
 
 		blank = ULONG_MAX << (diff & ASSOC_ARRAY_KEY_CHUNK_MASK);
 		pr_devel("blank off [%zu] %d: %lx\n", keylen - 1, diff, blank);
@@ -903,8 +898,8 @@ static bool assoc_array_insert_mid_shortcut(struct assoc_array_edit *edit,
 		keylen = round_up(shortcut->skip_to_level, ASSOC_ARRAY_KEY_CHUNK_SIZE);
 		keylen >>= ASSOC_ARRAY_KEY_CHUNK_SHIFT;
 
-		new_s1 = kzalloc(sizeof(struct assoc_array_shortcut) +
-				 keylen * sizeof(unsigned long), GFP_KERNEL);
+		new_s1 = kzalloc(struct_size(new_s1, index_key, keylen),
+				 GFP_KERNEL);
 		if (!new_s1)
 			return false;
 		edit->new_meta[2] = assoc_array_shortcut_to_ptr(new_s1);
@@ -917,7 +912,7 @@ static bool assoc_array_insert_mid_shortcut(struct assoc_array_edit *edit,
 		new_n0->slots[sc_slot] = assoc_array_shortcut_to_ptr(new_s1);
 
 		memcpy(new_s1->index_key, shortcut->index_key,
-		       keylen * sizeof(unsigned long));
+		       flex_array_size(new_s1, index_key, keylen));
 
 		edit->set[1].ptr = &side->back_pointer;
 		edit->set[1].to = assoc_array_shortcut_to_ptr(new_s1);
@@ -943,7 +938,7 @@ static bool assoc_array_insert_mid_shortcut(struct assoc_array_edit *edit,
 		edit->leaf_p = &new_n0->slots[0];
 
 	pr_devel("<--%s() = ok [split shortcut]\n", __func__);
-	return edit;
+	return true;
 }
 
 /**
@@ -1117,6 +1112,7 @@ struct assoc_array_edit *assoc_array_delete(struct assoc_array *array,
 						index_key))
 				goto found_leaf;
 		}
+		fallthrough;
 	case assoc_array_walk_tree_empty:
 	case assoc_array_walk_found_wrong_shortcut:
 	default:
@@ -1494,13 +1490,12 @@ descend:
 		shortcut = assoc_array_ptr_to_shortcut(cursor);
 		keylen = round_up(shortcut->skip_to_level, ASSOC_ARRAY_KEY_CHUNK_SIZE);
 		keylen >>= ASSOC_ARRAY_KEY_CHUNK_SHIFT;
-		new_s = kmalloc(sizeof(struct assoc_array_shortcut) +
-				keylen * sizeof(unsigned long), GFP_KERNEL);
+		new_s = kmalloc(struct_size(new_s, index_key, keylen),
+				GFP_KERNEL);
 		if (!new_s)
 			goto enomem;
 		pr_devel("dup shortcut %p -> %p\n", shortcut, new_s);
-		memcpy(new_s, shortcut, (sizeof(struct assoc_array_shortcut) +
-					 keylen * sizeof(unsigned long)));
+		memcpy(new_s, shortcut, struct_size(new_s, index_key, keylen));
 		new_s->back_pointer = new_parent;
 		new_s->parent_slot = shortcut->parent_slot;
 		*new_ptr_pp = new_parent = assoc_array_shortcut_to_ptr(new_s);

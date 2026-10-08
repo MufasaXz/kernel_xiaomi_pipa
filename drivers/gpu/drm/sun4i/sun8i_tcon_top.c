@@ -1,18 +1,24 @@
 // SPDX-License-Identifier: GPL-2.0+
 /* Copyright (c) 2018 Jernej Skrabec <jernej.skrabec@siol.net> */
 
-#include <drm/drmP.h>
-
-#include <dt-bindings/clock/sun8i-tcon-top.h>
 
 #include <linux/bitfield.h>
 #include <linux/component.h>
 #include <linux/device.h>
+#include <linux/io.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/of_graph.h>
 #include <linux/platform_device.h>
 
+#include <dt-bindings/clock/sun8i-tcon-top.h>
+
 #include "sun8i_tcon_top.h"
+
+struct sun8i_tcon_top_quirks {
+	bool has_tcon_tv1;
+	bool has_dsi;
+};
 
 static bool sun8i_tcon_top_node_is_tcon_top(struct device_node *node)
 {
@@ -121,19 +127,21 @@ static int sun8i_tcon_top_bind(struct device *dev, struct device *master,
 	struct platform_device *pdev = to_platform_device(dev);
 	struct clk_hw_onecell_data *clk_data;
 	struct sun8i_tcon_top *tcon_top;
-	struct resource *res;
+	const struct sun8i_tcon_top_quirks *quirks;
 	void __iomem *regs;
 	int ret, i;
+
+	quirks = of_device_get_match_data(&pdev->dev);
 
 	tcon_top = devm_kzalloc(dev, sizeof(*tcon_top), GFP_KERNEL);
 	if (!tcon_top)
 		return -ENOMEM;
 
-	clk_data = devm_kzalloc(dev, sizeof(*clk_data) +
-				sizeof(*clk_data->hws) * CLK_NUM,
+	clk_data = devm_kzalloc(dev, struct_size(clk_data, hws, CLK_NUM),
 				GFP_KERNEL);
 	if (!clk_data)
 		return -ENOMEM;
+	clk_data->num = CLK_NUM;
 	tcon_top->clk_data = clk_data;
 
 	spin_lock_init(&tcon_top->reg_lock);
@@ -150,8 +158,7 @@ static int sun8i_tcon_top_bind(struct device *dev, struct device *master,
 		return PTR_ERR(tcon_top->bus);
 	}
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	regs = devm_ioremap_resource(dev, res);
+	regs = devm_platform_ioremap_resource(pdev, 0);
 	tcon_top->regs = regs;
 	if (IS_ERR(regs))
 		return PTR_ERR(regs);
@@ -183,28 +190,29 @@ static int sun8i_tcon_top_bind(struct device *dev, struct device *master,
 	 * if TVE is active on each TCON TV. If it is, mux should be switched
 	 * to TVE clock parent.
 	 */
+	i = 0;
 	clk_data->hws[CLK_TCON_TOP_TV0] =
 		sun8i_tcon_top_register_gate(dev, "tcon-tv0", regs,
 					     &tcon_top->reg_lock,
-					     TCON_TOP_TCON_TV0_GATE, 0);
+					     TCON_TOP_TCON_TV0_GATE, i++);
 
-	clk_data->hws[CLK_TCON_TOP_TV1] =
-		sun8i_tcon_top_register_gate(dev, "tcon-tv1", regs,
-					     &tcon_top->reg_lock,
-					     TCON_TOP_TCON_TV1_GATE, 1);
+	if (quirks->has_tcon_tv1)
+		clk_data->hws[CLK_TCON_TOP_TV1] =
+			sun8i_tcon_top_register_gate(dev, "tcon-tv1", regs,
+						     &tcon_top->reg_lock,
+						     TCON_TOP_TCON_TV1_GATE, i++);
 
-	clk_data->hws[CLK_TCON_TOP_DSI] =
-		sun8i_tcon_top_register_gate(dev, "dsi", regs,
-					     &tcon_top->reg_lock,
-					     TCON_TOP_TCON_DSI_GATE, 2);
+	if (quirks->has_dsi)
+		clk_data->hws[CLK_TCON_TOP_DSI] =
+			sun8i_tcon_top_register_gate(dev, "dsi", regs,
+						     &tcon_top->reg_lock,
+						     TCON_TOP_TCON_DSI_GATE, i++);
 
 	for (i = 0; i < CLK_NUM; i++)
 		if (IS_ERR(clk_data->hws[i])) {
 			ret = PTR_ERR(clk_data->hws[i]);
 			goto err_unregister_gates;
 		}
-
-	clk_data->num = CLK_NUM;
 
 	ret = of_clk_add_hw_provider(dev->of_node, of_clk_hw_onecell_get,
 				     clk_data);
@@ -252,15 +260,38 @@ static int sun8i_tcon_top_probe(struct platform_device *pdev)
 	return component_add(&pdev->dev, &sun8i_tcon_top_ops);
 }
 
-static int sun8i_tcon_top_remove(struct platform_device *pdev)
+static void sun8i_tcon_top_remove(struct platform_device *pdev)
 {
 	component_del(&pdev->dev, &sun8i_tcon_top_ops);
-
-	return 0;
 }
+
+static const struct sun8i_tcon_top_quirks sun8i_r40_tcon_top_quirks = {
+	.has_tcon_tv1	= true,
+	.has_dsi	= true,
+};
+
+static const struct sun8i_tcon_top_quirks sun20i_d1_tcon_top_quirks = {
+	.has_dsi	= true,
+};
+
+static const struct sun8i_tcon_top_quirks sun50i_h6_tcon_top_quirks = {
+	/* Nothing special */
+};
 
 /* sun4i_drv uses this list to check if a device node is a TCON TOP */
 const struct of_device_id sun8i_tcon_top_of_table[] = {
+	{
+		.compatible = "allwinner,sun8i-r40-tcon-top",
+		.data = &sun8i_r40_tcon_top_quirks
+	},
+	{
+		.compatible = "allwinner,sun20i-d1-tcon-top",
+		.data = &sun20i_d1_tcon_top_quirks
+	},
+	{
+		.compatible = "allwinner,sun50i-h6-tcon-top",
+		.data = &sun50i_h6_tcon_top_quirks
+	},
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, sun8i_tcon_top_of_table);

@@ -1,8 +1,7 @@
-/* SPDX-License-Identifier: GPL-2.0-only */
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Copyright (c) 2012-2014,2018-2020 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2014,2018,2020 The Linux Foundation. All rights reserved.
  */
-
 
 #ifndef _DT_BINDINGS_QCOM_SPMI_VADC_H
 #define _DT_BINDINGS_QCOM_SPMI_VADC_H
@@ -109,139 +108,118 @@
 #define VADC_LR_MUX10_PU1_PU2_AMUX_USB_ID	0xf9
 #define VADC_LR_MUX3_BUF_PU1_PU2_XO_THERM	0xfc
 
-/* ADC channels for SPMI VADC5*/
+/* ADC channels for SPMI PMIC5 */
 
-#define ADC_REF_GND				0x00
-#define ADC_1P25VREF				0x01
-#define ADC_VREF_VADC				0x02
-#define ADC_VREF_VADC_DIV_3			0x82
-#define ADC_VPH_PWR				0x83
-#define ADC_VBAT_SNS				0x84
-#define ADC_VCOIN				0x85
-#define ADC_DIE_TEMP				0x06
-#define ADC_USB_IN_I				0x07
-#define ADC_USB_IN_V_16				0x08
-#define ADC_CHG_TEMP				0x09
-#define ADC_BAT_THERM				0x0a
-#define ADC_BAT_ID				0x0b
-#define ADC_XO_THERM				0x0c
-#define ADC_AMUX_THM1				0x0d
-#define ADC_AMUX_THM2				0x0e
-#define ADC_AMUX_THM3				0x0f
-#define ADC_AMUX_THM4				0x10
-#define ADC_AMUX_THM5				0x11
-#define ADC_GPIO1				0x12
-#define ADC_GPIO2				0x13
-#define ADC_GPIO3				0x14
-#define ADC_GPIO4				0x15
-#define ADC_GPIO5				0x16
-#define ADC_GPIO6				0x17
-#define ADC_GPIO7				0x18
-#define ADC_SBUx				0x99
-#define ADC_MID_CHG_DIV6			0x1e
-#define ANA_IN					0x1d
-#define ADC_OFF					0xff
+#define ADC5_REF_GND				0x00
+#define ADC5_1P25VREF				0x01
+#define ADC5_VREF_VADC				0x02
+#define ADC5_VREF_VADC5_DIV_3			0x82
+#define ADC5_VPH_PWR				0x83
+#define ADC5_VBAT_SNS				0x84
+#define ADC5_VCOIN				0x85
+#define ADC5_DIE_TEMP				0x06
+#define ADC5_USB_IN_I				0x07
+#define ADC5_USB_IN_V_16			0x08
+#define ADC5_CHG_TEMP				0x09
+#define ADC5_BAT_THERM				0x0a
+#define ADC5_BAT_ID				0x0b
+#define ADC5_XO_THERM				0x0c
+#define ADC5_AMUX_THM1				0x0d
+#define ADC5_AMUX_THM2				0x0e
+#define ADC5_AMUX_THM3				0x0f
+#define ADC5_AMUX_THM4				0x10
+#define ADC5_AMUX_THM5				0x11
+#define ADC5_GPIO1				0x12
+#define ADC5_GPIO2				0x13
+#define ADC5_GPIO3				0x14
+#define ADC5_GPIO4				0x15
+#define ADC5_GPIO5				0x16
+#define ADC5_GPIO6				0x17
+#define ADC5_GPIO7				0x18
+#define ADC5_SBUx				0x99
+#define ADC5_MID_CHG_DIV6			0x1e
+#define ADC5_OFF				0xff
 
 /* 30k pull-up1 */
-#define ADC_BAT_THERM_PU1			0x2a
-#define ADC_BAT_ID_PU1				0x2b
-#define ADC_XO_THERM_PU1			0x2c
-#define ADC_AMUX_THM1_PU1			0x2d
-#define ADC_AMUX_THM2_PU1			0x2e
-#define ADC_AMUX_THM3_PU1			0x2f
-#define ADC_AMUX_THM4_PU1			0x30
-#define ADC_AMUX_THM5_PU1			0x31
-#define ADC_GPIO1_PU1				0x32
-#define ADC_GPIO2_PU1				0x33
-#define ADC_GPIO3_PU1				0x34
-#define ADC_GPIO4_PU1				0x35
-#define ADC_GPIO5_PU1				0x36
-#define ADC_GPIO6_PU1				0x37
-#define ADC_GPIO7_PU1				0x38
-#define ADC_SBUx_PU1				0x39
-#define ANA_IN					0x1d
+#define ADC5_BAT_THERM_30K_PU			0x2a
+#define ADC5_BAT_ID_30K_PU			0x2b
+#define ADC5_XO_THERM_30K_PU			0x2c
+#define ADC5_AMUX_THM1_30K_PU			0x2d
+#define ADC5_AMUX_THM2_30K_PU			0x2e
+#define ADC5_AMUX_THM3_30K_PU			0x2f
+#define ADC5_AMUX_THM4_30K_PU			0x30
+#define ADC5_AMUX_THM5_30K_PU			0x31
+#define ADC5_GPIO1_30K_PU			0x32
+#define ADC5_GPIO2_30K_PU			0x33
+#define ADC5_GPIO3_30K_PU			0x34
+#define ADC5_GPIO4_30K_PU			0x35
+#define ADC5_GPIO5_30K_PU			0x36
+#define ADC5_GPIO6_30K_PU			0x37
+#define ADC5_GPIO7_30K_PU			0x38
+#define ADC5_SBUx_30K_PU			0x39
 
 /* 100k pull-up2 */
-#define ADC_BAT_THERM_PU2			0x4a
-#define ADC_BAT_ID_PU2				0x4b
-#define ADC_XO_THERM_PU2			0x4c
-#define ADC_AMUX_THM1_PU2			0x4d
-#define ADC_AMUX_THM2_PU2			0x4e
-#define ADC_AMUX_THM3_PU2			0x4f
-#define ADC_AMUX_THM4_PU2			0x50
-#define ADC_AMUX_THM5_PU2			0x51
-#define ADC_GPIO1_PU2				0x52
-#define ADC_GPIO2_PU2				0x53
-#define ADC_GPIO3_PU2				0x54
-#define ADC_GPIO4_PU2				0x55
-#define ADC_GPIO5_PU2				0x56
-#define ADC_GPIO6_PU2				0x57
-#define ADC_GPIO7_PU2				0x58
-#define ADC_SBUx_PU2				0x59
+#define ADC5_BAT_THERM_100K_PU			0x4a
+#define ADC5_BAT_ID_100K_PU			0x4b
+#define ADC5_XO_THERM_100K_PU			0x4c
+#define ADC5_AMUX_THM1_100K_PU			0x4d
+#define ADC5_AMUX_THM2_100K_PU			0x4e
+#define ADC5_AMUX_THM3_100K_PU			0x4f
+#define ADC5_AMUX_THM4_100K_PU			0x50
+#define ADC5_AMUX_THM5_100K_PU			0x51
+#define ADC5_GPIO1_100K_PU			0x52
+#define ADC5_GPIO2_100K_PU			0x53
+#define ADC5_GPIO3_100K_PU			0x54
+#define ADC5_GPIO4_100K_PU			0x55
+#define ADC5_GPIO5_100K_PU			0x56
+#define ADC5_GPIO6_100K_PU			0x57
+#define ADC5_GPIO7_100K_PU			0x58
+#define ADC5_SBUx_100K_PU			0x59
 
 /* 400k pull-up3 */
-#define ADC_BAT_THERM_PU3			0x6a
-#define ADC_BAT_ID_PU3				0x6b
-#define ADC_XO_THERM_PU3			0x6c
-#define ADC_AMUX_THM1_PU3			0x6d
-#define ADC_AMUX_THM2_PU3			0x6e
-#define ADC_AMUX_THM3_PU3			0x6f
-#define ADC_AMUX_THM4_PU3			0x70
-#define ADC_AMUX_THM5_PU3			0x71
-#define ADC_GPIO1_PU3				0x72
-#define ADC_GPIO2_PU3				0x73
-#define ADC_GPIO3_PU3				0x74
-#define ADC_GPIO4_PU3				0x75
-#define ADC_GPIO5_PU3				0x76
-#define ADC_GPIO6_PU3				0x77
-#define ADC_GPIO7_PU3				0x78
-#define ADC_SBUx_PU3				0x79
+#define ADC5_BAT_THERM_400K_PU			0x6a
+#define ADC5_BAT_ID_400K_PU			0x6b
+#define ADC5_XO_THERM_400K_PU			0x6c
+#define ADC5_AMUX_THM1_400K_PU			0x6d
+#define ADC5_AMUX_THM2_400K_PU			0x6e
+#define ADC5_AMUX_THM3_400K_PU			0x6f
+#define ADC5_AMUX_THM4_400K_PU			0x70
+#define ADC5_AMUX_THM5_400K_PU			0x71
+#define ADC5_GPIO1_400K_PU			0x72
+#define ADC5_GPIO2_400K_PU			0x73
+#define ADC5_GPIO3_400K_PU			0x74
+#define ADC5_GPIO4_400K_PU			0x75
+#define ADC5_GPIO5_400K_PU			0x76
+#define ADC5_GPIO6_400K_PU			0x77
+#define ADC5_GPIO7_400K_PU			0x78
+#define ADC5_SBUx_400K_PU			0x79
 
 /* 1/3 Divider */
-#define ADC_GPIO1_DIV3				0x92
-#define ADC_GPIO2_DIV3				0x93
-#define ADC_GPIO3_DIV3				0x94
-#define ADC_GPIO4_DIV3				0x95
-#define ADC_GPIO5_DIV3				0x96
-#define ADC_GPIO6_DIV3				0x97
-#define ADC_GPIO7_DIV3				0x98
-#define ADC_SBUx_DIV3				0x99
+#define ADC5_GPIO1_DIV3				0x92
+#define ADC5_GPIO2_DIV3				0x93
+#define ADC5_GPIO3_DIV3				0x94
+#define ADC5_GPIO4_DIV3				0x95
+#define ADC5_GPIO5_DIV3				0x96
+#define ADC5_GPIO6_DIV3				0x97
+#define ADC5_GPIO7_DIV3				0x98
+#define ADC5_SBUx_DIV3				0x99
 
 /* Current and combined current/voltage channels */
-#define ADC_INT_EXT_ISENSE			0xa1
-#define ADC_PARALLEL_ISENSE			0xa5
-#define ADC_CUR_REPLICA_VDS			0xa7
-#define ADC_CUR_SENS_BATFET_VDS_OFFSET		0xa9
-#define ADC_CUR_SENS_REPLICA_VDS_OFFSET		0xab
-#define ADC_EXT_SENS_OFFSET			0xad
+#define ADC5_INT_EXT_ISENSE			0xa1
+#define ADC5_PARALLEL_ISENSE			0xa5
+#define ADC5_CUR_REPLICA_VDS			0xa7
+#define ADC5_CUR_SENS_BATFET_VDS_OFFSET		0xa9
+#define ADC5_CUR_SENS_REPLICA_VDS_OFFSET	0xab
+#define ADC5_EXT_SENS_OFFSET			0xad
 
-#define ADC_INT_EXT_ISENSE_VBAT_VDATA		0xb0
-#define ADC_INT_EXT_ISENSE_VBAT_IDATA		0xb1
-#define ADC_EXT_ISENSE_VBAT_VDATA		0xb2
-#define ADC_EXT_ISENSE_VBAT_IDATA		0xb3
-#define ADC_PARALLEL_ISENSE_VBAT_VDATA		0xb4
-#define ADC_PARALLEL_ISENSE_VBAT_IDATA		0xb5
+#define ADC5_INT_EXT_ISENSE_VBAT_VDATA		0xb0
+#define ADC5_INT_EXT_ISENSE_VBAT_IDATA		0xb1
+#define ADC5_EXT_ISENSE_VBAT_VDATA		0xb2
+#define ADC5_EXT_ISENSE_VBAT_IDATA		0xb3
+#define ADC5_PARALLEL_ISENSE_VBAT_VDATA		0xb4
+#define ADC5_PARALLEL_ISENSE_VBAT_IDATA		0xb5
 
-#define ADC_MAX_CHANNEL				0xc0
-
-/* VADC scale function index */
-#define ADC_SCALE_DEFAULT			0x0
-#define ADC_SCALE_THERM_100K_PULLUP		0x1
-#define ADC_SCALE_PMIC_THERM			0x2
-#define ADC_SCALE_XOTHERM			0x3
-#define ADC_SCALE_PMI_CHG_TEMP			0x4
-#define ADC_SCALE_HW_CALIB_DEFAULT		0x5
-#define ADC_SCALE_HW_CALIB_THERM_100K_PULLUP	0x6
-#define ADC_SCALE_HW_CALIB_XOTHERM		0x7
-#define ADC_SCALE_HW_CALIB_PMIC_THERM		0x8
-#define ADC_SCALE_HW_CALIB_CUR			0x9
-#define ADC_SCALE_HW_CALIB_PM5_CHG_TEMP		0xA
-#define ADC_SCALE_HW_CALIB_PM5_SMB_TEMP		0xB
-#define ADC_SCALE_HW_CALIB_BATT_THERM_100K	0xC
-#define ADC_SCALE_HW_CALIB_BATT_THERM_30K	0xD
-#define ADC_SCALE_HW_CALIB_BATT_THERM_400K	0xE
-#define ADC_SCALE_HW_CALIB_PM5_SMB1398_TEMP	0xF
-#define ADC_SCALE_HW_CALIB_PM2250_S3_DIE_TEMP	0x10
+#define ADC5_MAX_CHANNEL			0xc0
 
 /* ADC channels for ADC for PMIC7 */
 
@@ -261,12 +239,15 @@
 #define ADC7_GPIO3				0x0c
 #define ADC7_GPIO4				0x0d
 
+#define ADC7_SMB_TEMP				0x06
 #define ADC7_CHG_TEMP				0x10
 #define ADC7_USB_IN_V_16			0x11
 #define ADC7_VDC_16				0x12
 #define ADC7_CC1_ID				0x13
 #define ADC7_VREF_BAT_THERM			0x15
 #define ADC7_IIN_FB				0x17
+#define ADC7_ICHG_SMB				0x18
+#define ADC7_IIN_SMB				0x19
 
 /* 30k pull-up1 */
 #define ADC7_AMUX_THM1_30K_PU			0x24
@@ -318,10 +299,5 @@
 
 #define ADC7_SBUx				0x94
 #define ADC7_VBAT_2S_MID			0x96
-
-/* VADC scale function index */
-#define ADC_SCALE_HW_CALIB_THERM_100K_PU_PM7	0x11
-#define ADC_SCALE_HW_CALIB_PMIC_THERM_PM7	0x12
-#define ADC_SCALE_BATT_THERM_QRD_215		0x13
 
 #endif /* _DT_BINDINGS_QCOM_SPMI_VADC_H */

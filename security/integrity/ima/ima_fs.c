@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2005,2006,2007,2008 IBM Corporation
  *
@@ -6,19 +7,13 @@
  * Reiner Sailer <sailer@us.ibm.com>
  * Mimi Zohar <zohar@us.ibm.com>
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
- *
  * File: ima_fs.c
  *	implemenents security file system for reporting
  *	current measurement list and IMA statistics
  */
 
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
-
 #include <linux/fcntl.h>
+#include <linux/kernel_read_file.h>
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/seq_file.h>
@@ -123,7 +118,7 @@ void ima_putc(struct seq_file *m, void *data, int datalen)
 
 /* print format:
  *       32bit-le=pcr#
- *       char[20]=template digest
+ *       char[n]=template digest
  *       32bit-le=template name size
  *       char[n]=template name
  *       [eventdata length]
@@ -137,7 +132,16 @@ int ima_measurements_show(struct seq_file *m, void *v)
 	char *template_name;
 	u32 pcr, namelen, template_data_len; /* temporary fields */
 	bool is_ima_template = false;
-	int i;
+	enum hash_algo algo;
+	int i, algo_idx;
+
+	algo_idx = ima_sha1_idx;
+	algo = HASH_ALGO_SHA1;
+
+	if (m->file != NULL) {
+		algo_idx = (unsigned long)file_inode(m->file)->i_private;
+		algo = ima_algo_array[algo_idx].algo;
+	}
 
 	/* get entry */
 	e = qe->entry;
@@ -152,15 +156,15 @@ int ima_measurements_show(struct seq_file *m, void *v)
 	 * PCR used defaults to the same (config option) in
 	 * little-endian format, unless set in policy
 	 */
-	pcr = !ima_canonical_fmt ? e->pcr : cpu_to_le32(e->pcr);
+	pcr = !ima_canonical_fmt ? e->pcr : (__force u32)cpu_to_le32(e->pcr);
 	ima_putc(m, &pcr, sizeof(e->pcr));
 
 	/* 2nd: template digest */
-	ima_putc(m, e->digest, TPM_DIGEST_SIZE);
+	ima_putc(m, e->digests[algo_idx].digest, hash_digest_size[algo]);
 
 	/* 3rd: template name size */
 	namelen = !ima_canonical_fmt ? strlen(template_name) :
-		cpu_to_le32(strlen(template_name));
+		(__force u32)cpu_to_le32(strlen(template_name));
 	ima_putc(m, &namelen, sizeof(namelen));
 
 	/* 4th:  template name */
@@ -172,14 +176,15 @@ int ima_measurements_show(struct seq_file *m, void *v)
 
 	if (!is_ima_template) {
 		template_data_len = !ima_canonical_fmt ? e->template_data_len :
-			cpu_to_le32(e->template_data_len);
+			(__force u32)cpu_to_le32(e->template_data_len);
 		ima_putc(m, &template_data_len, sizeof(e->template_data_len));
 	}
 
 	/* 6th:  template specific data */
 	for (i = 0; i < e->template_desc->num_fields; i++) {
 		enum ima_show_type show = IMA_SHOW_BINARY;
-		struct ima_template_field *field = e->template_desc->fields[i];
+		const struct ima_template_field *field =
+			e->template_desc->fields[i];
 
 		if (is_ima_template && strcmp(field->field_id, "d") == 0)
 			show = IMA_SHOW_BINARY_NO_FIELD_LEN;
@@ -224,7 +229,16 @@ static int ima_ascii_measurements_show(struct seq_file *m, void *v)
 	struct ima_queue_entry *qe = v;
 	struct ima_template_entry *e;
 	char *template_name;
-	int i;
+	enum hash_algo algo;
+	int i, algo_idx;
+
+	algo_idx = ima_sha1_idx;
+	algo = HASH_ALGO_SHA1;
+
+	if (m->file != NULL) {
+		algo_idx = (unsigned long)file_inode(m->file)->i_private;
+		algo = ima_algo_array[algo_idx].algo;
+	}
 
 	/* get entry */
 	e = qe->entry;
@@ -237,8 +251,8 @@ static int ima_ascii_measurements_show(struct seq_file *m, void *v)
 	/* 1st: PCR used (config option) */
 	seq_printf(m, "%2d ", e->pcr);
 
-	/* 2nd: SHA1 template hash */
-	ima_print_digest(m, e->digest, TPM_DIGEST_SIZE);
+	/* 2nd: template hash */
+	ima_print_digest(m, e->digests[algo_idx].digest, hash_digest_size[algo]);
 
 	/* 3th:  template name */
 	seq_printf(m, " %s", template_name);
@@ -277,9 +291,9 @@ static const struct file_operations ima_ascii_measurements_ops = {
 
 static ssize_t ima_read_policy(char *path)
 {
-	void *data;
+	void *data = NULL;
 	char *datap;
-	loff_t size;
+	size_t size;
 	int rc, pathlen = strlen(path);
 
 	char *p;
@@ -288,11 +302,14 @@ static ssize_t ima_read_policy(char *path)
 	datap = path;
 	strsep(&datap, "\n");
 
-	rc = kernel_read_file_from_path(path, &data, &size, 0, READING_POLICY);
+	rc = kernel_read_file_from_path(path, 0, &data, INT_MAX, NULL,
+					READING_POLICY);
 	if (rc < 0) {
 		pr_err("Unable to open file: %s (%d)", path, rc);
 		return rc;
 	}
+	size = rc;
+	rc = 0;
 
 	datap = data;
 	while (size > 0 && (p = strsep(&datap, "\n"))) {
@@ -359,11 +376,6 @@ out:
 
 static struct dentry *ima_dir;
 static struct dentry *ima_symlink;
-static struct dentry *binary_runtime_measurements;
-static struct dentry *ascii_runtime_measurements;
-static struct dentry *runtime_measurements_count;
-static struct dentry *violations;
-static struct dentry *ima_policy;
 
 enum ima_fs_flags {
 	IMA_FS_BUSY,
@@ -379,6 +391,38 @@ static const struct seq_operations ima_policy_seqops = {
 		.show = ima_policy_show,
 };
 #endif
+
+static int __init create_securityfs_measurement_lists(void)
+{
+	int count = NR_BANKS(ima_tpm_chip);
+
+	if (ima_sha1_idx >= NR_BANKS(ima_tpm_chip))
+		count++;
+
+	for (int i = 0; i < count; i++) {
+		u16 algo = ima_algo_array[i].algo;
+		char file_name[NAME_MAX + 1];
+		struct dentry *dentry;
+
+		sprintf(file_name, "ascii_runtime_measurements_%s",
+			hash_algo_name[algo]);
+		dentry = securityfs_create_file(file_name, S_IRUSR | S_IRGRP,
+						ima_dir, (void *)(uintptr_t)i,
+						&ima_ascii_measurements_ops);
+		if (IS_ERR(dentry))
+			return PTR_ERR(dentry);
+
+		sprintf(file_name, "binary_runtime_measurements_%s",
+			hash_algo_name[algo]);
+		dentry = securityfs_create_file(file_name, S_IRUSR | S_IRGRP,
+						ima_dir, (void *)(uintptr_t)i,
+						&ima_measurements_ops);
+		if (IS_ERR(dentry))
+			return PTR_ERR(dentry);
+	}
+
+	return 0;
+}
 
 /*
  * ima_open_policy: sequentialize access to the policy file
@@ -433,8 +477,7 @@ static int ima_release_policy(struct inode *inode, struct file *file)
 
 	ima_update_policy();
 #if !defined(CONFIG_IMA_WRITE_POLICY) && !defined(CONFIG_IMA_READ_POLICY)
-	securityfs_remove(ima_policy);
-	ima_policy = NULL;
+	securityfs_remove(file->f_path.dentry);
 #elif defined(CONFIG_IMA_WRITE_POLICY)
 	clear_bit(IMA_FS_BUSY, &ima_fs_flags);
 #elif defined(CONFIG_IMA_READ_POLICY)
@@ -453,56 +496,65 @@ static const struct file_operations ima_measure_policy_ops = {
 
 int __init ima_fs_init(void)
 {
+	struct dentry *dentry;
+	int ret;
+
 	ima_dir = securityfs_create_dir("ima", integrity_dir);
 	if (IS_ERR(ima_dir))
-		return -1;
+		return PTR_ERR(ima_dir);
 
 	ima_symlink = securityfs_create_symlink("ima", NULL, "integrity/ima",
 						NULL);
-	if (IS_ERR(ima_symlink))
+	if (IS_ERR(ima_symlink)) {
+		ret = PTR_ERR(ima_symlink);
+		goto out;
+	}
+
+	ret = create_securityfs_measurement_lists();
+	if (ret != 0)
 		goto out;
 
-	binary_runtime_measurements =
-	    securityfs_create_file("binary_runtime_measurements",
-				   S_IRUSR | S_IRGRP, ima_dir, NULL,
-				   &ima_measurements_ops);
-	if (IS_ERR(binary_runtime_measurements))
+	dentry = securityfs_create_symlink("binary_runtime_measurements", ima_dir,
+				      "binary_runtime_measurements_sha1", NULL);
+	if (IS_ERR(dentry)) {
+		ret = PTR_ERR(dentry);
 		goto out;
+	}
 
-	ascii_runtime_measurements =
-	    securityfs_create_file("ascii_runtime_measurements",
-				   S_IRUSR | S_IRGRP, ima_dir, NULL,
-				   &ima_ascii_measurements_ops);
-	if (IS_ERR(ascii_runtime_measurements))
+	dentry = securityfs_create_symlink("ascii_runtime_measurements", ima_dir,
+				      "ascii_runtime_measurements_sha1", NULL);
+	if (IS_ERR(dentry)) {
+		ret = PTR_ERR(dentry);
 		goto out;
+	}
 
-	runtime_measurements_count =
-	    securityfs_create_file("runtime_measurements_count",
+	dentry = securityfs_create_file("runtime_measurements_count",
 				   S_IRUSR | S_IRGRP, ima_dir, NULL,
 				   &ima_measurements_count_ops);
-	if (IS_ERR(runtime_measurements_count))
+	if (IS_ERR(dentry)) {
+		ret = PTR_ERR(dentry);
 		goto out;
+	}
 
-	violations =
-	    securityfs_create_file("violations", S_IRUSR | S_IRGRP,
+	dentry = securityfs_create_file("violations", S_IRUSR | S_IRGRP,
 				   ima_dir, NULL, &ima_htable_violations_ops);
-	if (IS_ERR(violations))
+	if (IS_ERR(dentry)) {
+		ret = PTR_ERR(dentry);
 		goto out;
+	}
 
-	ima_policy = securityfs_create_file("policy", POLICY_FILE_FLAGS,
+	dentry = securityfs_create_file("policy", POLICY_FILE_FLAGS,
 					    ima_dir, NULL,
 					    &ima_measure_policy_ops);
-	if (IS_ERR(ima_policy))
+	if (IS_ERR(dentry)) {
+		ret = PTR_ERR(dentry);
 		goto out;
+	}
 
 	return 0;
 out:
-	securityfs_remove(ima_policy);
-	securityfs_remove(violations);
-	securityfs_remove(runtime_measurements_count);
-	securityfs_remove(ascii_runtime_measurements);
-	securityfs_remove(binary_runtime_measurements);
 	securityfs_remove(ima_symlink);
 	securityfs_remove(ima_dir);
-	return -1;
+
+	return ret;
 }

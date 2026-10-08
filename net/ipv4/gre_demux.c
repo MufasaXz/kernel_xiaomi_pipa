@@ -1,13 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	GRE over IPv4 demultiplexer driver
  *
  *	Authors: Dmitry Kozlov (xeb@mail.ru)
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
- *
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -78,7 +73,7 @@ int gre_parse_header(struct sk_buff *skb, struct tnl_ptk_info *tpi,
 	if (unlikely(greh->flags & (GRE_VERSION | GRE_ROUTING)))
 		return -EINVAL;
 
-	tpi->flags = gre_flags_to_tnl_flags(greh->flags);
+	gre_flags_to_tnl_flags(tpi->flags, greh->flags);
 	hdr_len = gre_calc_hlen(tpi->flags);
 
 	if (!pskb_may_pull(skb, nhs + hdr_len))
@@ -90,7 +85,7 @@ int gre_parse_header(struct sk_buff *skb, struct tnl_ptk_info *tpi,
 	options = (__be32 *)(greh + 1);
 	if (greh->flags & GRE_CSUM) {
 		if (!skb_checksum_simple_validate(skb)) {
-			skb_checksum_try_convert(skb, IPPROTO_GRE, 0,
+			skb_checksum_try_convert(skb, IPPROTO_GRE,
 						 null_compute_pseudo);
 		} else if (csum_err) {
 			*csum_err = true;
@@ -176,31 +171,35 @@ drop:
 	return NET_RX_DROP;
 }
 
-static void gre_err(struct sk_buff *skb, u32 info)
+static int gre_err(struct sk_buff *skb, u32 info)
 {
 	const struct gre_protocol *proto;
 	const struct iphdr *iph = (const struct iphdr *)skb->data;
 	u8 ver = skb->data[(iph->ihl<<2) + 1]&0x7f;
+	int err = 0;
 
 	if (ver >= GREPROTO_MAX)
-		return;
+		return -EINVAL;
 
 	rcu_read_lock();
 	proto = rcu_dereference(gre_proto[ver]);
 	if (proto && proto->err_handler)
 		proto->err_handler(skb, info);
+	else
+		err = -EPROTONOSUPPORT;
 	rcu_read_unlock();
+
+	return err;
 }
 
 static const struct net_protocol net_gre_protocol = {
 	.handler     = gre_rcv,
 	.err_handler = gre_err,
-	.netns_ok    = 1,
 };
 
 static int __init gre_init(void)
 {
-	pr_info("GRE over IPv4 demultiplexor driver\n");
+	pr_info("GRE over IPv4 demultiplexer driver\n");
 
 	if (inet_add_protocol(&net_gre_protocol, IPPROTO_GRE) < 0) {
 		pr_err("can't add protocol\n");
@@ -218,5 +217,5 @@ module_init(gre_init);
 module_exit(gre_exit);
 
 MODULE_DESCRIPTION("GRE over IPv4 demultiplexer driver");
-MODULE_AUTHOR("D. Kozlov (xeb@mail.ru)");
+MODULE_AUTHOR("D. Kozlov <xeb@mail.ru>");
 MODULE_LICENSE("GPL");

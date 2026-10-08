@@ -1,12 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Just-In-Time compiler for eBPF filters on 32bit ARM
  *
+ * Copyright (c) 2023 Puranjay Mohan <puranjay12@gmail.com>
  * Copyright (c) 2017 Shubham Bansal <illusionist.neo@gmail.com>
  * Copyright (c) 2011 Mircea Gherzan <mgherzan@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; version 2 of the License.
  */
 
 #include <linux/bpf.h>
@@ -18,6 +16,7 @@
 #include <linux/string.h>
 #include <linux/slab.h>
 #include <linux/if_vlan.h>
+#include <linux/math64.h>
 
 #include <asm/cacheflush.h>
 #include <asm/hwcap.h>
@@ -166,7 +165,7 @@ static const s8 bpf2a32[][2] = {
 	[BPF_REG_9] = {STACK_OFFSET(BPF_R9_HI), STACK_OFFSET(BPF_R9_LO)},
 	/* Read only Frame Pointer to access Stack */
 	[BPF_REG_FP] = {STACK_OFFSET(BPF_FP_HI), STACK_OFFSET(BPF_FP_LO)},
-	/* Temporary Register for internal BPF JIT, can be used
+	/* Temporary Register for BPF JIT, can be used
 	 * for constant blindings and others.
 	 */
 	[TMP_REG_1] = {ARM_R7, ARM_R6},
@@ -229,6 +228,44 @@ static u32 jit_udiv32(u32 dividend, u32 divisor)
 static u32 jit_mod32(u32 dividend, u32 divisor)
 {
 	return dividend % divisor;
+}
+
+static s32 jit_sdiv32(s32 dividend, s32 divisor)
+{
+	return dividend / divisor;
+}
+
+static s32 jit_smod32(s32 dividend, s32 divisor)
+{
+	return dividend % divisor;
+}
+
+/* Wrappers for 64-bit div/mod */
+static u64 jit_udiv64(u64 dividend, u64 divisor)
+{
+	return div64_u64(dividend, divisor);
+}
+
+static u64 jit_mod64(u64 dividend, u64 divisor)
+{
+	u64 rem;
+
+	div64_u64_rem(dividend, divisor, &rem);
+	return rem;
+}
+
+static s64 jit_sdiv64(s64 dividend, s64 divisor)
+{
+	return div64_s64(dividend, divisor);
+}
+
+static s64 jit_smod64(s64 dividend, s64 divisor)
+{
+	u64 q;
+
+	q = div64_s64(dividend, divisor);
+
+	return dividend - q * divisor;
 }
 
 static inline void _emit(int cond, u32 inst, struct jit_ctx *ctx)
@@ -335,6 +372,9 @@ static u32 arm_bpf_ldst_imm8(u32 op, u8 rt, u8 rn, s16 imm8)
 #define ARM_LDRB_I(rt, rn, off)	arm_bpf_ldst_imm12(ARM_INST_LDRB_I, rt, rn, off)
 #define ARM_LDRD_I(rt, rn, off)	arm_bpf_ldst_imm8(ARM_INST_LDRD_I, rt, rn, off)
 #define ARM_LDRH_I(rt, rn, off)	arm_bpf_ldst_imm8(ARM_INST_LDRH_I, rt, rn, off)
+
+#define ARM_LDRSH_I(rt, rn, off) arm_bpf_ldst_imm8(ARM_INST_LDRSH_I, rt, rn, off)
+#define ARM_LDRSB_I(rt, rn, off) arm_bpf_ldst_imm8(ARM_INST_LDRSB_I, rt, rn, off)
 
 #define ARM_STR_I(rt, rn, off)	arm_bpf_ldst_imm12(ARM_INST_STR_I, rt, rn, off)
 #define ARM_STRB_I(rt, rn, off)	arm_bpf_ldst_imm12(ARM_INST_STRB_I, rt, rn, off)
@@ -477,17 +517,18 @@ static inline int epilogue_offset(const struct jit_ctx *ctx)
 	return to - from - 2;
 }
 
-static inline void emit_udivmod(u8 rd, u8 rm, u8 rn, struct jit_ctx *ctx, u8 op)
+static inline void emit_udivmod(u8 rd, u8 rm, u8 rn, struct jit_ctx *ctx, u8 op, u8 sign)
 {
 	const int exclude_mask = BIT(ARM_R0) | BIT(ARM_R1);
 	const s8 *tmp = bpf2a32[TMP_REG_1];
+	u32 dst;
 
 #if __LINUX_ARM_ARCH__ == 7
 	if (elf_hwcap & HWCAP_IDIVA) {
-		if (op == BPF_DIV)
-			emit(ARM_UDIV(rd, rm, rn), ctx);
-		else {
-			emit(ARM_UDIV(ARM_IP, rm, rn), ctx);
+		if (op == BPF_DIV) {
+			emit(sign ? ARM_SDIV(rd, rm, rn) : ARM_UDIV(rd, rm, rn), ctx);
+		} else {
+			emit(sign ? ARM_SDIV(ARM_IP, rm, rn) : ARM_UDIV(ARM_IP, rm, rn), ctx);
 			emit(ARM_MLS(rd, rn, ARM_IP, rm), ctx);
 		}
 		return;
@@ -515,8 +556,19 @@ static inline void emit_udivmod(u8 rd, u8 rm, u8 rn, struct jit_ctx *ctx, u8 op)
 	emit(ARM_PUSH(CALLER_MASK & ~exclude_mask), ctx);
 
 	/* Call appropriate function */
-	emit_mov_i(ARM_IP, op == BPF_DIV ?
-		   (u32)jit_udiv32 : (u32)jit_mod32, ctx);
+	if (sign) {
+		if (op == BPF_DIV)
+			dst = (u32)jit_sdiv32;
+		else
+			dst = (u32)jit_smod32;
+	} else {
+		if (op == BPF_DIV)
+			dst = (u32)jit_udiv32;
+		else
+			dst = (u32)jit_mod32;
+	}
+
+	emit_mov_i(ARM_IP, dst, ctx);
 	emit_blx_r(ARM_IP, ctx);
 
 	/* Restore caller-saved registers from stack */
@@ -531,6 +583,78 @@ static inline void emit_udivmod(u8 rd, u8 rm, u8 rn, struct jit_ctx *ctx, u8 op)
 		emit(ARM_MOV_R(ARM_R1, tmp[0]), ctx);
 	if (rm != ARM_R0)
 		emit(ARM_MOV_R(ARM_R0, tmp[1]), ctx);
+}
+
+static inline void emit_udivmod64(const s8 *rd, const s8 *rm, const s8 *rn, struct jit_ctx *ctx,
+				  u8 op, u8 sign)
+{
+	u32 dst;
+
+	/* Push caller-saved registers on stack */
+	emit(ARM_PUSH(CALLER_MASK), ctx);
+
+	/*
+	 * As we are implementing 64-bit div/mod as function calls, We need to put the dividend in
+	 * R0-R1 and the divisor in R2-R3. As we have already pushed these registers on the stack,
+	 * we can recover them later after returning from the function call.
+	 */
+	if (rm[1] != ARM_R0 || rn[1] != ARM_R2) {
+		/*
+		 * Move Rm to {R1, R0} if it is not already there.
+		 */
+		if (rm[1] != ARM_R0) {
+			if (rn[1] == ARM_R0)
+				emit(ARM_PUSH(BIT(ARM_R0) | BIT(ARM_R1)), ctx);
+			emit(ARM_MOV_R(ARM_R1, rm[0]), ctx);
+			emit(ARM_MOV_R(ARM_R0, rm[1]), ctx);
+			if (rn[1] == ARM_R0) {
+				emit(ARM_POP(BIT(ARM_R2) | BIT(ARM_R3)), ctx);
+				goto cont;
+			}
+		}
+		/*
+		 * Move Rn to {R3, R2} if it is not already there.
+		 */
+		if (rn[1] != ARM_R2) {
+			emit(ARM_MOV_R(ARM_R3, rn[0]), ctx);
+			emit(ARM_MOV_R(ARM_R2, rn[1]), ctx);
+		}
+	}
+
+cont:
+
+	/* Call appropriate function */
+	if (sign) {
+		if (op == BPF_DIV)
+			dst = (u32)jit_sdiv64;
+		else
+			dst = (u32)jit_smod64;
+	} else {
+		if (op == BPF_DIV)
+			dst = (u32)jit_udiv64;
+		else
+			dst = (u32)jit_mod64;
+	}
+
+	emit_mov_i(ARM_IP, dst, ctx);
+	emit_blx_r(ARM_IP, ctx);
+
+	/* Save return value */
+	if (rd[1] != ARM_R0) {
+		emit(ARM_MOV_R(rd[0], ARM_R1), ctx);
+		emit(ARM_MOV_R(rd[1], ARM_R0), ctx);
+	}
+
+	/* Recover {R3, R2} and {R1, R0} from stack if they are not Rd */
+	if (rd[1] != ARM_R0 && rd[1] != ARM_R2) {
+		emit(ARM_POP(CALLER_MASK), ctx);
+	} else if (rd[1] != ARM_R0) {
+		emit(ARM_POP(BIT(ARM_R0) | BIT(ARM_R1)), ctx);
+		emit(ARM_ADD_I(ARM_SP, ARM_SP, 8), ctx);
+	} else {
+		emit(ARM_ADD_I(ARM_SP, ARM_SP, 8), ctx);
+		emit(ARM_POP(BIT(ARM_R2) | BIT(ARM_R3)), ctx);
+	}
 }
 
 /* Is the translated BPF register on stack? */
@@ -715,22 +839,6 @@ static inline void emit_alu_r(const u8 dst, const u8 src, const bool is64,
 	}
 }
 
-/* ALU operation (32 bit)
- * dst = dst (op) src
- */
-static inline void emit_a32_alu_r(const s8 dst, const s8 src,
-				  struct jit_ctx *ctx, const bool is64,
-				  const bool hi, const u8 op) {
-	const s8 *tmp = bpf2a32[TMP_REG_1];
-	s8 rn, rd;
-
-	rn = arm_bpf_get_reg32(src, tmp[1], ctx);
-	rd = arm_bpf_get_reg32(dst, tmp[0], ctx);
-	/* ALU operation */
-	emit_alu_r(rd, rn, is64, hi, op, ctx);
-	arm_bpf_put_reg32(dst, rd, ctx);
-}
-
 /* ALU operation (64 bit) */
 static inline void emit_a32_alu_r64(const bool is64, const s8 dst[],
 				  const s8 src[], struct jit_ctx *ctx,
@@ -755,15 +863,15 @@ static inline void emit_a32_alu_r64(const bool is64, const s8 dst[],
 
 		/* ALU operation */
 		emit_alu_r(rd[1], rs, true, false, op, ctx);
-		emit_a32_mov_i(rd[0], 0, ctx);
+		if (!ctx->prog->aux->verifier_zext)
+			emit_a32_mov_i(rd[0], 0, ctx);
 	}
 
 	arm_bpf_put_reg64(dst, rd, ctx);
 }
 
 /* dst = src (4 bytes)*/
-static inline void emit_a32_mov_r(const s8 dst, const s8 src,
-				  struct jit_ctx *ctx) {
+static inline void emit_a32_mov_r(const s8 dst, const s8 src, struct jit_ctx *ctx) {
 	const s8 *tmp = bpf2a32[TMP_REG_1];
 	s8 rt;
 
@@ -777,8 +885,9 @@ static inline void emit_a32_mov_r64(const bool is64, const s8 dst[],
 				  struct jit_ctx *ctx) {
 	if (!is64) {
 		emit_a32_mov_r(dst_lo, src_lo, ctx);
-		/* Zero out high 4 bytes */
-		emit_a32_mov_i(dst_hi, 0, ctx);
+		if (!ctx->prog->aux->verifier_zext)
+			/* Zero out high 4 bytes */
+			emit_a32_mov_i(dst_hi, 0, ctx);
 	} else if (__LINUX_ARM_ARCH__ < 6 &&
 		   ctx->cpu_architecture < CPU_ARCH_ARMv5TE) {
 		/* complete 8 byte move */
@@ -799,6 +908,59 @@ static inline void emit_a32_mov_r64(const bool is64, const s8 dst[],
 	}
 }
 
+/* dst = (signed)src */
+static inline void emit_a32_movsx_r64(const bool is64, const u8 off, const s8 dst[], const s8 src[],
+				      struct jit_ctx *ctx) {
+	const s8 *tmp = bpf2a32[TMP_REG_1];
+	s8 rs;
+	s8 rd;
+
+	if (is_stacked(dst_lo))
+		rd = tmp[1];
+	else
+		rd = dst_lo;
+	rs = arm_bpf_get_reg32(src_lo, rd, ctx);
+	/* rs may be one of src[1], dst[1], or tmp[1] */
+
+	/* Sign extend rs if needed. If off == 32, lower 32-bits of src are moved to dst and sign
+	 * extension only happens in the upper 64 bits.
+	 */
+	if (off != 32) {
+		/* Sign extend rs into rd */
+		emit(ARM_LSL_I(rd, rs, 32 - off), ctx);
+		emit(ARM_ASR_I(rd, rd, 32 - off), ctx);
+	} else {
+		rd = rs;
+	}
+
+	/* Write rd to dst_lo
+	 *
+	 * Optimization:
+	 * Assume:
+	 * 1. dst == src and stacked.
+	 * 2. off == 32
+	 *
+	 * In this case src_lo was loaded into rd(tmp[1]) but rd was not sign extended as off==32.
+	 * So, we don't need to write rd back to dst_lo as they have the same value.
+	 * This saves us one str instruction.
+	 */
+	if (dst_lo != src_lo || off != 32)
+		arm_bpf_put_reg32(dst_lo, rd, ctx);
+
+	if (!is64) {
+		if (!ctx->prog->aux->verifier_zext)
+			/* Zero out high 4 bytes */
+			emit_a32_mov_i(dst_hi, 0, ctx);
+	} else {
+		if (is_stacked(dst_hi)) {
+			emit(ARM_ASR_I(tmp[0], rd, 31), ctx);
+			arm_bpf_put_reg32(dst_hi, tmp[0], ctx);
+		} else {
+			emit(ARM_ASR_I(dst_hi, rd, 31), ctx);
+		}
+	}
+}
+
 /* Shift operations */
 static inline void emit_a32_alu_i(const s8 dst, const u32 val,
 				struct jit_ctx *ctx, const u8 op) {
@@ -814,6 +976,9 @@ static inline void emit_a32_alu_i(const s8 dst, const u32 val,
 		break;
 	case BPF_RSH:
 		emit(ARM_LSR_I(rd, rd, val), ctx);
+		break;
+	case BPF_ARSH:
+		emit(ARM_ASR_I(rd, rd, val), ctx);
 		break;
 	case BPF_NEG:
 		emit(ARM_RSB_I(rd, rd, val), ctx);
@@ -880,8 +1045,8 @@ static inline void emit_a32_arsh_r64(const s8 dst[], const s8 src[],
 	emit(ARM_SUBS_I(tmp2[0], rt, 32), ctx);
 	emit(ARM_MOV_SR(ARM_LR, rd[1], SRTYPE_LSR, rt), ctx);
 	emit(ARM_ORR_SR(ARM_LR, ARM_LR, rd[0], SRTYPE_ASL, ARM_IP), ctx);
-	_emit(ARM_COND_MI, ARM_B(0), ctx);
-	emit(ARM_ORR_SR(ARM_LR, ARM_LR, rd[0], SRTYPE_ASR, tmp2[0]), ctx);
+	_emit(ARM_COND_PL,
+	      ARM_ORR_SR(ARM_LR, ARM_LR, rd[0], SRTYPE_ASR, tmp2[0]), ctx);
 	emit(ARM_MOV_SR(ARM_IP, rd[0], SRTYPE_ASR, rt), ctx);
 
 	arm_bpf_put_reg32(dst_lo, ARM_LR, ctx);
@@ -1040,6 +1205,24 @@ static bool is_ldst_imm(s16 off, const u8 size)
 	return -off_max <= off && off <= off_max;
 }
 
+static bool is_ldst_imm8(s16 off, const u8 size)
+{
+	s16 off_max = 0;
+
+	switch (size) {
+	case BPF_B:
+		off_max = 0xff;
+		break;
+	case BPF_W:
+		off_max = 0xfff;
+		break;
+	case BPF_H:
+		off_max = 0xff;
+		break;
+	}
+	return -off_max <= off && off <= off_max;
+}
+
 /* *(size *)(dst + off) = src */
 static inline void emit_str_r(const s8 dst, const s8 src[],
 			      s16 off, struct jit_ctx *ctx, const u8 sz){
@@ -1095,17 +1278,20 @@ static inline void emit_ldx_r(const s8 dst[], const s8 src,
 	case BPF_B:
 		/* Load a Byte */
 		emit(ARM_LDRB_I(rd[1], rm, off), ctx);
-		emit_a32_mov_i(rd[0], 0, ctx);
+		if (!ctx->prog->aux->verifier_zext)
+			emit_a32_mov_i(rd[0], 0, ctx);
 		break;
 	case BPF_H:
 		/* Load a HalfWord */
 		emit(ARM_LDRH_I(rd[1], rm, off), ctx);
-		emit_a32_mov_i(rd[0], 0, ctx);
+		if (!ctx->prog->aux->verifier_zext)
+			emit_a32_mov_i(rd[0], 0, ctx);
 		break;
 	case BPF_W:
 		/* Load a Word */
 		emit(ARM_LDR_I(rd[1], rm, off), ctx);
-		emit_a32_mov_i(rd[0], 0, ctx);
+		if (!ctx->prog->aux->verifier_zext)
+			emit_a32_mov_i(rd[0], 0, ctx);
 		break;
 	case BPF_DW:
 		/* Load a Double Word */
@@ -1116,14 +1302,63 @@ static inline void emit_ldx_r(const s8 dst[], const s8 src,
 	arm_bpf_put_reg64(dst, rd, ctx);
 }
 
+/* dst = *(signed size*)(src + off) */
+static inline void emit_ldsx_r(const s8 dst[], const s8 src,
+			       s16 off, struct jit_ctx *ctx, const u8 sz){
+	const s8 *tmp = bpf2a32[TMP_REG_1];
+	const s8 *rd = is_stacked(dst_lo) ? tmp : dst;
+	s8 rm = src;
+	int add_off;
+
+	if (!is_ldst_imm8(off, sz)) {
+		/*
+		 * offset does not fit in the load/store immediate,
+		 * construct an ADD instruction to apply the offset.
+		 */
+		add_off = imm8m(off);
+		if (add_off > 0) {
+			emit(ARM_ADD_I(tmp[0], src, add_off), ctx);
+			rm = tmp[0];
+		} else {
+			emit_a32_mov_i(tmp[0], off, ctx);
+			emit(ARM_ADD_R(tmp[0], tmp[0], src), ctx);
+			rm = tmp[0];
+		}
+		off = 0;
+	}
+
+	switch (sz) {
+	case BPF_B:
+		/* Load a Byte with sign extension*/
+		emit(ARM_LDRSB_I(rd[1], rm, off), ctx);
+		break;
+	case BPF_H:
+		/* Load a HalfWord with sign extension*/
+		emit(ARM_LDRSH_I(rd[1], rm, off), ctx);
+		break;
+	case BPF_W:
+		/* Load a Word*/
+		emit(ARM_LDR_I(rd[1], rm, off), ctx);
+		break;
+	}
+	/* Carry the sign extension to upper 32 bits */
+	emit(ARM_ASR_I(rd[0], rd[1], 31), ctx);
+	arm_bpf_put_reg64(dst, rd, ctx);
+}
+
 /* Arithmatic Operation */
 static inline void emit_ar_r(const u8 rd, const u8 rt, const u8 rm,
-			     const u8 rn, struct jit_ctx *ctx, u8 op) {
+			     const u8 rn, struct jit_ctx *ctx, u8 op,
+			     bool is_jmp64) {
 	switch (op) {
 	case BPF_JSET:
-		emit(ARM_AND_R(ARM_IP, rt, rn), ctx);
-		emit(ARM_AND_R(ARM_LR, rd, rm), ctx);
-		emit(ARM_ORRS_R(ARM_IP, ARM_LR, ARM_IP), ctx);
+		if (is_jmp64) {
+			emit(ARM_AND_R(ARM_IP, rt, rn), ctx);
+			emit(ARM_AND_R(ARM_LR, rd, rm), ctx);
+			emit(ARM_ORRS_R(ARM_IP, ARM_LR, ARM_IP), ctx);
+		} else {
+			emit(ARM_ANDS_R(ARM_IP, rt, rn), ctx);
+		}
 		break;
 	case BPF_JEQ:
 	case BPF_JNE:
@@ -1131,18 +1366,25 @@ static inline void emit_ar_r(const u8 rd, const u8 rt, const u8 rm,
 	case BPF_JGE:
 	case BPF_JLE:
 	case BPF_JLT:
-		emit(ARM_CMP_R(rd, rm), ctx);
-		_emit(ARM_COND_EQ, ARM_CMP_R(rt, rn), ctx);
+		if (is_jmp64) {
+			emit(ARM_CMP_R(rd, rm), ctx);
+			/* Only compare low halve if high halve are equal. */
+			_emit(ARM_COND_EQ, ARM_CMP_R(rt, rn), ctx);
+		} else {
+			emit(ARM_CMP_R(rt, rn), ctx);
+		}
 		break;
 	case BPF_JSLE:
 	case BPF_JSGT:
 		emit(ARM_CMP_R(rn, rt), ctx);
-		emit(ARM_SBCS_R(ARM_IP, rm, rd), ctx);
+		if (is_jmp64)
+			emit(ARM_SBCS_R(ARM_IP, rm, rd), ctx);
 		break;
 	case BPF_JSLT:
 	case BPF_JSGE:
 		emit(ARM_CMP_R(rt, rn), ctx);
-		emit(ARM_SBCS_R(ARM_IP, rd, rm), ctx);
+		if (is_jmp64)
+			emit(ARM_SBCS_R(ARM_IP, rd, rm), ctx);
 		break;
 	}
 }
@@ -1182,7 +1424,8 @@ static int emit_bpf_tail_call(struct jit_ctx *ctx)
 
 	/* tmp2[0] = array, tmp2[1] = index */
 
-	/* if (tail_call_cnt > MAX_TAIL_CALL_CNT)
+	/*
+	 * if (tail_call_cnt >= MAX_TAIL_CALL_CNT)
 	 *	goto out;
 	 * tail_call_cnt++;
 	 */
@@ -1191,7 +1434,7 @@ static int emit_bpf_tail_call(struct jit_ctx *ctx)
 	tc = arm_bpf_get_reg64(tcc, tmp, ctx);
 	emit(ARM_CMP_I(tc[0], hi), ctx);
 	_emit(ARM_COND_EQ, ARM_CMP_I(tc[1], lo), ctx);
-	_emit(ARM_COND_HI, ARM_B(jmp_offset), ctx);
+	_emit(ARM_COND_CS, ARM_B(jmp_offset), ctx);
 	emit(ARM_ADDS_I(tc[1], tc[1], 1), ctx);
 	emit(ARM_ADC_I(tc[0], tc[0], 0), ctx);
 	arm_bpf_put_reg64(tcc, tmp, ctx);
@@ -1281,12 +1524,9 @@ static inline void emit_push_r64(const s8 src[], struct jit_ctx *ctx)
 
 static void build_prologue(struct jit_ctx *ctx)
 {
-	const s8 r0 = bpf2a32[BPF_REG_0][1];
-	const s8 r2 = bpf2a32[BPF_REG_1][1];
-	const s8 r3 = bpf2a32[BPF_REG_1][0];
-	const s8 r4 = bpf2a32[BPF_REG_6][1];
-	const s8 fplo = bpf2a32[BPF_REG_FP][1];
-	const s8 fphi = bpf2a32[BPF_REG_FP][0];
+	const s8 arm_r0 = bpf2a32[BPF_REG_0][1];
+	const s8 *bpf_r1 = bpf2a32[BPF_REG_1];
+	const s8 *bpf_fp = bpf2a32[BPF_REG_FP];
 	const s8 *tcc = bpf2a32[TCALL_CNT];
 
 	/* Save callee saved registers. */
@@ -1299,8 +1539,10 @@ static void build_prologue(struct jit_ctx *ctx)
 	emit(ARM_PUSH(CALLEE_PUSH_MASK), ctx);
 	emit(ARM_MOV_R(ARM_FP, ARM_SP), ctx);
 #endif
-	/* Save frame pointer for later */
-	emit(ARM_SUB_I(ARM_IP, ARM_SP, SCRATCH_SIZE), ctx);
+	/* mov r3, #0 */
+	/* sub r2, sp, #SCRATCH_SIZE */
+	emit(ARM_MOV_I(bpf_r1[0], 0), ctx);
+	emit(ARM_SUB_I(bpf_r1[1], ARM_SP, SCRATCH_SIZE), ctx);
 
 	ctx->stack_size = imm8m(STACK_SIZE);
 
@@ -1308,18 +1550,15 @@ static void build_prologue(struct jit_ctx *ctx)
 	emit(ARM_SUB_I(ARM_SP, ARM_SP, ctx->stack_size), ctx);
 
 	/* Set up BPF prog stack base register */
-	emit_a32_mov_r(fplo, ARM_IP, ctx);
-	emit_a32_mov_i(fphi, 0, ctx);
+	emit_a32_mov_r64(true, bpf_fp, bpf_r1, ctx);
 
-	/* mov r4, 0 */
-	emit(ARM_MOV_I(r4, 0), ctx);
+	/* Initialize Tail Count */
+	emit(ARM_MOV_I(bpf_r1[1], 0), ctx);
+	emit_a32_mov_r64(true, tcc, bpf_r1, ctx);
 
 	/* Move BPF_CTX to BPF_R1 */
-	emit(ARM_MOV_R(r3, r4), ctx);
-	emit(ARM_MOV_R(r2, r0), ctx);
-	/* Initialize Tail Count */
-	emit(ARM_STR_I(r4, ARM_FP, EBPF_SCRATCH_TO_ARM_FP(tcc[0])), ctx);
-	emit(ARM_STR_I(r4, ARM_FP, EBPF_SCRATCH_TO_ARM_FP(tcc[1])), ctx);
+	emit(ARM_MOV_R(bpf_r1[1], arm_r0), ctx);
+
 	/* end of prologue */
 }
 
@@ -1382,7 +1621,15 @@ static int build_insn(const struct bpf_insn *insn, struct jit_ctx *ctx)
 	case BPF_ALU64 | BPF_MOV | BPF_X:
 		switch (BPF_SRC(code)) {
 		case BPF_X:
-			emit_a32_mov_r64(is64, dst, src, ctx);
+			if (imm == 1) {
+				/* Special mov32 for zext */
+				emit_a32_mov_i(dst_hi, 0, ctx);
+				break;
+			}
+			if (insn->off)
+				emit_a32_movsx_r64(is64, insn->off, dst, src, ctx);
+			else
+				emit_a32_mov_r64(is64, dst, src, ctx);
 			break;
 		case BPF_K:
 			/* Sign-extend immediate value to destination reg */
@@ -1412,7 +1659,6 @@ static int build_insn(const struct bpf_insn *insn, struct jit_ctx *ctx)
 	case BPF_ALU | BPF_MUL | BPF_X:
 	case BPF_ALU | BPF_LSH | BPF_X:
 	case BPF_ALU | BPF_RSH | BPF_X:
-	case BPF_ALU | BPF_ARSH | BPF_K:
 	case BPF_ALU | BPF_ARSH | BPF_X:
 	case BPF_ALU64 | BPF_ADD | BPF_K:
 	case BPF_ALU64 | BPF_ADD | BPF_X:
@@ -1459,24 +1705,40 @@ static int build_insn(const struct bpf_insn *insn, struct jit_ctx *ctx)
 			rt = src_lo;
 			break;
 		}
-		emit_udivmod(rd_lo, rd_lo, rt, ctx, BPF_OP(code));
+		emit_udivmod(rd_lo, rd_lo, rt, ctx, BPF_OP(code), off);
 		arm_bpf_put_reg32(dst_lo, rd_lo, ctx);
-		emit_a32_mov_i(dst_hi, 0, ctx);
+		if (!ctx->prog->aux->verifier_zext)
+			emit_a32_mov_i(dst_hi, 0, ctx);
 		break;
 	case BPF_ALU64 | BPF_DIV | BPF_K:
 	case BPF_ALU64 | BPF_DIV | BPF_X:
 	case BPF_ALU64 | BPF_MOD | BPF_K:
 	case BPF_ALU64 | BPF_MOD | BPF_X:
-		goto notyet;
-	/* dst = dst >> imm */
+		rd = arm_bpf_get_reg64(dst, tmp2, ctx);
+		switch (BPF_SRC(code)) {
+		case BPF_X:
+			rs = arm_bpf_get_reg64(src, tmp, ctx);
+			break;
+		case BPF_K:
+			rs = tmp;
+			emit_a32_mov_se_i64(is64, rs, imm, ctx);
+			break;
+		}
+		emit_udivmod64(rd, rd, rs, ctx, BPF_OP(code), off);
+		arm_bpf_put_reg64(dst, rd, ctx);
+		break;
 	/* dst = dst << imm */
-	case BPF_ALU | BPF_RSH | BPF_K:
+	/* dst = dst >> imm */
+	/* dst = dst >> imm (signed) */
 	case BPF_ALU | BPF_LSH | BPF_K:
+	case BPF_ALU | BPF_RSH | BPF_K:
+	case BPF_ALU | BPF_ARSH | BPF_K:
 		if (unlikely(imm > 31))
 			return -EINVAL;
 		if (imm)
 			emit_a32_alu_i(dst_lo, imm, ctx, BPF_OP(code));
-		emit_a32_mov_i(dst_hi, 0, ctx);
+		if (!ctx->prog->aux->verifier_zext)
+			emit_a32_mov_i(dst_hi, 0, ctx);
 		break;
 	/* dst = dst << imm */
 	case BPF_ALU64 | BPF_LSH | BPF_K:
@@ -1511,7 +1773,8 @@ static int build_insn(const struct bpf_insn *insn, struct jit_ctx *ctx)
 	/* dst = ~dst */
 	case BPF_ALU | BPF_NEG:
 		emit_a32_alu_i(dst_lo, 0, ctx, BPF_OP(code));
-		emit_a32_mov_i(dst_hi, 0, ctx);
+		if (!ctx->prog->aux->verifier_zext)
+			emit_a32_mov_i(dst_hi, 0, ctx);
 		break;
 	/* dst = ~dst (64 bit) */
 	case BPF_ALU64 | BPF_NEG:
@@ -1538,10 +1801,12 @@ static int build_insn(const struct bpf_insn *insn, struct jit_ctx *ctx)
 		break;
 	/* dst = htole(dst) */
 	/* dst = htobe(dst) */
-	case BPF_ALU | BPF_END | BPF_FROM_LE:
-	case BPF_ALU | BPF_END | BPF_FROM_BE:
+	case BPF_ALU | BPF_END | BPF_FROM_LE: /* also BPF_TO_LE */
+	case BPF_ALU | BPF_END | BPF_FROM_BE: /* also BPF_TO_BE */
+	/* dst = bswap(dst) */
+	case BPF_ALU64 | BPF_END | BPF_FROM_LE: /* also BPF_TO_LE */
 		rd = arm_bpf_get_reg64(dst, tmp, ctx);
-		if (BPF_SRC(code) == BPF_FROM_LE)
+		if (BPF_SRC(code) == BPF_FROM_LE && BPF_CLASS(code) != BPF_ALU64)
 			goto emit_bswap_uxt;
 		switch (imm) {
 		case 16:
@@ -1567,11 +1832,13 @@ emit_bswap_uxt:
 #else /* ARMv6+ */
 			emit(ARM_UXTH(rd[1], rd[1]), ctx);
 #endif
-			emit(ARM_EOR_R(rd[0], rd[0], rd[0]), ctx);
+			if (!ctx->prog->aux->verifier_zext)
+				emit(ARM_EOR_R(rd[0], rd[0], rd[0]), ctx);
 			break;
 		case 32:
 			/* zero-extend 32 bits into 64 bits */
-			emit(ARM_EOR_R(rd[0], rd[0], rd[0]), ctx);
+			if (!ctx->prog->aux->verifier_zext)
+				emit(ARM_EOR_R(rd[0], rd[0], rd[0]), ctx);
 			break;
 		case 64:
 			/* nop */
@@ -1594,8 +1861,15 @@ exit:
 	case BPF_LDX | BPF_MEM | BPF_H:
 	case BPF_LDX | BPF_MEM | BPF_B:
 	case BPF_LDX | BPF_MEM | BPF_DW:
+	/* LDSX: dst = *(signed size *)(src + off) */
+	case BPF_LDX | BPF_MEMSX | BPF_B:
+	case BPF_LDX | BPF_MEMSX | BPF_H:
+	case BPF_LDX | BPF_MEMSX | BPF_W:
 		rn = arm_bpf_get_reg32(src_lo, tmp2[1], ctx);
-		emit_ldx_r(dst, rn, off, ctx, BPF_SIZE(code));
+		if (BPF_MODE(insn->code) == BPF_MEMSX)
+			emit_ldsx_r(dst, rn, off, ctx, BPF_SIZE(code));
+		else
+			emit_ldx_r(dst, rn, off, ctx, BPF_SIZE(code));
 		break;
 	/* speculation barrier */
 	case BPF_ST | BPF_NOSPEC:
@@ -1618,10 +1892,9 @@ exit:
 		}
 		emit_str_r(dst_lo, tmp2, off, ctx, BPF_SIZE(code));
 		break;
-	/* STX XADD: lock *(u32 *)(dst + off) += src */
-	case BPF_STX | BPF_XADD | BPF_W:
-	/* STX XADD: lock *(u64 *)(dst + off) += src */
-	case BPF_STX | BPF_XADD | BPF_DW:
+	/* Atomic ops */
+	case BPF_STX | BPF_ATOMIC | BPF_W:
+	case BPF_STX | BPF_ATOMIC | BPF_DW:
 		goto notyet;
 	/* STX: *(size *)(dst + off) = src */
 	case BPF_STX | BPF_MEM | BPF_W:
@@ -1653,6 +1926,17 @@ exit:
 	case BPF_JMP | BPF_JLT | BPF_X:
 	case BPF_JMP | BPF_JSLT | BPF_X:
 	case BPF_JMP | BPF_JSLE | BPF_X:
+	case BPF_JMP32 | BPF_JEQ | BPF_X:
+	case BPF_JMP32 | BPF_JGT | BPF_X:
+	case BPF_JMP32 | BPF_JGE | BPF_X:
+	case BPF_JMP32 | BPF_JNE | BPF_X:
+	case BPF_JMP32 | BPF_JSGT | BPF_X:
+	case BPF_JMP32 | BPF_JSGE | BPF_X:
+	case BPF_JMP32 | BPF_JSET | BPF_X:
+	case BPF_JMP32 | BPF_JLE | BPF_X:
+	case BPF_JMP32 | BPF_JLT | BPF_X:
+	case BPF_JMP32 | BPF_JSLT | BPF_X:
+	case BPF_JMP32 | BPF_JSLE | BPF_X:
 		/* Setup source registers */
 		rm = arm_bpf_get_reg32(src_hi, tmp2[0], ctx);
 		rn = arm_bpf_get_reg32(src_lo, tmp2[1], ctx);
@@ -1679,6 +1963,17 @@ exit:
 	case BPF_JMP | BPF_JLE | BPF_K:
 	case BPF_JMP | BPF_JSLT | BPF_K:
 	case BPF_JMP | BPF_JSLE | BPF_K:
+	case BPF_JMP32 | BPF_JEQ | BPF_K:
+	case BPF_JMP32 | BPF_JGT | BPF_K:
+	case BPF_JMP32 | BPF_JGE | BPF_K:
+	case BPF_JMP32 | BPF_JNE | BPF_K:
+	case BPF_JMP32 | BPF_JSGT | BPF_K:
+	case BPF_JMP32 | BPF_JSGE | BPF_K:
+	case BPF_JMP32 | BPF_JSET | BPF_K:
+	case BPF_JMP32 | BPF_JLT | BPF_K:
+	case BPF_JMP32 | BPF_JLE | BPF_K:
+	case BPF_JMP32 | BPF_JSLT | BPF_K:
+	case BPF_JMP32 | BPF_JSLE | BPF_K:
 		if (off == 0)
 			break;
 		rm = tmp2[0];
@@ -1690,7 +1985,8 @@ go_jmp:
 		rd = arm_bpf_get_reg64(dst, tmp, ctx);
 
 		/* Check for the condition */
-		emit_ar_r(rd[0], rd[1], rm, rn, ctx, BPF_OP(code));
+		emit_ar_r(rd[0], rd[1], rm, rn, ctx, BPF_OP(code),
+			  BPF_CLASS(code) == BPF_JMP);
 
 		/* Setup JUMP instruction */
 		jmp_offset = bpf2a32_offset(i+off, i, ctx);
@@ -1730,10 +2026,15 @@ go_jmp:
 		break;
 	/* JMP OFF */
 	case BPF_JMP | BPF_JA:
+	case BPF_JMP32 | BPF_JA:
 	{
-		if (off == 0)
+		if (BPF_CLASS(code) == BPF_JMP32 && imm != 0)
+			jmp_offset = bpf2a32_offset(i + imm, i, ctx);
+		else if (BPF_CLASS(code) == BPF_JMP && off != 0)
+			jmp_offset = bpf2a32_offset(i + off, i, ctx);
+		else
 			break;
-		jmp_offset = bpf2a32_offset(i+off, i, ctx);
+
 		check_imm24(jmp_offset);
 		emit(ARM_B(jmp_offset), ctx);
 		break;
@@ -1817,7 +2118,7 @@ static int build_body(struct jit_ctx *ctx)
 		if (ctx->target == NULL)
 			ctx->offsets[i] = ctx->idx;
 
-		/* If unsuccesfull, return with error code */
+		/* If unsuccesful, return with error code */
 		if (ret)
 			return ret;
 	}
@@ -1836,9 +2137,9 @@ static int validate_code(struct jit_ctx *ctx)
 	return 0;
 }
 
-void bpf_jit_compile(struct bpf_prog *prog)
+bool bpf_jit_needs_zext(void)
 {
-	/* Nothing to do here. We support Internal BPF. */
+	return true;
 }
 
 struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
@@ -1926,7 +2227,7 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
 	 * for jit, although it can decrease the size of the image.
 	 *
 	 * As each arm instruction is of length 32bit, we are translating
-	 * number of JITed intructions into the size required to store these
+	 * number of JITed instructions into the size required to store these
 	 * JITed code.
 	 */
 	image_size = sizeof(u32) * ctx.idx;
@@ -1951,28 +2252,21 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
 	/* If building the body of the JITed code fails somehow,
 	 * we fall back to the interpretation.
 	 */
-	if (build_body(&ctx) < 0) {
-		image_ptr = NULL;
-		bpf_jit_binary_free(header);
-		prog = orig_prog;
-		goto out_imms;
-	}
+	if (build_body(&ctx) < 0)
+		goto out_free;
 	build_epilogue(&ctx);
 
 	/* 3.) Extra pass to validate JITed Code */
-	if (validate_code(&ctx)) {
-		image_ptr = NULL;
-		bpf_jit_binary_free(header);
-		prog = orig_prog;
-		goto out_imms;
-	}
+	if (validate_code(&ctx))
+		goto out_free;
 	flush_icache_range((u32)header, (u32)(ctx.target + ctx.idx));
 
 	if (bpf_jit_enable > 1)
 		/* there are 2 passes here */
 		bpf_jit_dump(prog->len, image_size, 2, ctx.target);
 
-	bpf_jit_binary_lock_ro(header);
+	if (bpf_jit_binary_lock_ro(header))
+		goto out_free;
 	prog->bpf_func = (void *)ctx.target;
 	prog->jited = 1;
 	prog->jited_len = image_size;
@@ -1989,5 +2283,11 @@ out:
 		bpf_jit_prog_release_other(prog, prog == orig_prog ?
 					   tmp : orig_prog);
 	return prog;
+
+out_free:
+	image_ptr = NULL;
+	bpf_jit_binary_free(header);
+	prog = orig_prog;
+	goto out_imms;
 }
 

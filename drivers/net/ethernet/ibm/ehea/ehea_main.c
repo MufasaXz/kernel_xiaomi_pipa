@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  linux/drivers/net/ethernet/ibm/ehea/ehea_main.c
  *
@@ -9,21 +10,6 @@
  *	 Christoph Raisch <raisch@de.ibm.com>
  *	 Jan-Bernd Themann <themann@de.ibm.com>
  *	 Thomas Klein <tklein@de.ibm.com>
- *
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.	 See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -43,6 +29,9 @@
 #include <asm/kexec.h>
 #include <linux/mutex.h>
 #include <linux/prefetch.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
+#include <linux/platform_device.h>
 
 #include <net/ip.h>
 
@@ -101,7 +90,7 @@ static struct ehea_bcmc_reg_array ehea_bcmc_regs;
 
 static int ehea_probe_adapter(struct platform_device *dev);
 
-static int ehea_remove(struct platform_device *dev);
+static void ehea_remove(struct platform_device *dev);
 
 static const struct of_device_id ehea_module_device_table[] = {
 	{
@@ -123,6 +112,7 @@ static const struct of_device_id ehea_device_table[] = {
 	},
 	{},
 };
+MODULE_DEVICE_TABLE(of, ehea_device_table);
 
 static struct platform_driver ehea_driver = {
 	.driver = {
@@ -778,12 +768,11 @@ static void check_sqs(struct ehea_port *port)
 {
 	struct ehea_swqe *swqe;
 	int swqe_index;
-	int i, k;
+	int i;
 
 	for (i = 0; i < port->num_def_qps; i++) {
 		struct ehea_port_res *pr = &port->port_res[i];
 		int ret;
-		k = 0;
 		swqe = ehea_get_swqe(pr->qp, &swqe_index);
 		memset(swqe, 0, SWQE_HEADER_SIZE);
 		atomic_dec(&pr->swqe_avail);
@@ -911,7 +900,7 @@ static int ehea_poll(struct napi_struct *napi, int budget)
 		if (!cqe && !cqe_skb)
 			return rx;
 
-		if (!napi_reschedule(napi))
+		if (!napi_schedule(napi))
 			return rx;
 
 		cqe_skb = ehea_proc_cqes(pr, EHEA_POLL_MAX_CQES);
@@ -1227,9 +1216,9 @@ static void ehea_parse_eqe(struct ehea_adapter *adapter, u64 eqe)
 	}
 }
 
-static void ehea_neq_tasklet(unsigned long data)
+static void ehea_neq_tasklet(struct tasklet_struct *t)
 {
-	struct ehea_adapter *adapter = (struct ehea_adapter *)data;
+	struct ehea_adapter *adapter = from_tasklet(adapter, t, neq_tasklet);
 	struct ehea_eqe *eqe;
 	u64 event_mask;
 
@@ -1558,7 +1547,7 @@ static int ehea_init_port_res(struct ehea_port *port, struct ehea_port_res *pr,
 
 	kfree(init_attr);
 
-	netif_napi_add(pr->port->netdev, &pr->napi, ehea_poll, 64);
+	netif_napi_add(pr->port->netdev, &pr->napi, ehea_poll);
 
 	ret = 0;
 	goto out;
@@ -1592,20 +1581,16 @@ static int ehea_clean_portres(struct ehea_port *port, struct ehea_port_res *pr)
 		ehea_destroy_eq(pr->eq);
 
 		for (i = 0; i < pr->rq1_skba.len; i++)
-			if (pr->rq1_skba.arr[i])
-				dev_kfree_skb(pr->rq1_skba.arr[i]);
+			dev_kfree_skb(pr->rq1_skba.arr[i]);
 
 		for (i = 0; i < pr->rq2_skba.len; i++)
-			if (pr->rq2_skba.arr[i])
-				dev_kfree_skb(pr->rq2_skba.arr[i]);
+			dev_kfree_skb(pr->rq2_skba.arr[i]);
 
 		for (i = 0; i < pr->rq3_skba.len; i++)
-			if (pr->rq3_skba.arr[i])
-				dev_kfree_skb(pr->rq3_skba.arr[i]);
+			dev_kfree_skb(pr->rq3_skba.arr[i]);
 
 		for (i = 0; i < pr->sq_skba.len; i++)
-			if (pr->sq_skba.arr[i])
-				dev_kfree_skb(pr->sq_skba.arr[i]);
+			dev_kfree_skb(pr->sq_skba.arr[i]);
 
 		vfree(pr->rq1_skba.arr);
 		vfree(pr->rq2_skba.arr);
@@ -1633,7 +1618,7 @@ static void write_swqe2_immediate(struct sk_buff *skb, struct ehea_swqe *swqe,
 		 * For TSO packets we only copy the headers into the
 		 * immediate area.
 		 */
-		immediate_len = ETH_HLEN + ip_hdrlen(skb) + tcp_hdrlen(skb);
+		immediate_len = skb_tcp_all_headers(skb);
 	}
 
 	if (skb_is_gso(skb) || skb_data_size >= SWQE2_MAX_IMM) {
@@ -1759,7 +1744,7 @@ static int ehea_set_mac_addr(struct net_device *dev, void *sa)
 		goto out_free;
 	}
 
-	memcpy(dev->dev_addr, mac_addr->sa_data, dev->addr_len);
+	eth_hw_addr_set(dev, mac_addr->sa_data);
 
 	/* Deregister old MAC in pHYP */
 	if (port->state == EHEA_PORT_UP) {
@@ -2806,7 +2791,7 @@ out:
 	return;
 }
 
-static void ehea_tx_watchdog(struct net_device *dev)
+static void ehea_tx_watchdog(struct net_device *dev, unsigned int txqueue)
 {
 	struct ehea_port *port = netdev_priv(dev);
 
@@ -2886,14 +2871,14 @@ out:
 	return ret;
 }
 
-static ssize_t ehea_show_port_id(struct device *dev,
-				 struct device_attribute *attr, char *buf)
+static ssize_t log_port_id_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
 {
 	struct ehea_port *port = container_of(dev, struct ehea_port, ofdev.dev);
 	return sprintf(buf, "%d", port->logical_port_id);
 }
 
-static DEVICE_ATTR(log_port_id, 0444, ehea_show_port_id, NULL);
+static DEVICE_ATTR_RO(log_port_id);
 
 static void logical_port_release(struct device *dev)
 {
@@ -3005,7 +2990,7 @@ static struct ehea_port *ehea_setup_single_port(struct ehea_adapter *adapter,
 	SET_NETDEV_DEV(dev, port_dev);
 
 	/* initialize net_device structure */
-	memcpy(dev->dev_addr, &port->mac_addr, ETH_ALEN);
+	eth_hw_addr_set(dev, (u8 *)&port->mac_addr);
 
 	dev->netdev_ops = &ehea_netdev_ops;
 	ehea_set_ethtool_ops(dev);
@@ -3078,14 +3063,13 @@ static void ehea_shutdown_single_port(struct ehea_port *port)
 static int ehea_setup_ports(struct ehea_adapter *adapter)
 {
 	struct device_node *lhea_dn;
-	struct device_node *eth_dn = NULL;
+	struct device_node *eth_dn;
 
 	const u32 *dn_log_port_id;
 	int i = 0;
 
 	lhea_dn = adapter->ofdev->dev.of_node;
-	while ((eth_dn = of_get_next_child(lhea_dn, eth_dn))) {
-
+	for_each_child_of_node(lhea_dn, eth_dn) {
 		dn_log_port_id = of_get_property(eth_dn, "ibm,hea-port-no",
 						 NULL);
 		if (!dn_log_port_id) {
@@ -3117,12 +3101,11 @@ static struct device_node *ehea_get_eth_dn(struct ehea_adapter *adapter,
 					   u32 logical_port_id)
 {
 	struct device_node *lhea_dn;
-	struct device_node *eth_dn = NULL;
+	struct device_node *eth_dn;
 	const u32 *dn_log_port_id;
 
 	lhea_dn = adapter->ofdev->dev.of_node;
-	while ((eth_dn = of_get_next_child(lhea_dn, eth_dn))) {
-
+	for_each_child_of_node(lhea_dn, eth_dn) {
 		dn_log_port_id = of_get_property(eth_dn, "ibm,hea-port-no",
 						 NULL);
 		if (dn_log_port_id)
@@ -3133,7 +3116,7 @@ static struct device_node *ehea_get_eth_dn(struct ehea_adapter *adapter,
 	return NULL;
 }
 
-static ssize_t ehea_probe_port(struct device *dev,
+static ssize_t probe_port_store(struct device *dev,
 			       struct device_attribute *attr,
 			       const char *buf, size_t count)
 {
@@ -3188,9 +3171,9 @@ static ssize_t ehea_probe_port(struct device *dev,
 	return (ssize_t) count;
 }
 
-static ssize_t ehea_remove_port(struct device *dev,
-				struct device_attribute *attr,
-				const char *buf, size_t count)
+static ssize_t remove_port_store(struct device *dev,
+				 struct device_attribute *attr,
+				 const char *buf, size_t count)
 {
 	struct ehea_adapter *adapter = dev_get_drvdata(dev);
 	struct ehea_port *port;
@@ -3223,8 +3206,8 @@ static ssize_t ehea_remove_port(struct device *dev,
 	return (ssize_t) count;
 }
 
-static DEVICE_ATTR(probe_port, 0200, NULL, ehea_probe_port);
-static DEVICE_ATTR(remove_port, 0200, NULL, ehea_remove_port);
+static DEVICE_ATTR_WO(probe_port);
+static DEVICE_ATTR_WO(remove_port);
 
 static int ehea_create_device_sysfs(struct platform_device *dev)
 {
@@ -3268,7 +3251,7 @@ static int ehea_mem_notifier(struct notifier_block *nb,
 	switch (action) {
 	case MEM_CANCEL_OFFLINE:
 		pr_info("memory offlining canceled");
-		/* Fall through: re-add canceled memory block */
+		fallthrough;	/* re-add canceled memory block */
 
 	case MEM_ONLINE:
 		pr_info("memory is going online");
@@ -3438,8 +3421,7 @@ static int ehea_probe_adapter(struct platform_device *dev)
 		goto out_free_ad;
 	}
 
-	tasklet_init(&adapter->neq_tasklet, ehea_neq_tasklet,
-		     (unsigned long)adapter);
+	tasklet_setup(&adapter->neq_tasklet, ehea_neq_tasklet);
 
 	ret = ehea_create_device_sysfs(dev);
 	if (ret)
@@ -3487,7 +3469,7 @@ out:
 	return ret;
 }
 
-static int ehea_remove(struct platform_device *dev)
+static void ehea_remove(struct platform_device *dev)
 {
 	struct ehea_adapter *adapter = platform_get_drvdata(dev);
 	int i;
@@ -3508,8 +3490,6 @@ static int ehea_remove(struct platform_device *dev)
 	list_del(&adapter->list);
 
 	ehea_update_firmware_handles();
-
-	return 0;
 }
 
 static int check_module_parm(void)

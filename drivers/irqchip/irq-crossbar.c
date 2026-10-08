@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  drivers/irqchip/irq-crossbar.c
  *
  *  Copyright (C) 2013 Texas Instruments Incorporated - http://www.ti.com
  *  Author: Sricharan R <r.sricharan@ti.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 #include <linux/err.h>
 #include <linux/io.h>
@@ -355,10 +351,8 @@ static int __init irqcrossbar_init(struct device_node *node,
 	if (err)
 		return err;
 
-	domain = irq_domain_add_hierarchy(parent_domain, 0,
-					  cb->max_crossbar_sources,
-					  node, &crossbar_domain_ops,
-					  NULL);
+	domain = irq_domain_create_hierarchy(parent_domain, 0, cb->max_crossbar_sources,
+					     of_fwnode_handle(node), &crossbar_domain_ops, NULL);
 	if (!domain) {
 		pr_err("%pOF: failed to allocated domain\n", node);
 		return -ENOMEM;

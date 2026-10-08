@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * IPVS:        Destination Hashing scheduling module
  *
@@ -6,13 +7,7 @@
  *              Inspired by the consistent hashing scheduler patch from
  *              Thomas Proell <proellt@gmx.de>
  *
- *              This program is free software; you can redistribute it and/or
- *              modify it under the terms of the GNU General Public License
- *              as published by the Free Software Foundation; either version
- *              2 of the License, or (at your option) any later version.
- *
  * Changes:
- *
  */
 
 /*
@@ -275,3 +270,4 @@ static void __exit ip_vs_dh_cleanup(void)
 module_init(ip_vs_dh_init);
 module_exit(ip_vs_dh_cleanup);
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("ipvs destination hashing scheduler");

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Aeroflex Gaisler GRETH 10/100/1G Ethernet MAC.
  *
@@ -7,15 +8,10 @@
  * available in the GRLIB VHDL IP core library.
  *
  * Full documentation of both cores can be found here:
- * http://www.gaisler.com/products/grlib/grip.pdf
+ * https://www.gaisler.com/products/grlib/grip.pdf
  *
  * The Gigabit version supports scatter/gather DMA, any alignment of
  * buffers and checksum offloading.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the License, or (at your
- * option) any later version.
  *
  * Contributors: Kristoffer Glembo
  *               Daniel Hellstrom
@@ -33,9 +29,9 @@
 #include <linux/io.h>
 #include <linux/crc32.h>
 #include <linux/mii.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/of_net.h>
-#include <linux/of_platform.h>
+#include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <asm/cacheflush.h>
 #include <asm/byteorder.h>
@@ -114,7 +110,7 @@ static void greth_print_tx_packet(struct sk_buff *skb)
 
 		print_hex_dump(KERN_DEBUG, "TX: ", DUMP_PREFIX_OFFSET, 16, 1,
 			       skb_frag_address(&skb_shinfo(skb)->frags[i]),
-			       skb_shinfo(skb)->frags[i].size, true);
+			       skb_frag_size(&skb_shinfo(skb)->frags[i]), true);
 	}
 }
 
@@ -615,7 +611,6 @@ static irqreturn_t greth_interrupt(int irq, void *dev_id)
 		napi_schedule(&greth->napi);
 	}
 
-	mmiowb();
 	spin_unlock(&greth->devlock);
 
 	return retval;
@@ -1032,7 +1027,7 @@ static int greth_set_mac_add(struct net_device *dev, void *p)
 	if (!is_valid_ether_addr(addr->sa_data))
 		return -EADDRNOTAVAIL;
 
-	memcpy(dev->dev_addr, addr->sa_data, dev->addr_len);
+	eth_hw_addr_set(dev, addr->sa_data);
 	GRETH_REGSAVE(regs->esa_msb, dev->dev_addr[0] << 8 | dev->dev_addr[1]);
 	GRETH_REGSAVE(regs->esa_lsb, dev->dev_addr[2] << 24 | dev->dev_addr[3] << 16 |
 		      dev->dev_addr[4] << 8 | dev->dev_addr[5]);
@@ -1119,11 +1114,9 @@ static void greth_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *in
 {
 	struct greth_private *greth = netdev_priv(dev);
 
-	strlcpy(info->driver, dev_driver_string(greth->dev),
+	strscpy(info->driver, dev_driver_string(greth->dev),
 		sizeof(info->driver));
-	strlcpy(info->version, "revision: 1.0", sizeof(info->version));
-	strlcpy(info->bus_info, greth->dev->bus->name, sizeof(info->bus_info));
-	strlcpy(info->fw_version, "N/A", sizeof(info->fw_version));
+	strscpy(info->bus_info, greth->dev->bus->name, sizeof(info->bus_info));
 }
 
 static void greth_get_regs(struct net_device *dev, struct ethtool_regs *regs, void *p)
@@ -1281,11 +1274,11 @@ static int greth_mdio_probe(struct net_device *dev)
 	}
 
 	if (greth->gbit_mac)
-		phy->supported &= PHY_GBIT_FEATURES;
+		phy_set_max_speed(phy, SPEED_1000);
 	else
-		phy->supported &= PHY_BASIC_FEATURES;
+		phy_set_max_speed(phy, SPEED_100);
 
-	phy->advertising = phy->supported;
+	linkmode_copy(phy->advertising, phy->supported);
 
 	greth->link = 0;
 	greth->speed = 0;
@@ -1355,6 +1348,7 @@ static int greth_of_probe(struct platform_device *ofdev)
 	int i;
 	int err;
 	int tmp;
+	u8 addr[ETH_ALEN];
 	unsigned long timeout;
 
 	dev = alloc_etherdev(sizeof(struct greth_private));
@@ -1435,18 +1429,18 @@ static int greth_of_probe(struct platform_device *ofdev)
 	}
 
 	/* Allocate TX descriptor ring in coherent memory */
-	greth->tx_bd_base = dma_zalloc_coherent(greth->dev, 1024,
-						&greth->tx_bd_base_phys,
-						GFP_KERNEL);
+	greth->tx_bd_base = dma_alloc_coherent(greth->dev, 1024,
+					       &greth->tx_bd_base_phys,
+					       GFP_KERNEL);
 	if (!greth->tx_bd_base) {
 		err = -ENOMEM;
 		goto error3;
 	}
 
 	/* Allocate RX descriptor ring in coherent memory */
-	greth->rx_bd_base = dma_zalloc_coherent(greth->dev, 1024,
-						&greth->rx_bd_base_phys,
-						GFP_KERNEL);
+	greth->rx_bd_base = dma_alloc_coherent(greth->dev, 1024,
+					       &greth->rx_bd_base_phys,
+					       GFP_KERNEL);
 	if (!greth->rx_bd_base) {
 		err = -ENOMEM;
 		goto error4;
@@ -1458,10 +1452,8 @@ static int greth_of_probe(struct platform_device *ofdev)
 			break;
 	}
 	if (i == 6) {
-		const u8 *addr;
-
-		addr = of_get_mac_address(ofdev->dev.of_node);
-		if (addr) {
+		err = of_get_mac_address(ofdev->dev.of_node, addr);
+		if (!err) {
 			for (i = 0; i < 6; i++)
 				macaddr[i] = (unsigned int) addr[i];
 		} else {
@@ -1473,7 +1465,8 @@ static int greth_of_probe(struct platform_device *ofdev)
 	}
 
 	for (i = 0; i < 6; i++)
-		dev->dev_addr[i] = macaddr[i];
+		addr[i] = macaddr[i];
+	eth_hw_addr_set(dev, addr);
 
 	macaddr[5]++;
 
@@ -1516,7 +1509,7 @@ static int greth_of_probe(struct platform_device *ofdev)
 	}
 
 	/* setup NAPI */
-	netif_napi_add(dev, &greth->napi, greth_poll, 64);
+	netif_napi_add(dev, &greth->napi, greth_poll);
 
 	return 0;
 
@@ -1533,7 +1526,7 @@ error1:
 	return err;
 }
 
-static int greth_of_remove(struct platform_device *of_dev)
+static void greth_of_remove(struct platform_device *of_dev)
 {
 	struct net_device *ndev = platform_get_drvdata(of_dev);
 	struct greth_private *greth = netdev_priv(ndev);
@@ -1552,8 +1545,6 @@ static int greth_of_remove(struct platform_device *of_dev)
 	of_iounmap(&of_dev->resource[0], greth->regs, resource_size(&of_dev->resource[0]));
 
 	free_netdev(ndev);
-
-	return 0;
 }
 
 static const struct of_device_id greth_of_match[] = {

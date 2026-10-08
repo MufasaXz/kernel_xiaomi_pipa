@@ -28,19 +28,20 @@
 #include <linux/module.h>
 #include <linux/debugfs.h>
 #include <linux/kthread.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
 #include <net/bluetooth/l2cap.h>
 #include <net/bluetooth/rfcomm.h>
 
+#include <trace/events/sock.h>
+
 #define VERSION "1.11"
 
 static bool disable_cfc;
 static bool l2cap_ertm;
 static int channel_mtu = -1;
-static unsigned int l2cap_mtu = RFCOMM_MAX_L2CAP_MTU;
 
 static struct task_struct *rfcomm_thread;
 
@@ -73,8 +74,6 @@ static struct rfcomm_session *rfcomm_session_del(struct rfcomm_session *s);
 
 /* ---- RFCOMM frame parsing macros ---- */
 #define __get_dlci(b)     ((b & 0xfc) >> 2)
-#define __get_channel(b)  ((b & 0xf8) >> 3)
-#define __get_dir(b)      ((b & 0x04) >> 2)
 #define __get_type(b)     ((b & 0xef))
 
 #define __test_ea(b)      ((b & 0x01))
@@ -87,7 +86,6 @@ static struct rfcomm_session *rfcomm_session_del(struct rfcomm_session *s);
 #define __ctrl(type, pf)       (((type & 0xef) | (pf << 4)))
 #define __dlci(dir, chn)       (((chn & 0x1f) << 1) | dir)
 #define __srv_channel(dlci)    (dlci >> 1)
-#define __dir(dlci)            (dlci & 0x01)
 
 #define __len8(len)       (((len) << 1) | 1)
 #define __len16(len)      ((len) << 1)
@@ -190,6 +188,8 @@ static void rfcomm_l2state_change(struct sock *sk)
 
 static void rfcomm_l2data_ready(struct sock *sk)
 {
+	trace_sk_data_ready(sk);
+
 	BT_DBG("%p", sk);
 	rfcomm_schedule();
 }
@@ -235,7 +235,7 @@ static int rfcomm_check_security(struct rfcomm_dlc *d)
 
 static void rfcomm_session_timeout(struct timer_list *t)
 {
-	struct rfcomm_session *s = from_timer(s, t, timer);
+	struct rfcomm_session *s = timer_container_of(s, t, timer);
 
 	BT_DBG("session %p state %ld", s, s->state);
 
@@ -254,13 +254,13 @@ static void rfcomm_session_clear_timer(struct rfcomm_session *s)
 {
 	BT_DBG("session %p state %ld", s, s->state);
 
-	del_timer_sync(&s->timer);
+	timer_delete_sync(&s->timer);
 }
 
 /* ---- RFCOMM DLCs ---- */
 static void rfcomm_dlc_timeout(struct timer_list *t)
 {
-	struct rfcomm_dlc *d = from_timer(d, t, timer);
+	struct rfcomm_dlc *d = timer_container_of(d, t, timer);
 
 	BT_DBG("dlc %p state %ld", d, d->state);
 
@@ -281,7 +281,7 @@ static void rfcomm_dlc_clear_timer(struct rfcomm_dlc *d)
 {
 	BT_DBG("dlc %p state %ld", d, d->state);
 
-	if (del_timer(&d->timer))
+	if (timer_delete(&d->timer))
 		rfcomm_dlc_put(d);
 }
 
@@ -483,6 +483,7 @@ static int __rfcomm_dlc_close(struct rfcomm_dlc *d, int err)
 		/* if closing a dlc in a session that hasn't been started,
 		 * just close and unlink the dlc
 		 */
+		fallthrough;
 
 	default:
 		rfcomm_dlc_clear_timer(d);
@@ -787,7 +788,8 @@ static struct rfcomm_session *rfcomm_session_create(bdaddr_t *src,
 	/* Set L2CAP options */
 	sk = sock->sk;
 	lock_sock(sk);
-	l2cap_pi(sk)->chan->imtu = l2cap_mtu;
+	/* Set MTU to 0 so L2CAP can auto select the MTU */
+	l2cap_pi(sk)->chan->imtu = 0;
 	l2cap_pi(sk)->chan->sec_level = sec_level;
 	if (l2cap_ertm)
 		l2cap_pi(sk)->chan->mode = L2CAP_MODE_ERTM;
@@ -1960,7 +1962,8 @@ static void rfcomm_accept_connection(struct rfcomm_session *s)
 	int err;
 
 	/* Fast check for a new connection.
-	 * Avoids unnesesary socket allocations. */
+	 * Avoids unnecessary socket allocations.
+	 */
 	if (list_empty(&bt_sk(sock->sk)->accept_q))
 		return;
 
@@ -2074,7 +2077,8 @@ static int rfcomm_add_listener(bdaddr_t *ba)
 	/* Set L2CAP options */
 	sk = sock->sk;
 	lock_sock(sk);
-	l2cap_pi(sk)->chan->imtu = l2cap_mtu;
+	/* Set MTU to 0 so L2CAP can auto select the MTU */
+	l2cap_pi(sk)->chan->imtu = 0;
 	release_sock(sk);
 
 	/* Start listening on the socket */
@@ -2202,17 +2206,7 @@ static int rfcomm_dlc_debugfs_show(struct seq_file *f, void *x)
 	return 0;
 }
 
-static int rfcomm_dlc_debugfs_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, rfcomm_dlc_debugfs_show, inode->i_private);
-}
-
-static const struct file_operations rfcomm_dlc_debugfs_fops = {
-	.open		= rfcomm_dlc_debugfs_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
+DEFINE_SHOW_ATTRIBUTE(rfcomm_dlc_debugfs);
 
 static struct dentry *rfcomm_dlc_debugfs;
 
@@ -2281,9 +2275,6 @@ MODULE_PARM_DESC(disable_cfc, "Disable credit based flow control");
 
 module_param(channel_mtu, int, 0644);
 MODULE_PARM_DESC(channel_mtu, "Default MTU for the RFCOMM channel");
-
-module_param(l2cap_mtu, uint, 0644);
-MODULE_PARM_DESC(l2cap_mtu, "Default MTU for the L2CAP connection");
 
 module_param(l2cap_ertm, bool, 0644);
 MODULE_PARM_DESC(l2cap_ertm, "Use L2CAP ERTM mode for connection");

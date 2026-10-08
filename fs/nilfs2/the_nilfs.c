@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
- * the_nilfs.c - the_nilfs shared structure.
+ * the_nilfs shared structure.
  *
  * Copyright (C) 2005-2008 Nippon Telegraph and Telephone Corporation.
  *
@@ -12,7 +12,6 @@
 #include <linux/slab.h>
 #include <linux/blkdev.h>
 #include <linux/backing-dev.h>
-#include <linux/random.h>
 #include <linux/log2.h>
 #include <linux/crc32.h>
 #include "nilfs.h"
@@ -50,8 +49,8 @@ void nilfs_set_last_segment(struct the_nilfs *nilfs,
  * alloc_nilfs - allocate a nilfs object
  * @sb: super block instance
  *
- * Return Value: On success, pointer to the_nilfs is returned.
- * On error, NULL is returned.
+ * Return: a pointer to the allocated nilfs object on success, or NULL on
+ * failure.
  */
 struct the_nilfs *alloc_nilfs(struct super_block *sb)
 {
@@ -69,7 +68,6 @@ struct the_nilfs *alloc_nilfs(struct super_block *sb)
 	INIT_LIST_HEAD(&nilfs->ns_dirty_files);
 	INIT_LIST_HEAD(&nilfs->ns_gc_inodes);
 	spin_lock_init(&nilfs->ns_inode_lock);
-	spin_lock_init(&nilfs->ns_next_gen_lock);
 	spin_lock_init(&nilfs->ns_last_segment_lock);
 	nilfs->ns_cptree = RB_ROOT;
 	spin_lock_init(&nilfs->ns_cptree_lock);
@@ -167,6 +165,9 @@ static void nilfs_clear_recovery_info(struct nilfs_recovery_info *ri)
  * containing a super root from a given super block, and initializes
  * relevant information on the nilfs object preparatory for log
  * scanning and recovery.
+ *
+ * Return: 0 on success, or %-EINVAL if current segment number is out
+ * of range.
  */
 static int nilfs_store_log_cursor(struct the_nilfs *nilfs,
 				  struct nilfs_super_block *sbp)
@@ -193,13 +194,47 @@ static int nilfs_store_log_cursor(struct the_nilfs *nilfs,
 }
 
 /**
+ * nilfs_get_blocksize - get block size from raw superblock data
+ * @sb: super block instance
+ * @sbp: superblock raw data buffer
+ * @blocksize: place to store block size
+ *
+ * nilfs_get_blocksize() calculates the block size from the block size
+ * exponent information written in @sbp and stores it in @blocksize,
+ * or aborts with an error message if it's too large.
+ *
+ * Return: 0 on success, or %-EINVAL if the block size is too large.
+ */
+static int nilfs_get_blocksize(struct super_block *sb,
+			       struct nilfs_super_block *sbp, int *blocksize)
+{
+	unsigned int shift_bits = le32_to_cpu(sbp->s_log_block_size);
+
+	if (unlikely(shift_bits >
+		     ilog2(NILFS_MAX_BLOCK_SIZE) - BLOCK_SIZE_BITS)) {
+		nilfs_err(sb, "too large filesystem blocksize: 2 ^ %u KiB",
+			  shift_bits);
+		return -EINVAL;
+	}
+	*blocksize = BLOCK_SIZE << shift_bits;
+	return 0;
+}
+
+/**
  * load_nilfs - load and recover the nilfs
  * @nilfs: the_nilfs structure to be released
- * @sb: super block isntance used to recover past segment
+ * @sb: super block instance used to recover past segment
  *
  * load_nilfs() searches and load the latest super root,
  * attaches the last segment, and does recovery if needed.
  * The caller must call this exclusively for simultaneous mounts.
+ *
+ * Return: 0 on success, or one of the following negative error codes on
+ * failure:
+ * * %-EINVAL	- No valid segment found.
+ * * %-EIO	- I/O error.
+ * * %-ENOMEM	- Insufficient memory available.
+ * * %-EROFS	- Read only device or RO compat mode (if recovery is required)
  */
 int load_nilfs(struct the_nilfs *nilfs, struct super_block *sb)
 {
@@ -245,11 +280,15 @@ int load_nilfs(struct the_nilfs *nilfs, struct super_block *sb)
 		nilfs->ns_sbwtime = le64_to_cpu(sbp[0]->s_wtime);
 
 		/* verify consistency between two super blocks */
-		blocksize = BLOCK_SIZE << le32_to_cpu(sbp[0]->s_log_block_size);
+		err = nilfs_get_blocksize(sb, sbp[0], &blocksize);
+		if (err)
+			goto scan_error;
+
 		if (blocksize != nilfs->ns_blocksize) {
 			nilfs_warn(sb,
 				   "blocksize differs between two super blocks (%d != %d)",
 				   blocksize, nilfs->ns_blocksize);
+			err = -EINVAL;
 			goto scan_error;
 		}
 
@@ -365,6 +404,8 @@ static unsigned long long nilfs_max_size(unsigned int blkbits)
  * nilfs_nrsvsegs - calculate the number of reserved segments
  * @nilfs: nilfs object
  * @nsegs: total number of segments
+ *
+ * Return: Number of reserved segments.
  */
 unsigned long nilfs_nrsvsegs(struct the_nilfs *nilfs, unsigned long nsegs)
 {
@@ -376,12 +417,14 @@ unsigned long nilfs_nrsvsegs(struct the_nilfs *nilfs, unsigned long nsegs)
 /**
  * nilfs_max_segment_count - calculate the maximum number of segments
  * @nilfs: nilfs object
+ *
+ * Return: Maximum number of segments
  */
 static u64 nilfs_max_segment_count(struct the_nilfs *nilfs)
 {
 	u64 max_count = U64_MAX;
 
-	do_div(max_count, nilfs->ns_blocks_per_segment);
+	max_count = div64_ul(max_count, nilfs->ns_blocks_per_segment);
 	return min_t(u64, max_count, ULONG_MAX);
 }
 
@@ -447,15 +490,14 @@ static int nilfs_store_disk_layout(struct the_nilfs *nilfs,
 
 	nsegments = le64_to_cpu(sbp->s_nsegments);
 	if (nsegments > nilfs_max_segment_count(nilfs)) {
-		nilfs_msg(nilfs->ns_sb, KERN_ERR,
+		nilfs_err(nilfs->ns_sb,
 			  "segment count %llu exceeds upper limit (%llu segments)",
 			  (unsigned long long)nsegments,
 			  (unsigned long long)nilfs_max_segment_count(nilfs));
 		return -EINVAL;
 	}
 
-	nblocks = (u64)i_size_read(nilfs->ns_sb->s_bdev->bd_inode) >>
-		nilfs->ns_sb->s_blocksize_bits;
+	nblocks = sb_bdev_nr_blocks(nilfs->ns_sb);
 	if (nblocks) {
 		u64 min_block_count = nsegments * nilfs->ns_blocks_per_segment;
 		/*
@@ -465,7 +507,7 @@ static int nilfs_store_disk_layout(struct the_nilfs *nilfs,
 		 */
 
 		if (nblocks < min_block_count) {
-			nilfs_msg(nilfs->ns_sb, KERN_ERR,
+			nilfs_err(nilfs->ns_sb,
 				  "total number of segment blocks %llu exceeds device size (%llu blocks)",
 				  (unsigned long long)min_block_count,
 				  (unsigned long long)nblocks);
@@ -509,7 +551,7 @@ static int nilfs_valid_sb(struct nilfs_super_block *sbp)
  * area, or if the parameters themselves are not normal, it is
  * determined to be invalid.
  *
- * Return Value: true if invalid, false if valid.
+ * Return: true if invalid, false if valid.
  */
 static bool nilfs_sb2_bad_offset(struct nilfs_super_block *sbp, u64 offset)
 {
@@ -566,11 +608,11 @@ static int nilfs_load_super_block(struct the_nilfs *nilfs,
 {
 	struct nilfs_super_block **sbp = nilfs->ns_sbp;
 	struct buffer_head **sbh = nilfs->ns_sbh;
-	u64 sb2off, devsize = nilfs->ns_bdev->bd_inode->i_size;
-	int valid[2], swp = 0;
+	u64 sb2off, devsize = bdev_nr_bytes(nilfs->ns_bdev);
+	int valid[2], swp = 0, older;
 
 	if (devsize < NILFS_SEG_MIN_BLOCKS * NILFS_MIN_BLOCK_SIZE + 4096) {
-		nilfs_msg(sb, KERN_ERR, "device size too small");
+		nilfs_err(sb, "device size too small");
 		return -EINVAL;
 	}
 	sb2off = NILFS_SB2_OFFSET_BYTES(devsize);
@@ -623,9 +665,25 @@ static int nilfs_load_super_block(struct the_nilfs *nilfs,
 	if (swp)
 		nilfs_swap_super_block(nilfs);
 
+	/*
+	 * Calculate the array index of the older superblock data.
+	 * If one has been dropped, set index 0 pointing to the remaining one,
+	 * otherwise set index 1 pointing to the old one (including if both
+	 * are the same).
+	 *
+	 *  Divided case             valid[0]  valid[1]  swp  ->  older
+	 *  -------------------------------------------------------------
+	 *  Both SBs are invalid        0         0       N/A (Error)
+	 *  SB1 is invalid              0         1       1         0
+	 *  SB2 is invalid              1         0       0         0
+	 *  SB2 is newer                1         1       1         0
+	 *  SB2 is older or the same    1         1       0         1
+	 */
+	older = valid[1] ^ swp;
+
 	nilfs->ns_sbwcount = 0;
 	nilfs->ns_sbwtime = le64_to_cpu(sbp[0]->s_wtime);
-	nilfs->ns_prot_seq = le64_to_cpu(sbp[valid[1] & !swp]->s_last_seq);
+	nilfs->ns_prot_seq = le64_to_cpu(sbp[older]->s_last_seq);
 	*sbpp = sbp[0];
 	return 0;
 }
@@ -634,22 +692,18 @@ static int nilfs_load_super_block(struct the_nilfs *nilfs,
  * init_nilfs - initialize a NILFS instance.
  * @nilfs: the_nilfs structure
  * @sb: super block
- * @data: mount options
  *
  * init_nilfs() performs common initialization per block device (e.g.
  * reading the super block, getting disk layout information, initializing
  * shared fields in the_nilfs).
  *
- * Return Value: On success, 0 is returned. On error, a negative error
- * code is returned.
+ * Return: 0 on success, or a negative error code on failure.
  */
-int init_nilfs(struct the_nilfs *nilfs, struct super_block *sb, char *data)
+int init_nilfs(struct the_nilfs *nilfs, struct super_block *sb)
 {
 	struct nilfs_super_block *sbp;
 	int blocksize;
 	int err;
-
-	down_write(&nilfs->ns_sem);
 
 	blocksize = sb_min_blocksize(sb, NILFS_MIN_BLOCK_SIZE);
 	if (!blocksize) {
@@ -661,7 +715,7 @@ int init_nilfs(struct the_nilfs *nilfs, struct super_block *sb, char *data)
 	if (err)
 		goto out;
 
-	err = nilfs_store_magic_and_option(sb, sbp, data);
+	err = nilfs_store_magic(sb, sbp);
 	if (err)
 		goto failed_sbh;
 
@@ -669,9 +723,11 @@ int init_nilfs(struct the_nilfs *nilfs, struct super_block *sb, char *data)
 	if (err)
 		goto failed_sbh;
 
-	blocksize = BLOCK_SIZE << le32_to_cpu(sbp->s_log_block_size);
-	if (blocksize < NILFS_MIN_BLOCK_SIZE ||
-	    blocksize > NILFS_MAX_BLOCK_SIZE) {
+	err = nilfs_get_blocksize(sb, sbp, &blocksize);
+	if (err)
+		goto failed_sbh;
+
+	if (blocksize < NILFS_MIN_BLOCK_SIZE) {
 		nilfs_err(sb,
 			  "couldn't mount because of unsupported filesystem blocksize %d",
 			  blocksize);
@@ -690,7 +746,7 @@ int init_nilfs(struct the_nilfs *nilfs, struct super_block *sb, char *data)
 		}
 		nilfs_release_super_block(nilfs);
 		if (!sb_set_blocksize(sb, blocksize)) {
-			nilfs_msg(sb, KERN_ERR, "bad blocksize %d", blocksize);
+			nilfs_err(sb, "bad blocksize %d", blocksize);
 			err = -EINVAL;
 			goto out;
 		}
@@ -705,9 +761,6 @@ int init_nilfs(struct the_nilfs *nilfs, struct super_block *sb, char *data)
 	}
 	nilfs->ns_blocksize_bits = sb->s_blocksize_bits;
 	nilfs->ns_blocksize = blocksize;
-
-	get_random_bytes(&nilfs->ns_next_generation,
-			 sizeof(nilfs->ns_next_generation));
 
 	err = nilfs_store_disk_layout(nilfs, sbp);
 	if (err)
@@ -724,7 +777,6 @@ int init_nilfs(struct the_nilfs *nilfs, struct super_block *sb, char *data)
 	set_nilfs_init(nilfs);
 	err = 0;
  out:
-	up_write(&nilfs->ns_sem);
 	return err;
 
  failed_sbh:
@@ -755,7 +807,7 @@ int nilfs_discard_segments(struct the_nilfs *nilfs, __u64 *segnump,
 			ret = blkdev_issue_discard(nilfs->ns_bdev,
 						   start * sects_per_block,
 						   nblocks * sects_per_block,
-						   GFP_NOFS, 0);
+						   GFP_NOFS);
 			if (ret < 0)
 				return ret;
 			nblocks = 0;
@@ -765,7 +817,7 @@ int nilfs_discard_segments(struct the_nilfs *nilfs, __u64 *segnump,
 		ret = blkdev_issue_discard(nilfs->ns_bdev,
 					   start * sects_per_block,
 					   nblocks * sects_per_block,
-					   GFP_NOFS, 0);
+					   GFP_NOFS);
 	return ret;
 }
 

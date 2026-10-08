@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include <net/netfilter/nf_tproxy.h>
 #include <linux/module.h>
 #include <net/inet6_hashtables.h>
@@ -62,7 +63,7 @@ nf_tproxy_handle_time_wait6(struct sk_buff *skb, int tproto, int thoff,
 					    lport ? lport : hp->dest,
 					    skb->dev, NF_TPROXY_LOOKUP_LISTENER);
 		if (sk2) {
-			inet_twsk_deschedule_put(inet_twsk(sk));
+			nf_tproxy_twsk_deschedule_put(inet_twsk(sk));
 			sk = sk2;
 		}
 	}
@@ -92,7 +93,7 @@ nf_tproxy_get_sock_v6(struct net *net, struct sk_buff *skb, int thoff,
 
 		switch (lookup_type) {
 		case NF_TPROXY_LOOKUP_LISTENER:
-			sk = inet6_lookup_listener(net, &tcp_hashinfo, skb,
+			sk = inet6_lookup_listener(net, skb,
 						   thoff + __tcp_hdrlen(hp),
 						   saddr, sport,
 						   daddr, ntohs(dport),
@@ -107,9 +108,8 @@ nf_tproxy_get_sock_v6(struct net *net, struct sk_buff *skb, int thoff,
 			 */
 			break;
 		case NF_TPROXY_LOOKUP_ESTABLISHED:
-			sk = __inet6_lookup_established(net, &tcp_hashinfo,
-							saddr, sport, daddr, ntohs(dport),
-							in->ifindex, 0);
+			sk = __inet6_lookup_established(net, saddr, sport, daddr,
+							ntohs(dport), in->ifindex, 0);
 			break;
 		default:
 			BUG();
@@ -149,4 +149,4 @@ EXPORT_SYMBOL_GPL(nf_tproxy_get_sock_v6);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Balazs Scheidler, Krisztian Kovacs");
-MODULE_DESCRIPTION("Netfilter IPv4 transparent proxy support");
+MODULE_DESCRIPTION("Netfilter IPv6 transparent proxy support");

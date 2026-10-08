@@ -1,9 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * ADP5061 I2C Programmable Linear Battery Charger
  *
  * Copyright 2018 Analog Devices Inc.
- *
- * Licensed under the GPL-2.
  */
 
 #include <linux/init.h>
@@ -494,6 +493,9 @@ static int adp5061_get_battery_status(struct adp5061_state *st,
 	case 0x4: /* VBAT_SNS > VWEAK */
 		val->intval = POWER_SUPPLY_CAPACITY_LEVEL_NORMAL;
 		break;
+	default:
+		val->intval = POWER_SUPPLY_CAPACITY_LEVEL_UNKNOWN;
+		break;
 	}
 
 	return ret;
@@ -588,7 +590,7 @@ static int adp5061_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_VOLTAGE_AVG:
 		/*
 		 * This property is used to set the VWEAK threshold
-		 * bellow this value, weak charge mode is entered
+		 * below this value, weak charge mode is entered
 		 * above this value, fast chargerge mode is entered
 		 */
 		return adp5061_get_vweak_th(st, val);
@@ -692,8 +694,7 @@ static const struct power_supply_desc adp5061_desc = {
 	.num_properties		= ARRAY_SIZE(adp5061_props),
 };
 
-static int adp5061_probe(struct i2c_client *client,
-			 const struct i2c_device_id *id)
+static int adp5061_probe(struct i2c_client *client)
 {
 	struct power_supply_config psy_cfg = {};
 	struct adp5061_state *st;
@@ -726,7 +727,7 @@ static int adp5061_probe(struct i2c_client *client,
 }
 
 static const struct i2c_device_id adp5061_id[] = {
-	{ "adp5061", 0},
+	{ "adp5061" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, adp5061_id);

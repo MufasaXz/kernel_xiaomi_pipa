@@ -1,25 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) 1999-2001 Vojtech Pavlik
  */
 
 /*
  * Sun keyboard driver for Linux
- */
-
-/*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 #include <linux/delay.h>
@@ -256,9 +241,8 @@ static void sunkbd_reinit(struct work_struct *work)
 
 static void sunkbd_enable(struct sunkbd *sunkbd, bool enable)
 {
-	serio_pause_rx(sunkbd->serio);
-	sunkbd->enabled = enable;
-	serio_continue_rx(sunkbd->serio);
+	scoped_guard(serio_pause_rx, sunkbd->serio)
+		sunkbd->enabled = enable;
 
 	if (!enable) {
 		wake_up_interruptible(&sunkbd->wait);
@@ -278,7 +262,7 @@ static int sunkbd_connect(struct serio *serio, struct serio_driver *drv)
 	int err = -ENOMEM;
 	int i;
 
-	sunkbd = kzalloc(sizeof(struct sunkbd), GFP_KERNEL);
+	sunkbd = kzalloc(sizeof(*sunkbd), GFP_KERNEL);
 	input_dev = input_allocate_device();
 	if (!sunkbd || !input_dev)
 		goto fail1;

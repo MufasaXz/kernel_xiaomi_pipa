@@ -34,7 +34,6 @@
 /*-************************************
  *	Dependencies
  **************************************/
-#include <linux/lz4.h>
 #include "lz4defs.h"
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -621,6 +620,7 @@ void LZ4_resetStreamHC(LZ4_streamHC_t *LZ4_streamHCPtr, int compressionLevel)
 	LZ4_streamHCPtr->internal_donotuse.base = NULL;
 	LZ4_streamHCPtr->internal_donotuse.compressionLevel = (unsigned int)compressionLevel;
 }
+EXPORT_SYMBOL(LZ4_resetStreamHC);
 
 int LZ4_loadDictHC(LZ4_streamHC_t *LZ4_streamHCPtr,
 	const char *dictionary,
@@ -663,7 +663,6 @@ static void LZ4HC_setExternalDict(
 	/* match referencing will resume from there */
 	ctxPtr->nextToUpdate = ctxPtr->dictLimit;
 }
-EXPORT_SYMBOL(LZ4HC_setExternalDict);
 
 static int LZ4_compressHC_continue_generic(
 	LZ4_streamHC_t *LZ4_streamHCPtr,

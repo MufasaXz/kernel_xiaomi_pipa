@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2008 Christian Lamparter <chunkeey@web.de>
  * Copyright 2008       Johannes Berg <johannes@sipsolutions.net>
  *
  * This driver is a port from stlc45xx:
  *	Copyright (C) 2008 Nokia Corporation and/or its subsidiary(-ies).
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
  */
 
 #include <linux/module.h>
@@ -41,10 +28,11 @@
 #endif /* CONFIG_P54_SPI_DEFAULT_EEPROM */
 
 MODULE_FIRMWARE("3826.arm");
+MODULE_FIRMWARE("3826.eeprom");
 
 /* gpios should be handled in board files and provided via platform data,
  * but because it's currently impossible for p54spi to have a header file
- * in include/linux, let's use module paramaters for now
+ * in include/linux, let's use module parameters for now
  */
 
 static int p54spi_gpio_power = 97;
@@ -167,7 +155,7 @@ static int p54spi_request_firmware(struct ieee80211_hw *dev)
 	struct p54s_priv *priv = dev->priv;
 	int ret;
 
-	/* FIXME: should driver use it's own struct device? */
+	/* FIXME: should driver use its own struct device? */
 	ret = request_firmware(&priv->firmware, "3826.arm", &priv->spi->dev);
 
 	if (ret < 0) {
@@ -530,7 +518,7 @@ out:
 static int p54spi_op_start(struct ieee80211_hw *dev)
 {
 	struct p54s_priv *priv = dev->priv;
-	unsigned long timeout;
+	long time_left;
 	int ret = 0;
 
 	if (mutex_lock_interruptible(&priv->mutex)) {
@@ -550,10 +538,10 @@ static int p54spi_op_start(struct ieee80211_hw *dev)
 
 	mutex_unlock(&priv->mutex);
 
-	timeout = msecs_to_jiffies(2000);
-	timeout = wait_for_completion_interruptible_timeout(&priv->fw_comp,
-							    timeout);
-	if (!timeout) {
+	time_left = msecs_to_jiffies(2000);
+	time_left = wait_for_completion_interruptible_timeout(&priv->fw_comp,
+							      time_left);
+	if (!time_left) {
 		dev_err(&priv->spi->dev, "firmware boot failed");
 		p54spi_power_off(priv);
 		ret = -1;
@@ -636,7 +624,7 @@ static int p54spi_probe(struct spi_device *spi)
 	gpio_direction_input(p54spi_gpio_irq);
 
 	ret = request_irq(gpio_to_irq(p54spi_gpio_irq),
-			  p54spi_interrupt, 0, "p54spi",
+			  p54spi_interrupt, IRQF_NO_AUTOEN, "p54spi",
 			  priv->spi);
 	if (ret < 0) {
 		dev_err(&priv->spi->dev, "request_irq() failed");
@@ -644,8 +632,6 @@ static int p54spi_probe(struct spi_device *spi)
 	}
 
 	irq_set_irq_type(gpio_to_irq(p54spi_gpio_irq), IRQ_TYPE_EDGE_RISING);
-
-	disable_irq(gpio_to_irq(p54spi_gpio_irq));
 
 	INIT_WORK(&priv->work, p54spi_work);
 	init_completion(&priv->fw_comp);
@@ -683,7 +669,7 @@ err_free:
 	return ret;
 }
 
-static int p54spi_remove(struct spi_device *spi)
+static void p54spi_remove(struct spi_device *spi)
 {
 	struct p54s_priv *priv = spi_get_drvdata(spi);
 
@@ -698,8 +684,6 @@ static int p54spi_remove(struct spi_device *spi)
 	mutex_destroy(&priv->mutex);
 
 	p54_free_common(priv->hw);
-
-	return 0;
 }
 
 
@@ -714,6 +698,7 @@ static struct spi_driver p54spi_driver = {
 
 module_spi_driver(p54spi_driver);
 
+MODULE_DESCRIPTION("Prism54 SPI wireless driver");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Christian Lamparter <chunkeey@web.de>");
 MODULE_ALIAS("spi:cx3110x");

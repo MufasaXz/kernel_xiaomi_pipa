@@ -26,16 +26,11 @@
 #endif
 
 #define MAX_VPES 16
-#define VPE_PATH_MAX 256
 
 static inline int aprp_cpu_index(void)
 {
-#ifdef CONFIG_MIPS_CMP
-	return setup_max_cpus;
-#else
 	extern int tclimit;
 	return tclimit;
-#endif
 }
 
 enum vpe_state {
@@ -62,7 +57,6 @@ struct vpe {
 	unsigned long len;
 	char *pbuffer;
 	unsigned long plen;
-	char cwd[VPE_PATH_MAX];
 
 	unsigned long __start;
 
@@ -110,7 +104,6 @@ extern const struct file_operations vpe_fops;
 int vpe_notify(int index, struct vpe_notifications *notify);
 
 void *vpe_get_shared(int index);
-char *vpe_getcwd(int index);
 
 struct vpe *get_vpe(int minor);
 struct tc *get_tc(int index);

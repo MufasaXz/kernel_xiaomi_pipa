@@ -1,18 +1,18 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (c) 2013-2014, 2016-2019 The Linux Foundation. All rights reserved.
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (c) 2013-2014, 2016-2018, 2021 The Linux Foundation.
+ * All rights reserved.
  *
  * RMNET Data configuration engine
- *
  */
 
 #include <linux/skbuff.h>
+#include <linux/time.h>
 #include <net/gro_cells.h>
 
 #ifndef _RMNET_CONFIG_H_
 #define _RMNET_CONFIG_H_
 
 #define RMNET_MAX_LOGICAL_EP 255
-#define RMNET_MAX_VEID 4
 
 struct rmnet_endpoint {
 	u8 mux_id;
@@ -20,37 +20,10 @@ struct rmnet_endpoint {
 	struct hlist_node hlnode;
 };
 
-struct rmnet_agg_stats {
-	u64 ul_agg_reuse;
-	u64 ul_agg_alloc;
-};
-
-struct rmnet_port_priv_stats {
-	u64 dl_hdr_last_qmap_vers;
-	u64 dl_hdr_last_ep_id;
-	u64 dl_hdr_last_trans_id;
-	u64 dl_hdr_last_seq;
-	u64 dl_hdr_last_bytes;
-	u64 dl_hdr_last_pkts;
-	u64 dl_hdr_last_flows;
-	u64 dl_hdr_count;
-	u64 dl_hdr_total_bytes;
-	u64 dl_hdr_total_pkts;
-	u64 dl_trl_last_seq;
-	u64 dl_trl_count;
-	struct rmnet_agg_stats agg;
-};
-
 struct rmnet_egress_agg_params {
-	u16 agg_size;
-	u8 agg_count;
-	u8 agg_features;
-	u32 agg_time;
-};
-
-struct rmnet_agg_page {
-	struct list_head list;
-	struct page *page;
+	u32 bytes;
+	u32 count;
+	u64 time_nsec;
 };
 
 /* One instance of this structure is instantiated for each real_dev associated
@@ -63,34 +36,20 @@ struct rmnet_port {
 	u8 rmnet_mode;
 	struct hlist_head muxed_ep[RMNET_MAX_LOGICAL_EP];
 	struct net_device *bridge_ep;
-	void *rmnet_perf;
+	struct net_device *rmnet_dev;
 
+	/* Egress aggregation information */
 	struct rmnet_egress_agg_params egress_agg_params;
-
 	/* Protect aggregation related elements */
 	spinlock_t agg_lock;
-
-	struct sk_buff *agg_skb;
+	struct sk_buff *skbagg_head;
+	struct sk_buff *skbagg_tail;
 	int agg_state;
 	u8 agg_count;
-	struct timespec agg_time;
-	struct timespec agg_last;
+	struct timespec64 agg_time;
+	struct timespec64 agg_last;
 	struct hrtimer hrtimer;
 	struct work_struct agg_wq;
-	u8 agg_size_order;
-	struct list_head agg_list;
-	struct rmnet_agg_page *agg_head;
-
-	void *qmi_info;
-
-	/* dl marker elements */
-	struct list_head dl_list;
-	struct rmnet_port_priv_stats stats;
-	int dl_marker_flush;
-
-	/* Descriptor pool */
-	spinlock_t desc_pool_lock;
-	struct rmnet_frag_descriptor_pool *frag_desc_pool;
 };
 
 extern struct rtnl_link_ops rmnet_link_ops;
@@ -108,37 +67,9 @@ struct rmnet_pcpu_stats {
 	struct u64_stats_sync syncp;
 };
 
-struct rmnet_coal_close_stats {
-	u64 non_coal;
-	u64 ip_miss;
-	u64 trans_miss;
-	u64 hw_nl;
-	u64 hw_pkt;
-	u64 hw_byte;
-	u64 hw_time;
-	u64 hw_evict;
-	u64 coal;
-};
-
-struct rmnet_coal_stats {
-	u64 coal_rx;
-	u64 coal_pkts;
-	u64 coal_hdr_nlo_err;
-	u64 coal_hdr_pkt_err;
-	u64 coal_csum_err;
-	u64 coal_reconstruct;
-	u64 coal_ip_invalid;
-	u64 coal_trans_invalid;
-	struct rmnet_coal_close_stats close;
-	u64 coal_veid[RMNET_MAX_VEID];
-	u64 coal_tcp;
-	u64 coal_tcp_bytes;
-	u64 coal_udp;
-	u64 coal_udp_bytes;
-};
-
 struct rmnet_priv_stats {
 	u64 csum_ok;
+	u64 csum_ip4_header_bad;
 	u64 csum_valid_unset;
 	u64 csum_validation_failed;
 	u64 csum_err_bad_buffer;
@@ -148,8 +79,6 @@ struct rmnet_priv_stats {
 	u64 csum_skipped;
 	u64 csum_sw;
 	u64 csum_hw;
-	struct rmnet_coal_stats coal;
-	u64 ul_prio;
 };
 
 struct rmnet_priv {
@@ -158,35 +87,15 @@ struct rmnet_priv {
 	struct rmnet_pcpu_stats __percpu *pcpu_stats;
 	struct gro_cells gro_cells;
 	struct rmnet_priv_stats stats;
-	void __rcu *qos_info;
 };
 
-enum rmnet_dl_marker_prio {
-	RMNET_PERF,
-	RMNET_SHS,
-};
-
-enum rmnet_trace_func {
-	RMNET_MODULE,
-	NW_STACK_MODULE,
-};
-
-enum rmnet_trace_evt {
-	RMNET_DLVR_SKB,
-	RMNET_RCV_FROM_PND,
-	RMNET_TX_UL_PKT,
-	NW_STACK_DEV_Q_XMIT,
-	NW_STACK_NAPI_GRO_FLUSH,
-	NW_STACK_RX,
-	NW_STACK_TX,
-};
-
-int rmnet_is_real_dev_registered(const struct net_device *real_dev);
-struct rmnet_port *rmnet_get_port(struct net_device *real_dev);
+struct rmnet_port *rmnet_get_port_rcu(struct net_device *real_dev);
 struct rmnet_endpoint *rmnet_get_endpoint(struct rmnet_port *port, u8 mux_id);
 int rmnet_add_bridge(struct net_device *rmnet_dev,
 		     struct net_device *slave_dev,
 		     struct netlink_ext_ack *extack);
 int rmnet_del_bridge(struct net_device *rmnet_dev,
 		     struct net_device *slave_dev);
+struct rmnet_port*
+rmnet_get_port_rtnl(const struct net_device *real_dev);
 #endif /* _RMNET_CONFIG_H_ */

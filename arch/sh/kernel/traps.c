@@ -15,12 +15,14 @@
 
 #include <linux/extable.h>
 #include <linux/module.h>	/* print_modules */
+
+#include <asm/ftrace.h>
 #include <asm/unwinder.h>
 #include <asm/traps.h>
 
 static DEFINE_SPINLOCK(die_lock);
 
-void die(const char *str, struct pt_regs *regs, long err)
+void __noreturn die(const char *str, struct pt_regs *regs, long err)
 {
 	static int die_counter;
 
@@ -38,8 +40,8 @@ void die(const char *str, struct pt_regs *regs, long err)
 			task_pid_nr(current), task_stack_page(current) + 1);
 
 	if (!user_mode(regs) || in_interrupt())
-		dump_mem("Stack: ", regs->regs[15], THREAD_SIZE +
-			 (unsigned long)task_stack_page(current));
+		dump_mem("Stack: ", KERN_DEFAULT, regs->regs[15],
+			THREAD_SIZE + (unsigned long)task_stack_page(current));
 
 	notify_die(DIE_OOPS, str, regs, err, 255, SIGSEGV);
 
@@ -141,7 +143,7 @@ BUILD_TRAP_HANDLER(debug)
 		       SIGTRAP) == NOTIFY_STOP)
 		return;
 
-	force_sig(SIGTRAP, current);
+	force_sig(SIGTRAP);
 }
 
 /*
@@ -167,16 +169,17 @@ BUILD_TRAP_HANDLER(bug)
 	}
 #endif
 
-	force_sig(SIGTRAP, current);
+	force_sig(SIGTRAP);
 }
 
 BUILD_TRAP_HANDLER(nmi)
 {
-	unsigned int cpu = smp_processor_id();
 	TRAP_HANDLER_DECL;
 
+	arch_ftrace_nmi_enter();
+
 	nmi_enter();
-	nmi_count(cpu)++;
+	this_cpu_inc(irq_stat.__nmi_count);
 
 	switch (notify_die(DIE_NMI, "NMI", regs, 0, vec & 0xff, SIGINT)) {
 	case NOTIFY_OK:
@@ -190,4 +193,6 @@ BUILD_TRAP_HANDLER(nmi)
 	}
 
 	nmi_exit();
+
+	arch_ftrace_nmi_exit();
 }

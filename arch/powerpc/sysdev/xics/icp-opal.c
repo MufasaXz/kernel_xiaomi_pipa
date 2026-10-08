@@ -1,16 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2016 IBM Corporation.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/irq.h>
 #include <linux/smp.h>
 #include <linux/interrupt.h>
+#include <linux/irqdomain.h>
 #include <linux/cpu.h>
 #include <linux/of.h>
 
@@ -187,7 +184,7 @@ static const struct icp_ops icp_opal_ops = {
 #endif
 };
 
-int icp_opal_init(void)
+int __init icp_opal_init(void)
 {
 	struct device_node *np;
 

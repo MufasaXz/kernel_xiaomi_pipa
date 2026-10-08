@@ -1,15 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	Linux NET3: IP/IP protocol decoder modified to support
  *		    virtual tunnel interface
  *
  *	Authors:
  *		Saurabh Mohan (saurabh.mohan@vyatta.com) 05/07/2012
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
- *
  */
 
 /*
@@ -56,8 +51,11 @@ static int vti_input(struct sk_buff *skb, int nexthdr, __be32 spi,
 	const struct iphdr *iph = ip_hdr(skb);
 	struct net *net = dev_net(skb->dev);
 	struct ip_tunnel_net *itn = net_generic(net, vti_net_id);
+	IP_TUNNEL_DECLARE_FLAGS(flags) = { };
 
-	tunnel = ip_tunnel_lookup(itn, skb->dev->ifindex, TUNNEL_NO_KEY,
+	__set_bit(IP_TUNNEL_NO_KEY_BIT, flags);
+
+	tunnel = ip_tunnel_lookup(itn, skb->dev->ifindex, flags,
 				  iph->saddr, iph->daddr, 0);
 	if (tunnel) {
 		if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb))
@@ -96,39 +94,12 @@ static int vti_rcv_proto(struct sk_buff *skb)
 	return vti_rcv(skb, 0, false);
 }
 
-static int vti_rcv_tunnel(struct sk_buff *skb)
-{
-	struct ip_tunnel_net *itn = net_generic(dev_net(skb->dev), vti_net_id);
-	const struct iphdr *iph = ip_hdr(skb);
-	struct ip_tunnel *tunnel;
-
-	tunnel = ip_tunnel_lookup(itn, skb->dev->ifindex, TUNNEL_NO_KEY,
-				  iph->saddr, iph->daddr, 0);
-	if (tunnel) {
-		struct tnl_ptk_info tpi = {
-			.proto = htons(ETH_P_IP),
-		};
-
-		if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb))
-			goto drop;
-		if (iptunnel_pull_header(skb, 0, tpi.proto, false))
-			goto drop;
-		return ip_tunnel_rcv(tunnel, skb, &tpi, NULL, false);
-	}
-
-	return -EINVAL;
-drop:
-	kfree_skb(skb);
-	return 0;
-}
-
 static int vti_rcv_cb(struct sk_buff *skb, int err)
 {
 	unsigned short family;
 	struct net_device *dev;
-	struct pcpu_sw_netstats *tstats;
 	struct xfrm_state *x;
-	struct xfrm_mode *inner_mode;
+	const struct xfrm_mode *inner_mode;
 	struct ip_tunnel *tunnel = XFRM_TUNNEL_SKB_CB(skb)->tunnel.ip4;
 	u32 orig_mark = skb->mark;
 	int ret;
@@ -139,15 +110,15 @@ static int vti_rcv_cb(struct sk_buff *skb, int err)
 	dev = tunnel->dev;
 
 	if (err) {
-		dev->stats.rx_errors++;
-		dev->stats.rx_dropped++;
+		DEV_STATS_INC(dev, rx_errors);
+		DEV_STATS_INC(dev, rx_dropped);
 
 		return 0;
 	}
 
 	x = xfrm_input_state(skb);
 
-	inner_mode = x->inner_mode;
+	inner_mode = &x->inner_mode;
 
 	if (x->sel.family == AF_UNSPEC) {
 		inner_mode = xfrm_ip2inner_mode(x, XFRM_MODE_SKB_CB(skb)->protocol);
@@ -158,7 +129,7 @@ static int vti_rcv_cb(struct sk_buff *skb, int err)
 		}
 	}
 
-	family = inner_mode->afinfo->family;
+	family = inner_mode->family;
 
 	skb->mark = be32_to_cpu(tunnel->parms.i_key);
 	ret = xfrm_policy_check(NULL, XFRM_POLICY_IN, skb, family);
@@ -169,13 +140,7 @@ static int vti_rcv_cb(struct sk_buff *skb, int err)
 
 	skb_scrub_packet(skb, !net_eq(tunnel->net, dev_net(skb->dev)));
 	skb->dev = dev;
-
-	tstats = this_cpu_ptr(dev->tstats);
-
-	u64_stats_update_begin(&tstats->syncp);
-	tstats->rx_packets++;
-	tstats->rx_bytes += skb->len;
-	u64_stats_update_end(&tstats->syncp);
+	dev_sw_netstats_rx_add(dev, skb->len);
 
 	return 0;
 }
@@ -205,7 +170,7 @@ static netdev_tx_t vti_xmit(struct sk_buff *skb, struct net_device *dev,
 			    struct flowi *fl)
 {
 	struct ip_tunnel *tunnel = netdev_priv(dev);
-	struct ip_tunnel_parm *parms = &tunnel->parms;
+	struct ip_tunnel_parm_kern *parms = &tunnel->parms;
 	struct dst_entry *dst = skb_dst(skb);
 	struct net_device *tdev;	/* Device to other host */
 	int pkt_len = skb->len;
@@ -221,7 +186,7 @@ static netdev_tx_t vti_xmit(struct sk_buff *skb, struct net_device *dev,
 			fl->u.ip4.flowi4_flags |= FLOWI_FLAG_ANYSRC;
 			rt = __ip_route_output_key(dev_net(dev), &fl->u.ip4);
 			if (IS_ERR(rt)) {
-				dev->stats.tx_carrier_errors++;
+				DEV_STATS_INC(dev, tx_carrier_errors);
 				goto tx_error_icmp;
 			}
 			dst = &rt->dst;
@@ -236,36 +201,39 @@ static netdev_tx_t vti_xmit(struct sk_buff *skb, struct net_device *dev,
 			if (dst->error) {
 				dst_release(dst);
 				dst = NULL;
-				dev->stats.tx_carrier_errors++;
+				DEV_STATS_INC(dev, tx_carrier_errors);
 				goto tx_error_icmp;
 			}
 			skb_dst_set(skb, dst);
 			break;
 #endif
 		default:
-			dev->stats.tx_carrier_errors++;
+			DEV_STATS_INC(dev, tx_carrier_errors);
 			goto tx_error_icmp;
 		}
 	}
 
 	dst_hold(dst);
-	dst = xfrm_lookup(tunnel->net, dst, fl, NULL, 0);
+	dst = xfrm_lookup_route(tunnel->net, dst, fl, NULL, 0);
 	if (IS_ERR(dst)) {
-		dev->stats.tx_carrier_errors++;
+		DEV_STATS_INC(dev, tx_carrier_errors);
 		goto tx_error_icmp;
 	}
 
+	if (dst->flags & DST_XFRM_QUEUE)
+		goto xmit;
+
 	if (!vti_state_check(dst->xfrm, parms->iph.daddr, parms->iph.saddr)) {
-		dev->stats.tx_carrier_errors++;
+		DEV_STATS_INC(dev, tx_carrier_errors);
 		dst_release(dst);
 		goto tx_error_icmp;
 	}
 
-	tdev = dst->dev;
+	tdev = dst_dev(dst);
 
 	if (tdev == dev) {
 		dst_release(dst);
-		dev->stats.collisions++;
+		DEV_STATS_INC(dev, collisions);
 		goto tx_error;
 	}
 
@@ -273,22 +241,25 @@ static netdev_tx_t vti_xmit(struct sk_buff *skb, struct net_device *dev,
 	if (skb->len > mtu) {
 		skb_dst_update_pmtu_no_confirm(skb, mtu);
 		if (skb->protocol == htons(ETH_P_IP)) {
-			icmp_send(skb, ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED,
-				  htonl(mtu));
+			if (!(ip_hdr(skb)->frag_off & htons(IP_DF)))
+				goto xmit;
+			icmp_ndo_send(skb, ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED,
+				      htonl(mtu));
 		} else {
 			if (mtu < IPV6_MIN_MTU)
 				mtu = IPV6_MIN_MTU;
 
-			icmpv6_send(skb, ICMPV6_PKT_TOOBIG, 0, mtu);
+			icmpv6_ndo_send(skb, ICMPV6_PKT_TOOBIG, 0, mtu);
 		}
 
 		dst_release(dst);
 		goto tx_error;
 	}
 
+xmit:
 	skb_scrub_packet(skb, !net_eq(tunnel->net, dev_net(dev)));
 	skb_dst_set(skb, dst);
-	skb->dev = skb_dst(skb)->dev;
+	skb->dev = skb_dst_dev(skb);
 
 	err = dst_output(tunnel->net, skb->sk, skb);
 	if (net_xmit_eval(err) == 0)
@@ -299,7 +270,7 @@ static netdev_tx_t vti_xmit(struct sk_buff *skb, struct net_device *dev,
 tx_error_icmp:
 	dst_link_failure(skb);
 tx_error:
-	dev->stats.tx_errors++;
+	DEV_STATS_INC(dev, tx_errors);
 	kfree_skb(skb);
 	return NETDEV_TX_OK;
 }
@@ -320,11 +291,11 @@ static netdev_tx_t vti_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	switch (skb->protocol) {
 	case htons(ETH_P_IP):
 		memset(IPCB(skb), 0, sizeof(*IPCB(skb)));
-		xfrm_decode_session(skb, &fl, AF_INET);
+		xfrm_decode_session(dev_net(dev), skb, &fl, AF_INET);
 		break;
 	case htons(ETH_P_IPV6):
 		memset(IP6CB(skb), 0, sizeof(*IP6CB(skb)));
-		xfrm_decode_session(skb, &fl, AF_INET6);
+		xfrm_decode_session(dev_net(dev), skb, &fl, AF_INET6);
 		break;
 	default:
 		goto tx_err;
@@ -336,7 +307,7 @@ static netdev_tx_t vti_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	return vti_xmit(skb, dev, &fl);
 
 tx_err:
-	dev->stats.tx_errors++;
+	DEV_STATS_INC(dev, tx_errors);
 	kfree_skb(skb);
 	return NETDEV_TX_OK;
 }
@@ -354,8 +325,11 @@ static int vti4_err(struct sk_buff *skb, u32 info)
 	const struct iphdr *iph = (const struct iphdr *)skb->data;
 	int protocol = iph->protocol;
 	struct ip_tunnel_net *itn = net_generic(net, vti_net_id);
+	IP_TUNNEL_DECLARE_FLAGS(flags) = { };
 
-	tunnel = ip_tunnel_lookup(itn, skb->dev->ifindex, TUNNEL_NO_KEY,
+	__set_bit(IP_TUNNEL_NO_KEY_BIT, flags);
+
+	tunnel = ip_tunnel_lookup(itn, skb->dev->ifindex, flags,
 				  iph->daddr, iph->saddr, 0);
 	if (!tunnel)
 		return -1;
@@ -383,6 +357,7 @@ static int vti4_err(struct sk_buff *skb, u32 info)
 	case ICMP_DEST_UNREACH:
 		if (icmp_hdr(skb)->code != ICMP_FRAG_NEEDED)
 			return 0;
+		break;
 	case ICMP_REDIRECT:
 		break;
 	default:
@@ -395,17 +370,18 @@ static int vti4_err(struct sk_buff *skb, u32 info)
 		return 0;
 
 	if (icmp_hdr(skb)->type == ICMP_DEST_UNREACH)
-		ipv4_update_pmtu(skb, net, info, 0, 0, protocol, 0);
+		ipv4_update_pmtu(skb, net, info, 0, protocol);
 	else
-		ipv4_redirect(skb, net, 0, 0, protocol, 0);
+		ipv4_redirect(skb, net, 0, protocol);
 	xfrm_state_put(x);
 
 	return 0;
 }
 
 static int
-vti_tunnel_ctl(struct net_device *dev, struct ip_tunnel_parm *p, int cmd)
+vti_tunnel_ctl(struct net_device *dev, struct ip_tunnel_parm_kern *p, int cmd)
 {
+	IP_TUNNEL_DECLARE_FLAGS(flags) = { };
 	int err = 0;
 
 	if (cmd == SIOCADDTUNNEL || cmd == SIOCCHGTUNNEL) {
@@ -414,20 +390,26 @@ vti_tunnel_ctl(struct net_device *dev, struct ip_tunnel_parm *p, int cmd)
 			return -EINVAL;
 	}
 
-	if (!(p->i_flags & GRE_KEY))
+	if (!ip_tunnel_flags_is_be16_compat(p->i_flags) ||
+	    !ip_tunnel_flags_is_be16_compat(p->o_flags))
+		return -EOVERFLOW;
+
+	if (!(ip_tunnel_flags_to_be16(p->i_flags) & GRE_KEY))
 		p->i_key = 0;
-	if (!(p->o_flags & GRE_KEY))
+	if (!(ip_tunnel_flags_to_be16(p->o_flags) & GRE_KEY))
 		p->o_key = 0;
 
-	p->i_flags = VTI_ISVTI;
+	__set_bit(IP_TUNNEL_VTI_BIT, flags);
+	ip_tunnel_flags_copy(p->i_flags, flags);
 
 	err = ip_tunnel_ctl(dev, p, cmd);
 	if (err)
 		return err;
 
 	if (cmd != SIOCDELTUNNEL) {
-		p->i_flags |= GRE_KEY;
-		p->o_flags |= GRE_KEY;
+		ip_tunnel_flags_from_be16(flags, GRE_KEY);
+		ip_tunnel_flags_or(p->i_flags, p->i_flags, flags);
+		ip_tunnel_flags_or(p->o_flags, p->o_flags, flags);
 	}
 	return 0;
 }
@@ -436,9 +418,9 @@ static const struct net_device_ops vti_netdev_ops = {
 	.ndo_init	= vti_tunnel_init,
 	.ndo_uninit	= ip_tunnel_uninit,
 	.ndo_start_xmit	= vti_tunnel_xmit,
-	.ndo_do_ioctl	= ip_tunnel_ioctl,
+	.ndo_siocdevprivate = ip_tunnel_siocdevprivate,
 	.ndo_change_mtu	= ip_tunnel_change_mtu,
-	.ndo_get_stats64 = ip_tunnel_get_stats64,
+	.ndo_get_stats64 = dev_get_tstats64,
 	.ndo_get_iflink = ip_tunnel_get_iflink,
 	.ndo_tunnel_ctl	= vti_tunnel_ctl,
 };
@@ -446,6 +428,7 @@ static const struct net_device_ops vti_netdev_ops = {
 static void vti_tunnel_setup(struct net_device *dev)
 {
 	dev->netdev_ops		= &vti_netdev_ops;
+	dev->header_ops		= &ip_tunnel_header_ops;
 	dev->type		= ARPHRD_TUNNEL;
 	ip_tunnel_setup(dev, vti_net_id);
 }
@@ -455,12 +438,12 @@ static int vti_tunnel_init(struct net_device *dev)
 	struct ip_tunnel *tunnel = netdev_priv(dev);
 	struct iphdr *iph = &tunnel->parms.iph;
 
-	memcpy(dev->dev_addr, &iph->saddr, 4);
+	__dev_addr_set(dev, &iph->saddr, 4);
 	memcpy(dev->broadcast, &iph->daddr, 4);
 
 	dev->flags		= IFF_NOARP;
 	dev->addr_len		= 4;
-	dev->features		|= NETIF_F_LLTX;
+	dev->lltx		= true;
 	netif_keep_dst(dev);
 
 	return ip_tunnel_init(dev);
@@ -500,11 +483,31 @@ static struct xfrm4_protocol vti_ipcomp4_protocol __read_mostly = {
 	.priority	=	100,
 };
 
-static struct xfrm_tunnel ipip_handler __read_mostly = {
+#if IS_ENABLED(CONFIG_INET_XFRM_TUNNEL)
+static int vti_rcv_tunnel(struct sk_buff *skb)
+{
+	XFRM_SPI_SKB_CB(skb)->family = AF_INET;
+	XFRM_SPI_SKB_CB(skb)->daddroff = offsetof(struct iphdr, daddr);
+
+	return vti_input(skb, IPPROTO_IPIP, ip_hdr(skb)->saddr, 0, false);
+}
+
+static struct xfrm_tunnel vti_ipip_handler __read_mostly = {
 	.handler	=	vti_rcv_tunnel,
+	.cb_handler	=	vti_rcv_cb,
 	.err_handler	=	vti4_err,
 	.priority	=	0,
 };
+
+#if IS_ENABLED(CONFIG_IPV6)
+static struct xfrm_tunnel vti_ipip6_handler __read_mostly = {
+	.handler	=	vti_rcv_tunnel,
+	.cb_handler	=	vti_rcv_cb,
+	.err_handler	=	vti4_err,
+	.priority	=	0,
+};
+#endif
+#endif
 
 static int __net_init vti_init_net(struct net *net)
 {
@@ -520,14 +523,15 @@ static int __net_init vti_init_net(struct net *net)
 	return 0;
 }
 
-static void __net_exit vti_exit_batch_net(struct list_head *list_net)
+static void __net_exit vti_exit_rtnl(struct net *net,
+				     struct list_head *dev_to_kill)
 {
-	ip_tunnel_delete_nets(list_net, vti_net_id, &vti_link_ops);
+	ip_tunnel_delete_net(net, vti_net_id, &vti_link_ops, dev_to_kill);
 }
 
 static struct pernet_operations vti_net_ops = {
 	.init = vti_init_net,
-	.exit_batch = vti_exit_batch_net,
+	.exit_rtnl = vti_exit_rtnl,
 	.id   = &vti_net_id,
 	.size = sizeof(struct ip_tunnel_net),
 };
@@ -539,7 +543,7 @@ static int vti_tunnel_validate(struct nlattr *tb[], struct nlattr *data[],
 }
 
 static void vti_netlink_parms(struct nlattr *data[],
-			      struct ip_tunnel_parm *parms,
+			      struct ip_tunnel_parm_kern *parms,
 			      __u32 *fwmark)
 {
 	memset(parms, 0, sizeof(*parms));
@@ -549,7 +553,7 @@ static void vti_netlink_parms(struct nlattr *data[],
 	if (!data)
 		return;
 
-	parms->i_flags = VTI_ISVTI;
+	__set_bit(IP_TUNNEL_VTI_BIT, parms->i_flags);
 
 	if (data[IFLA_VTI_LINK])
 		parms->link = nla_get_u32(data[IFLA_VTI_LINK]);
@@ -570,15 +574,18 @@ static void vti_netlink_parms(struct nlattr *data[],
 		*fwmark = nla_get_u32(data[IFLA_VTI_FWMARK]);
 }
 
-static int vti_newlink(struct net *src_net, struct net_device *dev,
-		       struct nlattr *tb[], struct nlattr *data[],
+static int vti_newlink(struct net_device *dev,
+		       struct rtnl_newlink_params *params,
 		       struct netlink_ext_ack *extack)
 {
-	struct ip_tunnel_parm parms;
+	struct nlattr **data = params->data;
+	struct ip_tunnel_parm_kern parms;
+	struct nlattr **tb = params->tb;
 	__u32 fwmark = 0;
 
 	vti_netlink_parms(data, &parms, &fwmark);
-	return ip_tunnel_newlink(dev, tb, &parms, fwmark);
+	return ip_tunnel_newlink(params->link_net ? : dev_net(dev), dev, tb,
+				 &parms, fwmark);
 }
 
 static int vti_changelink(struct net_device *dev, struct nlattr *tb[],
@@ -586,8 +593,8 @@ static int vti_changelink(struct net_device *dev, struct nlattr *tb[],
 			  struct netlink_ext_ack *extack)
 {
 	struct ip_tunnel *t = netdev_priv(dev);
+	struct ip_tunnel_parm_kern p;
 	__u32 fwmark = t->fwmark;
-	struct ip_tunnel_parm p;
 
 	vti_netlink_parms(data, &p, &fwmark);
 	return ip_tunnel_changelink(dev, tb, &p, fwmark);
@@ -614,7 +621,7 @@ static size_t vti_get_size(const struct net_device *dev)
 static int vti_fill_info(struct sk_buff *skb, const struct net_device *dev)
 {
 	struct ip_tunnel *t = netdev_priv(dev);
-	struct ip_tunnel_parm *p = &t->parms;
+	struct ip_tunnel_parm_kern *p = &t->parms;
 
 	if (nla_put_u32(skb, IFLA_VTI_LINK, p->link) ||
 	    nla_put_be32(skb, IFLA_VTI_IKEY, p->i_key) ||
@@ -674,10 +681,17 @@ static int __init vti_init(void)
 	if (err < 0)
 		goto xfrm_proto_comp_failed;
 
+#if IS_ENABLED(CONFIG_INET_XFRM_TUNNEL)
 	msg = "ipip tunnel";
-	err = xfrm4_tunnel_register(&ipip_handler, AF_INET);
+	err = xfrm4_tunnel_register(&vti_ipip_handler, AF_INET);
 	if (err < 0)
-		goto xfrm_tunnel_failed;
+		goto xfrm_tunnel_ipip_failed;
+#if IS_ENABLED(CONFIG_IPV6)
+	err = xfrm4_tunnel_register(&vti_ipip6_handler, AF_INET6);
+	if (err < 0)
+		goto xfrm_tunnel_ipip6_failed;
+#endif
+#endif
 
 	msg = "netlink interface";
 	err = rtnl_link_register(&vti_link_ops);
@@ -687,8 +701,14 @@ static int __init vti_init(void)
 	return err;
 
 rtnl_link_failed:
-	xfrm4_tunnel_deregister(&ipip_handler, AF_INET);
-xfrm_tunnel_failed:
+#if IS_ENABLED(CONFIG_INET_XFRM_TUNNEL)
+#if IS_ENABLED(CONFIG_IPV6)
+	xfrm4_tunnel_deregister(&vti_ipip6_handler, AF_INET6);
+xfrm_tunnel_ipip6_failed:
+#endif
+	xfrm4_tunnel_deregister(&vti_ipip_handler, AF_INET);
+xfrm_tunnel_ipip_failed:
+#endif
 	xfrm4_protocol_deregister(&vti_ipcomp4_protocol, IPPROTO_COMP);
 xfrm_proto_comp_failed:
 	xfrm4_protocol_deregister(&vti_ah4_protocol, IPPROTO_AH);
@@ -704,7 +724,12 @@ pernet_dev_failed:
 static void __exit vti_fini(void)
 {
 	rtnl_link_unregister(&vti_link_ops);
-	xfrm4_tunnel_deregister(&ipip_handler, AF_INET);
+#if IS_ENABLED(CONFIG_INET_XFRM_TUNNEL)
+#if IS_ENABLED(CONFIG_IPV6)
+	xfrm4_tunnel_deregister(&vti_ipip6_handler, AF_INET6);
+#endif
+	xfrm4_tunnel_deregister(&vti_ipip_handler, AF_INET);
+#endif
 	xfrm4_protocol_deregister(&vti_ipcomp4_protocol, IPPROTO_COMP);
 	xfrm4_protocol_deregister(&vti_ah4_protocol, IPPROTO_AH);
 	xfrm4_protocol_deregister(&vti_esp4_protocol, IPPROTO_ESP);
@@ -713,6 +738,7 @@ static void __exit vti_fini(void)
 
 module_init(vti_init);
 module_exit(vti_fini);
+MODULE_DESCRIPTION("Virtual (secure) IP tunneling library");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS_RTNL_LINK("vti");
 MODULE_ALIAS_NETDEV("ip_vti0");

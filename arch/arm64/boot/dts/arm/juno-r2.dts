@@ -9,6 +9,7 @@
 /dts-v1/;
 
 #include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/arm/coresight-cti-dt.h>
 #include "juno-base.dtsi"
 #include "juno-cs-r1r2.dtsi"
 
@@ -85,7 +86,7 @@
 		};
 
 		A72_0: cpu@0 {
-			compatible = "arm,cortex-a72","arm,armv8";
+			compatible = "arm,cortex-a72";
 			reg = <0x0 0x0>;
 			device_type = "cpu";
 			enable-method = "psci";
@@ -103,7 +104,7 @@
 		};
 
 		A72_1: cpu@1 {
-			compatible = "arm,cortex-a72","arm,armv8";
+			compatible = "arm,cortex-a72";
 			reg = <0x0 0x1>;
 			device_type = "cpu";
 			enable-method = "psci";
@@ -121,7 +122,7 @@
 		};
 
 		A53_0: cpu@100 {
-			compatible = "arm,cortex-a53","arm,armv8";
+			compatible = "arm,cortex-a53";
 			reg = <0x0 0x100>;
 			device_type = "cpu";
 			enable-method = "psci";
@@ -139,7 +140,7 @@
 		};
 
 		A53_1: cpu@101 {
-			compatible = "arm,cortex-a53","arm,armv8";
+			compatible = "arm,cortex-a53";
 			reg = <0x0 0x101>;
 			device_type = "cpu";
 			enable-method = "psci";
@@ -157,7 +158,7 @@
 		};
 
 		A53_2: cpu@102 {
-			compatible = "arm,cortex-a53","arm,armv8";
+			compatible = "arm,cortex-a53";
 			reg = <0x0 0x102>;
 			device_type = "cpu";
 			enable-method = "psci";
@@ -175,7 +176,7 @@
 		};
 
 		A53_3: cpu@103 {
-			compatible = "arm,cortex-a53","arm,armv8";
+			compatible = "arm,cortex-a53";
 			reg = <0x0 0x103>;
 			device_type = "cpu";
 			enable-method = "psci";
@@ -194,16 +195,20 @@
 
 		A72_L2: l2-cache0 {
 			compatible = "cache";
+			cache-unified;
 			cache-size = <0x200000>;
 			cache-line-size = <64>;
 			cache-sets = <2048>;
+			cache-level = <2>;
 		};
 
 		A53_L2: l2-cache1 {
 			compatible = "cache";
+			cache-unified;
 			cache-size = <0x100000>;
 			cache-line-size = <64>;
 			cache-sets = <1024>;
+			cache-level = <2>;
 		};
 	};
 
@@ -233,6 +238,10 @@
 };
 
 &pcie_ctlr {
+	status = "okay";
+};
+
+&smmu_pcie {
 	status = "okay";
 };
 
@@ -313,5 +322,29 @@
 };
 
 &cpu_debug5 {
+	cpu = <&A53_3>;
+};
+
+&cti0 {
+	cpu = <&A72_0>;
+};
+
+&cti1 {
+	cpu = <&A72_1>;
+};
+
+&cti2 {
+	cpu = <&A53_0>;
+};
+
+&cti3 {
+	cpu = <&A53_1>;
+};
+
+&cti4 {
+	cpu = <&A53_2>;
+};
+
+&cti5 {
 	cpu = <&A53_3>;
 };

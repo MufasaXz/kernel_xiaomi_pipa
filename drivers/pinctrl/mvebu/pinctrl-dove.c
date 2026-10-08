@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Marvell Dove pinctrl driver based on mvebu pinctrl core
  *
  * Author: Sebastian Hesselbarth <sebastian.hesselbarth@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/err.h>
@@ -16,9 +12,9 @@
 #include <linux/platform_device.h>
 #include <linux/clk.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/mfd/syscon.h>
 #include <linux/pinctrl/pinctrl.h>
+#include <linux/property.h>
 #include <linux/regmap.h>
 
 #include "pinctrl-mvebu.h"
@@ -769,13 +765,11 @@ static int dove_pinctrl_probe(struct platform_device *pdev)
 {
 	struct resource *res, *mpp_res;
 	struct resource fb_res;
-	const struct of_device_id *match =
-		of_match_device(dove_pinctrl_of_match, &pdev->dev);
 	struct mvebu_mpp_ctrl_data *mpp_data;
 	void __iomem *base;
 	int i, ret;
 
-	pdev->dev.platform_data = (void *)match->data;
+	pdev->dev.platform_data = (void *)device_get_match_data(&pdev->dev);
 
 	/*
 	 * General MPP Configuration Register is part of pdma registers.
@@ -788,8 +782,7 @@ static int dove_pinctrl_probe(struct platform_device *pdev)
 	}
 	clk_prepare_enable(clk);
 
-	mpp_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	base = devm_ioremap_resource(&pdev->dev, mpp_res);
+	base = devm_platform_get_and_ioremap_resource(pdev, 0, &mpp_res);
 	if (IS_ERR(base)) {
 		ret = PTR_ERR(base);
 		goto err_probe;

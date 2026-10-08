@@ -249,7 +249,6 @@ struct wil_tid_ampdu_rx *wil_tid_ampdu_rx_alloc(struct wil6210_priv *wil,
 	r->reorder_buf =
 		kcalloc(size, sizeof(struct sk_buff *), GFP_KERNEL);
 	if (!r->reorder_buf) {
-		kfree(r->reorder_buf);
 		kfree(r);
 		return NULL;
 	}
@@ -324,7 +323,7 @@ __acquires(&sta->tid_rx_lock) __releases(&sta->tid_rx_lock)
 	might_sleep();
 
 	/* sanity checks */
-	if (cid >= max_assoc_sta) {
+	if (cid >= wil->max_assoc_sta) {
 		wil_err(wil, "BACK: invalid CID %d\n", cid);
 		rc = -EINVAL;
 		goto out;

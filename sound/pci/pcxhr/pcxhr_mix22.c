@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for Digigram pcxhr compatible soundcards
  *
  * mixer interface for stereo cards
  *
  * Copyright (c) 2004 by Digigram <alsa@digigram.com>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <linux/delay.h>
@@ -548,7 +535,7 @@ int hr222_update_analog_audio_level(struct snd_pcxhr *chip,
 {
 	dev_dbg(chip->card->dev,
 		"hr222_update_analog_audio_level(%s chan=%d)\n",
-		    is_capture ? "capture" : "playback", channel);
+		snd_pcm_direction_name(is_capture), channel);
 	if (is_capture) {
 		int level_l, level_r, level_mic;
 		/* we have to update all levels */
@@ -723,9 +710,9 @@ static int hr222_mic_vol_get(struct snd_kcontrol *kcontrol,
 			     struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_pcxhr *chip = snd_kcontrol_chip(kcontrol);
-	mutex_lock(&chip->mgr->mixer_mutex);
+
+	guard(mutex)(&chip->mgr->mixer_mutex);
 	ucontrol->value.integer.value[0] = chip->mic_volume;
-	mutex_unlock(&chip->mgr->mixer_mutex);
 	return 0;
 }
 
@@ -734,13 +721,13 @@ static int hr222_mic_vol_put(struct snd_kcontrol *kcontrol,
 {
 	struct snd_pcxhr *chip = snd_kcontrol_chip(kcontrol);
 	int changed = 0;
-	mutex_lock(&chip->mgr->mixer_mutex);
+
+	guard(mutex)(&chip->mgr->mixer_mutex);
 	if (chip->mic_volume != ucontrol->value.integer.value[0]) {
 		changed = 1;
 		chip->mic_volume = ucontrol->value.integer.value[0];
 		hr222_update_analog_audio_level(chip, 1, 0);
 	}
-	mutex_unlock(&chip->mgr->mixer_mutex);
 	return changed;
 }
 
@@ -773,9 +760,9 @@ static int hr222_mic_boost_get(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_pcxhr *chip = snd_kcontrol_chip(kcontrol);
-	mutex_lock(&chip->mgr->mixer_mutex);
+
+	guard(mutex)(&chip->mgr->mixer_mutex);
 	ucontrol->value.integer.value[0] = chip->mic_boost;
-	mutex_unlock(&chip->mgr->mixer_mutex);
 	return 0;
 }
 
@@ -784,13 +771,13 @@ static int hr222_mic_boost_put(struct snd_kcontrol *kcontrol,
 {
 	struct snd_pcxhr *chip = snd_kcontrol_chip(kcontrol);
 	int changed = 0;
-	mutex_lock(&chip->mgr->mixer_mutex);
+
+	guard(mutex)(&chip->mgr->mixer_mutex);
 	if (chip->mic_boost != ucontrol->value.integer.value[0]) {
 		changed = 1;
 		chip->mic_boost = ucontrol->value.integer.value[0];
 		hr222_micro_boost(chip->mgr, chip->mic_boost);
 	}
-	mutex_unlock(&chip->mgr->mixer_mutex);
 	return changed;
 }
 
@@ -813,9 +800,9 @@ static int hr222_phantom_power_get(struct snd_kcontrol *kcontrol,
 				   struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_pcxhr *chip = snd_kcontrol_chip(kcontrol);
-	mutex_lock(&chip->mgr->mixer_mutex);
+
+	guard(mutex)(&chip->mgr->mixer_mutex);
 	ucontrol->value.integer.value[0] = chip->phantom_power;
-	mutex_unlock(&chip->mgr->mixer_mutex);
 	return 0;
 }
 
@@ -825,14 +812,13 @@ static int hr222_phantom_power_put(struct snd_kcontrol *kcontrol,
 	struct snd_pcxhr *chip = snd_kcontrol_chip(kcontrol);
 	int power, changed = 0;
 
-	mutex_lock(&chip->mgr->mixer_mutex);
+	guard(mutex)(&chip->mgr->mixer_mutex);
 	power = !!ucontrol->value.integer.value[0];
 	if (chip->phantom_power != power) {
 		hr222_phantom_power(chip->mgr, power);
 		chip->phantom_power = power;
 		changed = 1;
 	}
-	mutex_unlock(&chip->mgr->mixer_mutex);
 	return changed;
 }
 

@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * ip_conntrack_helper_h323_asn1.c - BER and PER decoding library for H.323
- * 			      	     conntrack/NAT module.
+ * BER and PER decoding library for H.323 conntrack/NAT module.
  *
  * Copyright (c) 2006 by Jing Min Zhao <zhaojingmin@users.sourceforge.net>
  *
- * This source code is licensed under General Public License version 2.
- *
- * See ip_conntrack_helper_h323_asn1.h for details.
- *
+ * See nf_conntrack_helper_h323_asn1.h for details.
  */
 
 #ifdef __KERNEL__
@@ -260,15 +257,15 @@ static unsigned int get_uint(struct bitstr *bs, int b)
 	case 4:
 		v |= *bs->cur++;
 		v <<= 8;
-		/* fall through */
+		fallthrough;
 	case 3:
 		v |= *bs->cur++;
 		v <<= 8;
-		/* fall through */
+		fallthrough;
 	case 2:
 		v |= *bs->cur++;
 		v <<= 8;
-		/* fall through */
+		fallthrough;
 	case 1:
 		v |= *bs->cur++;
 		break;
@@ -334,6 +331,8 @@ static int decode_int(struct bitstr *bs, const struct field_t *f,
 		if (nf_h323_error_boundary(bs, 0, 2))
 			return H323_ERROR_BOUND;
 		len = get_bits(bs, 2) + 1;
+		if (nf_h323_error_boundary(bs, len, 0))
+			return H323_ERROR_BOUND;
 		BYTE_ALIGN(bs);
 		if (base && (f->attr & DECODE)) {	/* timeToLive */
 			unsigned int v = get_uint(bs, len) + f->lb;
@@ -799,7 +798,7 @@ static int decode_choice(struct bitstr *bs, const struct field_t *f,
 
 	if (ext || (son->attr & OPEN)) {
 		BYTE_ALIGN(bs);
-		if (nf_h323_error_boundary(bs, len, 0))
+		if (nf_h323_error_boundary(bs, 2, 0))
 			return H323_ERROR_BOUND;
 		len = get_len(bs);
 		if (nf_h323_error_boundary(bs, len, 0))
@@ -925,6 +924,8 @@ int DecodeQ931(unsigned char *buf, size_t sz, Q931 *q931)
 				break;
 			p++;
 			len--;
+			if (len <= 0)
+				break;
 			return DecodeH323_UserInformation(buf, p, len,
 							  &q931->UUIE);
 		}

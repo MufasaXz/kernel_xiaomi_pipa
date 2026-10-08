@@ -1,15 +1,14 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Renesas Clock Pulse Generator / Module Standby and Software Reset
  *
  * Copyright (C) 2015 Glider bvba
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
  */
 
 #ifndef __CLK_RENESAS_CPG_MSSR_H__
 #define __CLK_RENESAS_CPG_MSSR_H__
+
+#include <linux/notifier.h>
 
     /*
      * Definitions of CPG Core Clocks
@@ -30,6 +29,31 @@ struct cpg_core_clk {
 	unsigned int div;
 	unsigned int mult;
 	unsigned int offset;
+	union {
+		const char * const *parent_names;
+		const struct clk_div_table *dtable;
+	};
+	u32 conf;
+	u16 flag;
+	u8 mux_flags;
+	u8 num_parents;
+};
+
+/**
+ * struct cpg_mssr_pub - data shared with device-specific clk registration code
+ *
+ * @base0: CPG/MSSR register block base0 address
+ * @base1: CPG/MSSR register block base1 address
+ * @notifiers: Notifier chain to save/restore clock state for system resume
+ * @rmw_lock: protects RMW register accesses
+ * @clks: pointer to clocks
+ */
+struct cpg_mssr_pub {
+	void __iomem *base0;
+	void __iomem *base1;
+	struct raw_notifier_head notifiers;
+	spinlock_t rmw_lock;
+	struct clk **clks;
 };
 
 enum clk_types {
@@ -78,11 +102,30 @@ struct mssr_mod_clk {
 #define DEF_MOD(_name, _mod, _parent...)	\
 	{ .name = _name, .id = MOD_CLK_ID(_mod), .parent = _parent }
 
+/* Convert from sparse base-10 to packed index space */
+#define MOD_CLK_PACK_10(x)	((x / 10) * 32 + (x % 10))
+
+#define MOD_CLK_ID_10(x)	(MOD_CLK_BASE + MOD_CLK_PACK_10(x))
+
+#define DEF_MOD_STB(_name, _mod, _parent...)	\
+	{ .name = _name, .id = MOD_CLK_ID_10(_mod), .parent = _parent }
 
 struct device_node;
 
+enum clk_reg_layout {
+	CLK_REG_LAYOUT_RCAR_GEN2_AND_GEN3 = 0,
+	CLK_REG_LAYOUT_RZ_A,
+	CLK_REG_LAYOUT_RCAR_GEN4,
+	CLK_REG_LAYOUT_RZ_T2H,
+};
+
     /**
      * SoC-specific CPG/MSSR Description
+     *
+     * @early_core_clks: Array of Early Core Clock definitions
+     * @num_early_core_clks: Number of entries in early_core_clks[]
+     * @early_mod_clks: Array of Early Module Clock definitions
+     * @num_early_mod_clks: Number of entries in early_mod_clks[]
      *
      * @core_clks: Array of Core Clock definitions
      * @num_core_clks: Number of entries in core_clks[]
@@ -96,6 +139,7 @@ struct device_node;
      * @crit_mod_clks: Array with Module Clock IDs of critical clocks that
      *                 should not be disabled without a knowledgeable driver
      * @num_crit_mod_clks: Number of entries in crit_mod_clks[]
+     * @reg_layout: CPG/MSSR register layout from enum clk_reg_layout
      *
      * @core_pm_clks: Array with IDs of Core Clocks that are suitable for Power
      *                Management, in addition to Module Clocks
@@ -106,11 +150,18 @@ struct device_node;
      */
 
 struct cpg_mssr_info {
+	/* Early Clocks */
+	const struct cpg_core_clk *early_core_clks;
+	unsigned int num_early_core_clks;
+	const struct mssr_mod_clk *early_mod_clks;
+	unsigned int num_early_mod_clks;
+
 	/* Core Clocks */
 	const struct cpg_core_clk *core_clks;
 	unsigned int num_core_clks;
 	unsigned int last_dt_core_clk;
 	unsigned int num_total_core_clks;
+	enum clk_reg_layout reg_layout;
 
 	/* Module Clocks */
 	const struct mssr_mod_clk *mod_clks;
@@ -130,10 +181,11 @@ struct cpg_mssr_info {
 	struct clk *(*cpg_clk_register)(struct device *dev,
 					const struct cpg_core_clk *core,
 					const struct cpg_mssr_info *info,
-					struct clk **clks, void __iomem *base,
-					struct raw_notifier_head *notifiers);
+					struct cpg_mssr_pub *pub);
 };
 
+extern const struct cpg_mssr_info r7s9210_cpg_mssr_info;
+extern const struct cpg_mssr_info r8a7742_cpg_mssr_info;
 extern const struct cpg_mssr_info r8a7743_cpg_mssr_info;
 extern const struct cpg_mssr_info r8a7745_cpg_mssr_info;
 extern const struct cpg_mssr_info r8a77470_cpg_mssr_info;
@@ -152,26 +204,19 @@ extern const struct cpg_mssr_info r8a77970_cpg_mssr_info;
 extern const struct cpg_mssr_info r8a77980_cpg_mssr_info;
 extern const struct cpg_mssr_info r8a77990_cpg_mssr_info;
 extern const struct cpg_mssr_info r8a77995_cpg_mssr_info;
+extern const struct cpg_mssr_info r8a779a0_cpg_mssr_info;
+extern const struct cpg_mssr_info r8a779f0_cpg_mssr_info;
+extern const struct cpg_mssr_info r8a779g0_cpg_mssr_info;
+extern const struct cpg_mssr_info r8a779h0_cpg_mssr_info;
+extern const struct cpg_mssr_info r9a09g077_cpg_mssr_info;
 
+void __init cpg_mssr_early_init(struct device_node *np,
+				const struct cpg_mssr_info *info);
 
     /*
      * Helpers for fixing up clock tables depending on SoC revision
      */
-
-struct mssr_mod_reparent {
-	unsigned int clk, parent;
-};
-
-
-extern void cpg_core_nullify_range(struct cpg_core_clk *core_clks,
-				   unsigned int num_core_clks,
-				   unsigned int first_clk,
-				   unsigned int last_clk);
 extern void mssr_mod_nullify(struct mssr_mod_clk *mod_clks,
 			     unsigned int num_mod_clks,
 			     const unsigned int *clks, unsigned int n);
-extern void mssr_mod_reparent(struct mssr_mod_clk *mod_clks,
-			      unsigned int num_mod_clks,
-			      const struct mssr_mod_reparent *clks,
-			      unsigned int n);
 #endif

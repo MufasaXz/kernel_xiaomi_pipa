@@ -189,8 +189,8 @@ static int hfs_dir_release(struct inode *inode, struct file *file)
  * a directory and return a corresponding inode, given the inode for
  * the directory and the name (and its length) of the new file.
  */
-static int hfs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
-		      bool excl)
+static int hfs_create(struct mnt_idmap *idmap, struct inode *dir,
+		      struct dentry *dentry, umode_t mode, bool excl)
 {
 	struct inode *inode;
 	int res;
@@ -219,25 +219,26 @@ static int hfs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
  * in a directory, given the inode for the parent directory and the
  * name (and its length) of the new directory.
  */
-static int hfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
+static struct dentry *hfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+				struct dentry *dentry, umode_t mode)
 {
 	struct inode *inode;
 	int res;
 
 	inode = hfs_new_inode(dir, &dentry->d_name, S_IFDIR | mode);
 	if (!inode)
-		return -ENOMEM;
+		return ERR_PTR(-ENOMEM);
 
 	res = hfs_cat_create(inode->i_ino, dir, &dentry->d_name, inode);
 	if (res) {
 		clear_nlink(inode);
 		hfs_delete_inode(inode);
 		iput(inode);
-		return res;
+		return ERR_PTR(res);
 	}
 	d_instantiate(dentry, inode);
 	mark_inode_dirty(inode);
-	return 0;
+	return NULL;
 }
 
 /*
@@ -262,7 +263,7 @@ static int hfs_remove(struct inode *dir, struct dentry *dentry)
 	if (res)
 		return res;
 	clear_nlink(inode);
-	inode->i_ctime = current_time(inode);
+	inode_set_ctime_current(inode);
 	hfs_delete_inode(inode);
 	mark_inode_dirty(inode);
 	return 0;
@@ -279,9 +280,9 @@ static int hfs_remove(struct inode *dir, struct dentry *dentry)
  * new file/directory.
  * XXX: how do you handle must_be dir?
  */
-static int hfs_rename(struct inode *old_dir, struct dentry *old_dentry,
-		      struct inode *new_dir, struct dentry *new_dentry,
-		      unsigned int flags)
+static int hfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
+		      struct dentry *old_dentry, struct inode *new_dir,
+		      struct dentry *new_dentry, unsigned int flags)
 {
 	int res;
 

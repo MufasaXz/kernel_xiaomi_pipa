@@ -17,17 +17,11 @@
 #include <asm/intersil.h>
 #include <asm/machdep.h>
 
+#include "sun3.h"
 
 /* bits to set for start/run of the intersil */
 #define STOP_VAL (INTERSIL_STOP | INTERSIL_INT_ENABLE | INTERSIL_24H_MODE)
 #define START_VAL (INTERSIL_RUN | INTERSIL_INT_ENABLE | INTERSIL_24H_MODE)
-
-/* does this need to be implemented? */
-u32 sun3_gettimeoffset(void)
-{
-  return 1000;
-}
-
 
 /* get/set hwclock */
 

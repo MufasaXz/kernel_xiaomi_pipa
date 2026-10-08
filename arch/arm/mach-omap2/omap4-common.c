@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * OMAP4 specific common source file.
  *
  * Copyright (C) 2010 Texas Instruments, Inc.
  * Author:
  *	Santosh Shilimkar <santosh.shilimkar@ti.com>
- *
- *
- * This program is free software,you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
@@ -16,10 +12,9 @@
 #include <linux/io.h>
 #include <linux/irq.h>
 #include <linux/irqchip.h>
-#include <linux/platform_device.h>
 #include <linux/memblock.h>
+#include <linux/of.h>
 #include <linux/of_irq.h>
-#include <linux/of_platform.h>
 #include <linux/export.h>
 #include <linux/irqchip/arm-gic.h>
 #include <linux/of_address.h>
@@ -143,7 +138,8 @@ static int __init omap4_sram_init(void)
 		pr_warn("%s:Unable to get sram pool needed to handle errata I688\n",
 			__func__);
 	else
-		sram_sync = (void *)gen_pool_alloc(sram_pool, PAGE_SIZE);
+		sram_sync = (void __iomem *)gen_pool_alloc(sram_pool, PAGE_SIZE);
+	of_node_put(np);
 
 	return 0;
 }

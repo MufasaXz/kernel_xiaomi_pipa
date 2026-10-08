@@ -29,7 +29,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-/**
+/*
  * Raspberry Pi 7" touchscreen panel driver.
  *
  * The 7" touchscreen consists of a DPI LCD panel, a Toshiba
@@ -43,19 +43,15 @@
 
 #include <linux/delay.h>
 #include <linux/err.h>
-#include <linux/fb.h>
-#include <linux/gpio.h>
-#include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
+#include <linux/media-bus-format.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/of_graph.h>
 #include <linux/pm.h>
 
-#include <drm/drm_panel.h>
-#include <drm/drmP.h>
 #include <drm/drm_crtc.h>
+#include <drm/drm_device.h>
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_panel.h>
 
@@ -212,7 +208,6 @@ static const struct drm_display_mode rpi_touchscreen_modes[] = {
 		.vsync_start = 480 + 7,
 		.vsync_end = 480 + 7 + 2,
 		.vtotal = 480 + 7 + 2 + 21,
-		.vrefresh = 60,
 	},
 };
 
@@ -319,10 +314,9 @@ static int rpi_touchscreen_enable(struct drm_panel *panel)
 	return 0;
 }
 
-static int rpi_touchscreen_get_modes(struct drm_panel *panel)
+static int rpi_touchscreen_get_modes(struct drm_panel *panel,
+				     struct drm_connector *connector)
 {
-	struct drm_connector *connector = panel->connector;
-	struct drm_device *drm = panel->drm;
 	unsigned int i, num = 0;
 	static const u32 bus_format = MEDIA_BUS_FMT_RGB888_1X24;
 
@@ -330,10 +324,11 @@ static int rpi_touchscreen_get_modes(struct drm_panel *panel)
 		const struct drm_display_mode *m = &rpi_touchscreen_modes[i];
 		struct drm_display_mode *mode;
 
-		mode = drm_mode_duplicate(drm, m);
+		mode = drm_mode_duplicate(connector->dev, m);
 		if (!mode) {
-			dev_err(drm->dev, "failed to add mode %ux%u@%u\n",
-				m->hdisplay, m->vdisplay, m->vrefresh);
+			dev_err(panel->dev, "failed to add mode %ux%u@%u\n",
+				m->hdisplay, m->vdisplay,
+				drm_mode_vrefresh(m));
 			continue;
 		}
 
@@ -365,23 +360,25 @@ static const struct drm_panel_funcs rpi_touchscreen_funcs = {
 	.get_modes = rpi_touchscreen_get_modes,
 };
 
-static int rpi_touchscreen_probe(struct i2c_client *i2c,
-				 const struct i2c_device_id *id)
+static int rpi_touchscreen_probe(struct i2c_client *i2c)
 {
 	struct device *dev = &i2c->dev;
 	struct rpi_touchscreen *ts;
 	struct device_node *endpoint, *dsi_host_node;
 	struct mipi_dsi_host *host;
-	int ret, ver;
+	int ver;
 	struct mipi_dsi_device_info info = {
 		.type = RPI_DSI_DRIVER_NAME,
 		.channel = 0,
 		.node = NULL,
 	};
 
-	ts = devm_kzalloc(dev, sizeof(*ts), GFP_KERNEL);
-	if (!ts)
-		return -ENOMEM;
+	ts = devm_drm_panel_alloc(dev, __typeof(*ts), base,
+				  &rpi_touchscreen_funcs,
+				  DRM_MODE_CONNECTOR_DSI);
+
+	if (IS_ERR(ts))
+		return PTR_ERR(ts);
 
 	i2c_set_clientdata(i2c, ts);
 
@@ -406,7 +403,7 @@ static int rpi_touchscreen_probe(struct i2c_client *i2c,
 	rpi_touchscreen_i2c_write(ts, REG_POWERON, 0);
 
 	/* Look up the DSI host.  It needs to probe before we do. */
-	endpoint = of_graph_get_next_endpoint(dev->of_node, NULL);
+	endpoint = of_graph_get_endpoint_by_regs(dev->of_node, 0, -1);
 	if (!endpoint)
 		return -ENODEV;
 
@@ -434,16 +431,10 @@ static int rpi_touchscreen_probe(struct i2c_client *i2c,
 		return PTR_ERR(ts->dsi);
 	}
 
-	drm_panel_init(&ts->base);
-	ts->base.dev = dev;
-	ts->base.funcs = &rpi_touchscreen_funcs;
-
 	/* This appears last, as it's what will unblock the DSI host
 	 * driver's component bind function.
 	 */
-	ret = drm_panel_add(&ts->base);
-	if (ret)
-		return ret;
+	drm_panel_add(&ts->base);
 
 	return 0;
 
@@ -452,7 +443,7 @@ error:
 	return -ENODEV;
 }
 
-static int rpi_touchscreen_remove(struct i2c_client *i2c)
+static void rpi_touchscreen_remove(struct i2c_client *i2c)
 {
 	struct rpi_touchscreen *ts = i2c_get_clientdata(i2c);
 
@@ -461,8 +452,6 @@ static int rpi_touchscreen_remove(struct i2c_client *i2c)
 	drm_panel_remove(&ts->base);
 
 	mipi_dsi_device_unregister(ts->dsi);
-
-	return 0;
 }
 
 static int rpi_touchscreen_dsi_probe(struct mipi_dsi_device *dsi)

@@ -6,6 +6,7 @@
 #ifndef _LINUX_XDP_SOCK_H
 #define _LINUX_XDP_SOCK_H
 
+#include <linux/bpf.h>
 #include <linux/workqueue.h>
 #include <linux/if_xdp.h>
 #include <linux/mutex.h>
@@ -13,213 +14,199 @@
 #include <linux/mm.h>
 #include <net/sock.h>
 
+#define XDP_UMEM_SG_FLAG BIT(3)
+
 struct net_device;
 struct xsk_queue;
-
-struct xdp_umem_props {
-	u64 chunk_mask;
-	u64 size;
-};
-
-struct xdp_umem_page {
-	void *addr;
-	dma_addr_t dma;
-};
-
-struct xdp_umem_fq_reuse {
-	u32 nentries;
-	u32 length;
-	u64 handles[];
-};
+struct xdp_buff;
 
 struct xdp_umem {
-	struct xsk_queue *fq;
-	struct xsk_queue *cq;
-	struct xdp_umem_page *pages;
-	struct xdp_umem_props props;
+	void *addrs;
+	u64 size;
 	u32 headroom;
-	u32 chunk_size_nohr;
-	struct user_struct *user;
-	unsigned long address;
-	refcount_t users;
-	struct work_struct work;
-	struct page **pgs;
+	u32 chunk_size;
+	u32 chunks;
 	u32 npgs;
-	struct net_device *dev;
-	struct xdp_umem_fq_reuse *fq_reuse;
-	u16 queue_id;
+	struct user_struct *user;
+	refcount_t users;
+	u8 flags;
+	u8 tx_metadata_len;
 	bool zc;
-	spinlock_t xsk_list_lock;
-	struct list_head xsk_list;
+	struct page **pgs;
+	int id;
+	struct list_head xsk_dma_list;
+	struct work_struct work;
 };
 
 struct xsk_map {
 	struct bpf_map map;
 	spinlock_t lock; /* Synchronize map updates */
-	struct xdp_sock *xsk_map[];
+	atomic_t count;
+	struct xdp_sock __rcu *xsk_map[];
 };
 
 struct xdp_sock {
 	/* struct sock must be the first member of struct xdp_sock */
 	struct sock sk;
-	struct xsk_queue *rx;
+	struct xsk_queue *rx ____cacheline_aligned_in_smp;
 	struct net_device *dev;
 	struct xdp_umem *umem;
 	struct list_head flush_node;
+	struct xsk_buff_pool *pool;
 	u16 queue_id;
 	bool zc;
+	bool sg;
 	enum {
 		XSK_READY = 0,
 		XSK_BOUND,
 		XSK_UNBOUND,
 	} state;
-	/* Protects multiple processes in the control path */
-	struct mutex mutex;
+
 	struct xsk_queue *tx ____cacheline_aligned_in_smp;
-	struct list_head list;
-	/* Mutual exclusion of NAPI TX thread and sendmsg error paths
-	 * in the SKB destructor callback.
+	struct list_head tx_list;
+	/* record the number of tx descriptors sent by this xsk and
+	 * when it exceeds MAX_PER_SOCKET_BUDGET, an opportunity needs
+	 * to be given to other xsks for sending tx descriptors, thereby
+	 * preventing other XSKs from being starved.
 	 */
-	spinlock_t tx_completion_lock;
+	u32 tx_budget_spent;
+
+	/* Statistics */
 	u64 rx_dropped;
+	u64 rx_queue_full;
+
+	/* When __xsk_generic_xmit() must return before it sees the EOP descriptor for the current
+	 * packet, the partially built skb is saved here so that packet building can resume in next
+	 * call of __xsk_generic_xmit().
+	 */
+	struct sk_buff *skb;
+
 	struct list_head map_list;
 	/* Protects map_list */
 	spinlock_t map_list_lock;
+	u32 max_tx_budget;
+	/* Protects multiple processes in the control path */
+	struct mutex mutex;
+	struct xsk_queue *fq_tmp; /* Only as tmp storage before bind */
+	struct xsk_queue *cq_tmp; /* Only as tmp storage before bind */
 };
 
-struct xdp_buff;
+/*
+ * AF_XDP TX metadata hooks for network devices.
+ * The following hooks can be defined; unless noted otherwise, they are
+ * optional and can be filled with a null pointer.
+ *
+ * void (*tmo_request_timestamp)(void *priv)
+ *     Called when AF_XDP frame requested egress timestamp.
+ *
+ * u64 (*tmo_fill_timestamp)(void *priv)
+ *     Called when AF_XDP frame, that had requested egress timestamp,
+ *     received a completion. The hook needs to return the actual HW timestamp.
+ *
+ * void (*tmo_request_checksum)(u16 csum_start, u16 csum_offset, void *priv)
+ *     Called when AF_XDP frame requested HW checksum offload. csum_start
+ *     indicates position where checksumming should start.
+ *     csum_offset indicates position where checksum should be stored.
+ *
+ * void (*tmo_request_launch_time)(u64 launch_time, void *priv)
+ *     Called when AF_XDP frame requested launch time HW offload support.
+ *     launch_time indicates the PTP time at which the device can schedule the
+ *     packet for transmission.
+ */
+struct xsk_tx_metadata_ops {
+	void	(*tmo_request_timestamp)(void *priv);
+	u64	(*tmo_fill_timestamp)(void *priv);
+	void	(*tmo_request_checksum)(u16 csum_start, u16 csum_offset, void *priv);
+	void	(*tmo_request_launch_time)(u64 launch_time, void *priv);
+};
+
 #ifdef CONFIG_XDP_SOCKETS
+
 int xsk_generic_rcv(struct xdp_sock *xs, struct xdp_buff *xdp);
-/* Used from netdev driver */
-u64 *xsk_umem_peek_addr(struct xdp_umem *umem, u64 *addr);
-void xsk_umem_discard_addr(struct xdp_umem *umem);
-void xsk_umem_complete_tx(struct xdp_umem *umem, u32 nb_entries);
-bool xsk_umem_consume_tx(struct xdp_umem *umem, dma_addr_t *dma, u32 *len);
-void xsk_umem_consume_tx_done(struct xdp_umem *umem);
-struct xdp_umem_fq_reuse *xsk_reuseq_prepare(u32 nentries);
-struct xdp_umem_fq_reuse *xsk_reuseq_swap(struct xdp_umem *umem,
-					  struct xdp_umem_fq_reuse *newq);
-void xsk_reuseq_free(struct xdp_umem_fq_reuse *rq);
-
 int __xsk_map_redirect(struct xdp_sock *xs, struct xdp_buff *xdp);
-void __xsk_map_flush(void);
+void __xsk_map_flush(struct list_head *flush_list);
 
-static inline struct xdp_sock *__xsk_map_lookup_elem(struct bpf_map *map,
-						     u32 key)
+/**
+ *  xsk_tx_metadata_to_compl - Save enough relevant metadata information
+ *  to perform tx completion in the future.
+ *  @meta: pointer to AF_XDP metadata area
+ *  @compl: pointer to output struct xsk_tx_metadata_to_compl
+ *
+ *  This function should be called by the networking device when
+ *  it prepares AF_XDP egress packet. The value of @compl should be stored
+ *  and passed to xsk_tx_metadata_complete upon TX completion.
+ */
+static inline void xsk_tx_metadata_to_compl(struct xsk_tx_metadata *meta,
+					    struct xsk_tx_metadata_compl *compl)
 {
-	struct xsk_map *m = container_of(map, struct xsk_map, map);
-	struct xdp_sock *xs;
+	if (!meta)
+		return;
 
-	if (key >= map->max_entries)
-		return NULL;
-
-	xs = READ_ONCE(m->xsk_map[key]);
-	return xs;
-}
-
-static inline char *xdp_umem_get_data(struct xdp_umem *umem, u64 addr)
-{
-	return umem->pages[addr >> PAGE_SHIFT].addr + (addr & (PAGE_SIZE - 1));
-}
-
-static inline dma_addr_t xdp_umem_get_dma(struct xdp_umem *umem, u64 addr)
-{
-	return umem->pages[addr >> PAGE_SHIFT].dma + (addr & (PAGE_SIZE - 1));
-}
-
-/* Reuse-queue aware version of FILL queue helpers */
-static inline u64 *xsk_umem_peek_addr_rq(struct xdp_umem *umem, u64 *addr)
-{
-	struct xdp_umem_fq_reuse *rq = umem->fq_reuse;
-
-	if (!rq->length)
-		return xsk_umem_peek_addr(umem, addr);
-
-	*addr = rq->handles[rq->length - 1];
-	return addr;
-}
-
-static inline void xsk_umem_discard_addr_rq(struct xdp_umem *umem)
-{
-	struct xdp_umem_fq_reuse *rq = umem->fq_reuse;
-
-	if (!rq->length)
-		xsk_umem_discard_addr(umem);
+	if (meta->flags & XDP_TXMD_FLAGS_TIMESTAMP)
+		compl->tx_timestamp = &meta->completion.tx_timestamp;
 	else
-		rq->length--;
+		compl->tx_timestamp = NULL;
 }
 
-static inline void xsk_umem_fq_reuse(struct xdp_umem *umem, u64 addr)
+/**
+ *  xsk_tx_metadata_request - Evaluate AF_XDP TX metadata at submission
+ *  and call appropriate xsk_tx_metadata_ops operation.
+ *  @meta: pointer to AF_XDP metadata area
+ *  @ops: pointer to struct xsk_tx_metadata_ops
+ *  @priv: pointer to driver-private aread
+ *
+ *  This function should be called by the networking device when
+ *  it prepares AF_XDP egress packet.
+ */
+static inline void xsk_tx_metadata_request(const struct xsk_tx_metadata *meta,
+					   const struct xsk_tx_metadata_ops *ops,
+					   void *priv)
 {
-	struct xdp_umem_fq_reuse *rq = umem->fq_reuse;
+	if (!meta)
+		return;
 
-	rq->handles[rq->length++] = addr;
+	if (ops->tmo_request_launch_time)
+		if (meta->flags & XDP_TXMD_FLAGS_LAUNCH_TIME)
+			ops->tmo_request_launch_time(meta->request.launch_time,
+						     priv);
+
+	if (ops->tmo_request_timestamp)
+		if (meta->flags & XDP_TXMD_FLAGS_TIMESTAMP)
+			ops->tmo_request_timestamp(priv);
+
+	if (ops->tmo_request_checksum)
+		if (meta->flags & XDP_TXMD_FLAGS_CHECKSUM)
+			ops->tmo_request_checksum(meta->request.csum_start,
+						  meta->request.csum_offset, priv);
 }
+
+/**
+ *  xsk_tx_metadata_complete - Evaluate AF_XDP TX metadata at completion
+ *  and call appropriate xsk_tx_metadata_ops operation.
+ *  @compl: pointer to completion metadata produced from xsk_tx_metadata_to_compl
+ *  @ops: pointer to struct xsk_tx_metadata_ops
+ *  @priv: pointer to driver-private aread
+ *
+ *  This function should be called by the networking device upon
+ *  AF_XDP egress completion.
+ */
+static inline void xsk_tx_metadata_complete(struct xsk_tx_metadata_compl *compl,
+					    const struct xsk_tx_metadata_ops *ops,
+					    void *priv)
+{
+	if (!compl)
+		return;
+	if (!compl->tx_timestamp)
+		return;
+
+	*compl->tx_timestamp = ops->tmo_fill_timestamp(priv);
+}
+
 #else
+
 static inline int xsk_generic_rcv(struct xdp_sock *xs, struct xdp_buff *xdp)
 {
 	return -ENOTSUPP;
-}
-
-static inline u64 *xsk_umem_peek_addr(struct xdp_umem *umem, u64 *addr)
-{
-	return NULL;
-}
-
-static inline void xsk_umem_discard_addr(struct xdp_umem *umem)
-{
-}
-
-static inline void xsk_umem_complete_tx(struct xdp_umem *umem, u32 nb_entries)
-{
-}
-
-static inline bool xsk_umem_consume_tx(struct xdp_umem *umem, dma_addr_t *dma,
-				       u32 *len)
-{
-	return false;
-}
-
-static inline void xsk_umem_consume_tx_done(struct xdp_umem *umem)
-{
-}
-
-static inline struct xdp_umem_fq_reuse *xsk_reuseq_prepare(u32 nentries)
-{
-	return NULL;
-}
-
-static inline struct xdp_umem_fq_reuse *xsk_reuseq_swap(
-	struct xdp_umem *umem,
-	struct xdp_umem_fq_reuse *newq)
-{
-	return NULL;
-}
-static inline void xsk_reuseq_free(struct xdp_umem_fq_reuse *rq)
-{
-}
-
-static inline char *xdp_umem_get_data(struct xdp_umem *umem, u64 addr)
-{
-	return NULL;
-}
-
-static inline dma_addr_t xdp_umem_get_dma(struct xdp_umem *umem, u64 addr)
-{
-	return 0;
-}
-
-static inline u64 *xsk_umem_peek_addr_rq(struct xdp_umem *umem, u64 *addr)
-{
-	return NULL;
-}
-
-static inline void xsk_umem_discard_addr_rq(struct xdp_umem *umem)
-{
-}
-
-static inline void xsk_umem_fq_reuse(struct xdp_umem *umem, u64 addr)
-{
 }
 
 static inline int __xsk_map_redirect(struct xdp_sock *xs, struct xdp_buff *xdp)
@@ -227,15 +214,26 @@ static inline int __xsk_map_redirect(struct xdp_sock *xs, struct xdp_buff *xdp)
 	return -EOPNOTSUPP;
 }
 
-static inline void __xsk_map_flush(void)
+static inline void __xsk_map_flush(struct list_head *flush_list)
 {
 }
 
-static inline struct xdp_sock *__xsk_map_lookup_elem(struct bpf_map *map,
-						     u32 key)
+static inline void xsk_tx_metadata_to_compl(struct xsk_tx_metadata *meta,
+					    struct xsk_tx_metadata_compl *compl)
 {
-	return NULL;
 }
+
+static inline void xsk_tx_metadata_request(struct xsk_tx_metadata *meta,
+					   const struct xsk_tx_metadata_ops *ops,
+					   void *priv)
+{
+}
+
+static inline void xsk_tx_metadata_complete(struct xsk_tx_metadata_compl *compl,
+					    const struct xsk_tx_metadata_ops *ops,
+					    void *priv)
+{
+}
+
 #endif /* CONFIG_XDP_SOCKETS */
-
 #endif /* _LINUX_XDP_SOCK_H */

@@ -96,15 +96,6 @@
       #define __iomem
    #endif
 
-   #define pci_dma_hi32(a)         ((a >> 16) >> 16)
-   #define pci_dma_lo32(a)         (a & 0xffffffff)
-
-   #if (BITS_PER_LONG > 32) || defined(CONFIG_HIGHMEM64G)
-      #define IPS_ENABLE_DMA64        (1)
-   #else
-      #define IPS_ENABLE_DMA64        (0)
-   #endif
-
    /*
     * Adapter address map equates
     */
@@ -407,9 +398,10 @@
    /*
     * Scsi_Host Template
     */
-   static int ips_biosparam(struct scsi_device *sdev, struct block_device *bdev,
+   static int ips_biosparam(struct scsi_device *sdev, struct gendisk *unused,
 		sector_t capacity, int geom[]);
-   static int ips_slave_configure(struct scsi_device *SDptr);
+   static int ips_sdev_configure(struct scsi_device *SDptr,
+				 struct queue_limits *lim);
 
 /*
  * Raid Command Formats
@@ -1220,23 +1212,3 @@ typedef struct {
       IPS_COMPAT_TAMPA, \
       IPS_COMPAT_KEYWEST \
    }
-
-
-/*
- * Overrides for Emacs so that we almost follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-indent-level: 2
- * c-brace-imaginary-offset: 0
- * c-brace-offset: -2
- * c-argdecl-indent: 2
- * c-label-offset: -2
- * c-continued-statement-offset: 2
- * c-continued-brace-offset: 0
- * indent-tabs-mode: nil
- * tab-width: 8
- * End:
- */

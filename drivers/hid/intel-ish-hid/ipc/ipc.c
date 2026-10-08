@@ -1,18 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * H/W layer of ISHTP provider device (ISH)
  *
  * Copyright (c) 2014-2016, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
- * more details.
  */
 
+#include <linux/devm-helpers.h>
 #include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/delay.h>
@@ -85,7 +78,7 @@ static bool check_generated_interrupt(struct ishtp_device *dev)
 	bool interrupt_generated = true;
 	uint32_t pisr_val = 0;
 
-	if (dev->pdev->device == CHV_DEVICE_ID) {
+	if (dev->pdev->device == PCI_DEVICE_ID_INTEL_ISH_CHV) {
 		pisr_val = ish_reg_read(dev, IPC_REG_PISR_CHV_AB);
 		interrupt_generated =
 			IPC_INT_FROM_ISH_TO_HOST_CHV_AB(pisr_val);
@@ -124,7 +117,7 @@ static bool ish_is_input_ready(struct ishtp_device *dev)
  */
 static void set_host_ready(struct ishtp_device *dev)
 {
-	if (dev->pdev->device == CHV_DEVICE_ID) {
+	if (dev->pdev->device == PCI_DEVICE_ID_INTEL_ISH_CHV) {
 		if (dev->pdev->revision == REVISION_ID_CHT_A0 ||
 				(dev->pdev->revision & REVISION_ID_SI_MASK) ==
 				REVISION_ID_CHT_Ax_SI)
@@ -201,6 +194,33 @@ static void ish_clr_host_rdy(struct ishtp_device *dev)
 	ish_reg_write(dev, IPC_REG_HOST_COMM, host_status);
 }
 
+static bool ish_chk_host_rdy(struct ishtp_device *dev)
+{
+	uint32_t host_status = ish_reg_read(dev, IPC_REG_HOST_COMM);
+
+	return (host_status & IPC_HOSTCOMM_READY_BIT);
+}
+
+/**
+ * ish_set_host_ready() - reconfig ipc host registers
+ * @dev: ishtp device pointer
+ *
+ * Set host to ready state
+ * This API is called in some case:
+ *    fw is still on, but ipc is powered down.
+ *    such as OOB case.
+ *
+ * Return: 0 for success else error fault code
+ */
+void ish_set_host_ready(struct ishtp_device *dev)
+{
+	if (ish_chk_host_rdy(dev))
+		return;
+
+	ish_set_host_rdy(dev);
+	set_host_ready(dev);
+}
+
 /**
  * _ishtp_read_hdr() - Read message header
  * @dev: ISHTP device pointer
@@ -259,38 +279,27 @@ static int write_ipc_from_queue(struct ishtp_device *dev)
 	int	i;
 	void	(*ipc_send_compl)(void *);
 	void	*ipc_send_compl_prm;
-	static int	out_ipc_locked;
-	unsigned long	out_ipc_flags;
 
 	if (dev->dev_state == ISHTP_DEV_DISABLED)
-		return	-EINVAL;
-
-	spin_lock_irqsave(&dev->out_ipc_spinlock, out_ipc_flags);
-	if (out_ipc_locked) {
-		spin_unlock_irqrestore(&dev->out_ipc_spinlock, out_ipc_flags);
-		return -EBUSY;
-	}
-	out_ipc_locked = 1;
-	if (!ish_is_input_ready(dev)) {
-		out_ipc_locked = 0;
-		spin_unlock_irqrestore(&dev->out_ipc_spinlock, out_ipc_flags);
-		return -EBUSY;
-	}
-	spin_unlock_irqrestore(&dev->out_ipc_spinlock, out_ipc_flags);
+		return -EINVAL;
 
 	spin_lock_irqsave(&dev->wr_processing_spinlock, flags);
+	if (!ish_is_input_ready(dev)) {
+		spin_unlock_irqrestore(&dev->wr_processing_spinlock, flags);
+		return -EBUSY;
+	}
+
 	/*
 	 * if tx send list is empty - return 0;
 	 * may happen, as RX_COMPLETE handler doesn't check list emptiness.
 	 */
-	if (list_empty(&dev->wr_processing_list_head.link)) {
+	if (list_empty(&dev->wr_processing_list)) {
 		spin_unlock_irqrestore(&dev->wr_processing_spinlock, flags);
-		out_ipc_locked = 0;
 		return	0;
 	}
 
-	ipc_link = list_entry(dev->wr_processing_list_head.link.next,
-			      struct wr_msg_ctl_info, link);
+	ipc_link = list_first_entry(&dev->wr_processing_list,
+				    struct wr_msg_ctl_info, link);
 	/* first 4 bytes of the data is the doorbell value (IPC header) */
 	length = ipc_link->length - sizeof(uint32_t);
 	doorbell_val = *(uint32_t *)ipc_link->inline_data;
@@ -328,6 +337,8 @@ static int write_ipc_from_queue(struct ishtp_device *dev)
 		memcpy(&reg, &r_buf[length >> 2], rem);
 		ish_reg_write(dev, reg_addr, reg);
 	}
+	ish_reg_write(dev, IPC_REG_HOST2ISH_DRBL, doorbell_val);
+
 	/* Flush writes to msg registers and doorbell */
 	ish_reg_read(dev, IPC_REG_ISH_HOST_FWSTS);
 
@@ -335,13 +346,10 @@ static int write_ipc_from_queue(struct ishtp_device *dev)
 	++dev->ipc_tx_cnt;
 	dev->ipc_tx_bytes_cnt += IPC_HEADER_GET_LENGTH(doorbell_val);
 
-	ish_reg_write(dev, IPC_REG_HOST2ISH_DRBL, doorbell_val);
-	out_ipc_locked = 0;
-
 	ipc_send_compl = ipc_link->ipc_send_compl;
 	ipc_send_compl_prm = ipc_link->ipc_send_compl_prm;
 	list_del_init(&ipc_link->link);
-	list_add_tail(&ipc_link->link, &dev->wr_free_list_head.link);
+	list_add(&ipc_link->link, &dev->wr_free_list);
 	spin_unlock_irqrestore(&dev->wr_processing_spinlock, flags);
 
 	/*
@@ -375,18 +383,18 @@ static int write_ipc_to_queue(struct ishtp_device *dev,
 	unsigned char *msg, int length)
 {
 	struct wr_msg_ctl_info *ipc_link;
-	unsigned long	flags;
+	unsigned long flags;
 
 	if (length > IPC_FULL_MSG_SIZE)
 		return -EMSGSIZE;
 
 	spin_lock_irqsave(&dev->wr_processing_spinlock, flags);
-	if (list_empty(&dev->wr_free_list_head.link)) {
+	if (list_empty(&dev->wr_free_list)) {
 		spin_unlock_irqrestore(&dev->wr_processing_spinlock, flags);
 		return -ENOMEM;
 	}
-	ipc_link = list_entry(dev->wr_free_list_head.link.next,
-		struct wr_msg_ctl_info, link);
+	ipc_link = list_first_entry(&dev->wr_free_list,
+				    struct wr_msg_ctl_info, link);
 	list_del_init(&ipc_link->link);
 
 	ipc_link->ipc_send_compl = ipc_send_compl;
@@ -394,7 +402,7 @@ static int write_ipc_to_queue(struct ishtp_device *dev,
 	ipc_link->length = length;
 	memcpy(ipc_link->inline_data, msg, length);
 
-	list_add_tail(&ipc_link->link, &dev->wr_processing_list_head.link);
+	list_add_tail(&ipc_link->link, &dev->wr_processing_list);
 	spin_unlock_irqrestore(&dev->wr_processing_spinlock, flags);
 
 	write_ipc_from_queue(dev);
@@ -490,29 +498,29 @@ static int ish_fw_reset_handler(struct ishtp_device *dev)
 {
 	uint32_t	reset_id;
 	unsigned long	flags;
-	struct wr_msg_ctl_info *processing, *next;
+	int ret;
 
 	/* Read reset ID */
 	reset_id = ish_reg_read(dev, IPC_REG_ISH2HOST_MSG) & 0xFFFF;
 
 	/* Clear IPC output queue */
 	spin_lock_irqsave(&dev->wr_processing_spinlock, flags);
-	list_for_each_entry_safe(processing, next,
-			&dev->wr_processing_list_head.link, link) {
-		list_move_tail(&processing->link, &dev->wr_free_list_head.link);
-	}
+	list_splice_init(&dev->wr_processing_list, &dev->wr_free_list);
 	spin_unlock_irqrestore(&dev->wr_processing_spinlock, flags);
 
 	/* ISHTP notification in IPC_RESET */
 	ishtp_reset_handler(dev);
 
-	if (!ish_is_input_ready(dev))
-		timed_wait_for_timeout(dev, WAIT_FOR_INPUT_RDY,
-			TIME_SLICE_FOR_INPUT_RDY_MS, TIMEOUT_FOR_INPUT_RDY_MS);
-
+	ret = timed_wait_for_timeout(dev, WAIT_FOR_INPUT_RDY,
+				     TIME_SLICE_FOR_INPUT_RDY_MS,
+				     TIMEOUT_FOR_INPUT_RDY_MS);
 	/* ISH FW is dead */
-	if (!ish_is_input_ready(dev))
+	if (ret)
 		return	-EPIPE;
+
+	/* Send clock sync at once after reset */
+	ishtp_dev->prev_sync = 0;
+
 	/*
 	 * Set HOST2ISH.ILUP. Apparently we need this BEFORE sending
 	 * RESET_NOTIFY_ACK - FW will be checking for it
@@ -523,9 +531,10 @@ static int ish_fw_reset_handler(struct ishtp_device *dev)
 			 sizeof(uint32_t));
 
 	/* Wait for ISH FW'es ILUP and ISHTP_READY */
-	timed_wait_for_timeout(dev, WAIT_FOR_FW_RDY,
-			TIME_SLICE_FOR_FW_RDY_MS, TIMEOUT_FOR_FW_RDY_MS);
-	if (!ishtp_fw_is_ready(dev)) {
+	ret = timed_wait_for_timeout(dev, WAIT_FOR_FW_RDY,
+				     TIME_SLICE_FOR_FW_RDY_MS,
+				     TIMEOUT_FOR_FW_RDY_MS);
+	if (ret) {
 		/* ISH FW is dead */
 		uint32_t	ish_status;
 
@@ -541,12 +550,12 @@ static int ish_fw_reset_handler(struct ishtp_device *dev)
 #define TIMEOUT_FOR_HW_RDY_MS			300
 
 /**
- * ish_fw_reset_work_fn() - FW reset worker function
- * @unused: not used
+ * fw_reset_work_fn() - FW reset worker function
+ * @work: Work item
  *
  * Call ish_fw_reset_handler to complete FW reset
  */
-static void fw_reset_work_fn(struct work_struct *unused)
+static void fw_reset_work_fn(struct work_struct *work)
 {
 	int	rv;
 
@@ -558,7 +567,8 @@ static void fw_reset_work_fn(struct work_struct *unused)
 		wake_up_interruptible(&ishtp_dev->wait_hw_ready);
 
 		/* ISHTP notification in IPC_RESET sequence completion */
-		ishtp_reset_compl_handler(ishtp_dev);
+		if (!work_pending(work))
+			ishtp_reset_compl_handler(ishtp_dev);
 	} else
 		dev_err(ishtp_dev->devc, "[ishtp-ish]: FW reset failed (%d)\n",
 			rv);
@@ -572,15 +582,14 @@ static void fw_reset_work_fn(struct work_struct *unused)
  */
 static void _ish_sync_fw_clock(struct ishtp_device *dev)
 {
-	static unsigned long	prev_sync;
-	uint64_t	usec;
+	struct ipc_time_update_msg time = {};
 
-	if (prev_sync && jiffies - prev_sync < 20 * HZ)
+	if (dev->prev_sync && time_before(jiffies, dev->prev_sync + 20 * HZ))
 		return;
 
-	prev_sync = jiffies;
-	usec = ktime_to_us(ktime_get_boottime());
-	ipc_send_mng_msg(dev, MNG_SYNC_FW_CLOCK, &usec, sizeof(uint64_t));
+	dev->prev_sync = jiffies;
+	/* The fields of time would be updated while sending message */
+	ipc_send_mng_msg(dev, MNG_SYNC_FW_CLOCK, &time, sizeof(time));
 }
 
 /**
@@ -618,9 +627,8 @@ static void	recv_ipc(struct ishtp_device *dev, uint32_t doorbell_val)
 	case MNG_RESET_NOTIFY:
 		if (!ishtp_dev) {
 			ishtp_dev = dev;
-			INIT_WORK(&fw_reset_work, fw_reset_work_fn);
 		}
-		schedule_work(&fw_reset_work);
+		queue_work(dev->unbound_wq, &fw_reset_work);
 		break;
 
 	case MNG_RESET_NOTIFY_ACK:
@@ -696,7 +704,7 @@ eoi:
  *
  * Return: 0 for success else error code.
  */
-static int ish_disable_dma(struct ishtp_device *dev)
+int ish_disable_dma(struct ishtp_device *dev)
 {
 	unsigned int	dma_delay;
 
@@ -779,7 +787,7 @@ static int _ish_hw_reset(struct ishtp_device *dev)
 	csr |= PCI_D3hot;
 	pci_write_config_word(pdev, pdev->pm_cap + PCI_PM_CTRL, csr);
 
-	mdelay(pdev->d3_delay);
+	mdelay(pdev->d3hot_delay);
 
 	csr &= ~PCI_PM_CTRL_STATE_MASK;
 	csr |= PCI_D0;
@@ -886,6 +894,33 @@ static uint32_t ish_ipc_get_header(struct ishtp_device *dev, int length,
 	return drbl_val;
 }
 
+/**
+ * _dma_no_cache_snooping()
+ *
+ * Check on current platform, DMA supports cache snooping or not.
+ * This callback is used to notify uplayer driver if manully cache
+ * flush is needed when do DMA operation.
+ *
+ * Please pay attention to this callback implementation, if declare
+ * having cache snooping on a cache snooping not supported platform
+ * will cause uplayer driver receiving mismatched data; and if
+ * declare no cache snooping on a cache snooping supported platform
+ * will cause cache be flushed twice and performance hit.
+ *
+ * @dev: ishtp device pointer
+ *
+ * Return: false - has cache snooping capability
+ *         true - no cache snooping, need manually cache flush
+ */
+static bool _dma_no_cache_snooping(struct ishtp_device *dev)
+{
+	return (dev->pdev->device == PCI_DEVICE_ID_INTEL_ISH_EHL_Ax ||
+		dev->pdev->device == PCI_DEVICE_ID_INTEL_ISH_TGL_LP ||
+		dev->pdev->device == PCI_DEVICE_ID_INTEL_ISH_TGL_H ||
+		dev->pdev->device == PCI_DEVICE_ID_INTEL_ISH_ADL_S ||
+		dev->pdev->device == PCI_DEVICE_ID_INTEL_ISH_ADL_P);
+}
+
 static const struct ishtp_hw_ops ish_hw_ops = {
 	.hw_reset = _ish_hw_reset,
 	.ipc_reset = _ish_ipc_reset,
@@ -894,8 +929,28 @@ static const struct ishtp_hw_ops ish_hw_ops = {
 	.write = write_ipc_to_queue,
 	.get_fw_status = _ish_read_fw_sts_reg,
 	.sync_fw_clock = _ish_sync_fw_clock,
-	.ishtp_read_hdr = _ishtp_read_hdr
+	.ishtp_read_hdr = _ishtp_read_hdr,
+	.dma_no_cache_snooping = _dma_no_cache_snooping
 };
+
+static void ishtp_free_workqueue(void *wq)
+{
+	destroy_workqueue(wq);
+}
+
+static struct workqueue_struct *devm_ishtp_alloc_workqueue(struct device *dev)
+{
+	struct workqueue_struct *wq;
+
+	wq = alloc_workqueue("ishtp_unbound_%d", WQ_UNBOUND, 0, dev->id);
+	if (!wq)
+		return NULL;
+
+	if (devm_add_action_or_reset(dev, ishtp_free_workqueue, wq))
+		return NULL;
+
+	return wq;
+}
 
 /**
  * ish_dev_init() -Initialize ISH devoce
@@ -909,6 +964,7 @@ struct ishtp_device *ish_dev_init(struct pci_dev *pdev)
 {
 	struct ishtp_device *dev;
 	int	i;
+	int	ret;
 
 	dev = devm_kzalloc(&pdev->dev,
 			   sizeof(struct ishtp_device) + sizeof(struct ish_hw),
@@ -916,17 +972,21 @@ struct ishtp_device *ish_dev_init(struct pci_dev *pdev)
 	if (!dev)
 		return NULL;
 
+	dev->unbound_wq = devm_ishtp_alloc_workqueue(&pdev->dev);
+	if (!dev->unbound_wq)
+		return NULL;
+
+	dev->devc = &pdev->dev;
 	ishtp_device_init(dev);
 
 	init_waitqueue_head(&dev->wait_hw_ready);
 
 	spin_lock_init(&dev->wr_processing_spinlock);
-	spin_lock_init(&dev->out_ipc_spinlock);
 
 	/* Init IPC processing and free lists */
-	INIT_LIST_HEAD(&dev->wr_processing_list_head.link);
-	INIT_LIST_HEAD(&dev->wr_free_list_head.link);
-	for (i = 0; i < IPC_TX_FIFO_SIZE; ++i) {
+	INIT_LIST_HEAD(&dev->wr_processing_list);
+	INIT_LIST_HEAD(&dev->wr_free_list);
+	for (i = 0; i < IPC_TX_FIFO_SIZE; i++) {
 		struct wr_msg_ctl_info	*tx_buf;
 
 		tx_buf = devm_kzalloc(&pdev->dev,
@@ -942,11 +1002,16 @@ struct ishtp_device *ish_dev_init(struct pci_dev *pdev)
 				i);
 			break;
 		}
-		list_add_tail(&tx_buf->link, &dev->wr_free_list_head.link);
+		list_add_tail(&tx_buf->link, &dev->wr_free_list);
+	}
+
+	ret = devm_work_autocancel(&pdev->dev, &fw_reset_work, fw_reset_work_fn);
+	if (ret) {
+		dev_err(dev->devc, "Failed to initialise FW reset work\n");
+		return NULL;
 	}
 
 	dev->ops = &ish_hw_ops;
-	dev->devc = &pdev->dev;
 	dev->mtu = IPC_PAYLOAD_SIZE - sizeof(struct ishtp_msg_hdr);
 	return dev;
 }

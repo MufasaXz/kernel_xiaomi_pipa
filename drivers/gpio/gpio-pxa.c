@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/arch/arm/plat-pxa/gpio.c
  *
@@ -6,10 +7,6 @@
  *  Author:	Nicolas Pitre
  *  Created:	Jun 15, 2001
  *  Copyright:	MontaVista Software Inc.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2 as
- *  published by the Free Software Foundation.
  */
 #include <linux/module.h>
 #include <linux/clk.h>
@@ -23,7 +20,6 @@
 #include <linux/irqchip/chained_irq.h>
 #include <linux/io.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
 #include <linux/syscore_ops.h>
@@ -174,11 +170,6 @@ static inline struct pxa_gpio_bank *gpio_to_pxabank(struct gpio_chip *c,
 	return chip_to_pxachip(c)->banks + gpio / 32;
 }
 
-static inline int gpio_is_pxa_type(int type)
-{
-	return (type & MMP_GPIO) == 0;
-}
-
 static inline int gpio_is_mmp_type(int type)
 {
 	return (type & MMP_GPIO) != 0;
@@ -269,7 +260,7 @@ static int pxa_gpio_direction_input(struct gpio_chip *chip, unsigned offset)
 	int ret;
 
 	if (pxa_gpio_has_pinctrl()) {
-		ret = pinctrl_gpio_direction_input(chip->base + offset);
+		ret = pinctrl_gpio_direction_input(chip, offset);
 		if (ret)
 			return ret;
 	}
@@ -298,7 +289,7 @@ static int pxa_gpio_direction_output(struct gpio_chip *chip,
 	writel_relaxed(mask, base + (value ? GPSR_OFFSET : GPCR_OFFSET));
 
 	if (pxa_gpio_has_pinctrl()) {
-		ret = pinctrl_gpio_direction_output(chip->base + offset);
+		ret = pinctrl_gpio_direction_output(chip, offset);
 		if (ret)
 			return ret;
 	}
@@ -324,12 +315,14 @@ static int pxa_gpio_get(struct gpio_chip *chip, unsigned offset)
 	return !!(gplr & GPIO_bit(offset));
 }
 
-static void pxa_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
+static int pxa_gpio_set(struct gpio_chip *chip, unsigned int offset, int value)
 {
 	void __iomem *base = gpio_bank_base(chip, offset);
 
 	writel_relaxed(GPIO_bit(offset),
 		       base + (value ? GPSR_OFFSET : GPCR_OFFSET));
+
+	return 0;
 }
 
 #ifdef CONFIG_OF_GPIO
@@ -347,8 +340,7 @@ static int pxa_gpio_of_xlate(struct gpio_chip *gc,
 }
 #endif
 
-static int pxa_init_gpio_chip(struct pxa_gpio_chip *pchip, int ngpio,
-			      struct device_node *np, void __iomem *regbase)
+static int pxa_init_gpio_chip(struct pxa_gpio_chip *pchip, int ngpio, void __iomem *regbase)
 {
 	int i, gpio, nbanks = DIV_ROUND_UP(ngpio, 32);
 	struct pxa_gpio_bank *bank;
@@ -358,6 +350,7 @@ static int pxa_init_gpio_chip(struct pxa_gpio_chip *pchip, int ngpio,
 	if (!pchip->banks)
 		return -ENOMEM;
 
+	pchip->chip.parent = pchip->dev;
 	pchip->chip.label = "gpio-pxa";
 	pchip->chip.direction_input  = pxa_gpio_direction_input;
 	pchip->chip.direction_output = pxa_gpio_direction_output;
@@ -365,14 +358,10 @@ static int pxa_init_gpio_chip(struct pxa_gpio_chip *pchip, int ngpio,
 	pchip->chip.set = pxa_gpio_set;
 	pchip->chip.to_irq = pxa_gpio_to_irq;
 	pchip->chip.ngpio = ngpio;
-
-	if (pxa_gpio_has_pinctrl()) {
-		pchip->chip.request = gpiochip_generic_request;
-		pchip->chip.free = gpiochip_generic_free;
-	}
+	pchip->chip.request = gpiochip_generic_request;
+	pchip->chip.free = gpiochip_generic_free;
 
 #ifdef CONFIG_OF_GPIO
-	pchip->chip.of_node = np;
 	pchip->chip.of_xlate = pxa_gpio_of_xlate;
 	pchip->chip.of_gpio_n_cells = 2;
 #endif
@@ -462,9 +451,8 @@ static irqreturn_t pxa_gpio_demux_handler(int in_irq, void *d)
 			for_each_set_bit(n, &gedr, BITS_PER_LONG) {
 				loop = 1;
 
-				generic_handle_irq(
-					irq_find_mapping(pchip->irqdomain,
-							 gpio + n));
+				generic_handle_domain_irq(pchip->irqdomain,
+							  gpio + n);
 			}
 		}
 		handled += loop;
@@ -478,9 +466,9 @@ static irqreturn_t pxa_gpio_direct_handler(int in_irq, void *d)
 	struct pxa_gpio_chip *pchip = d;
 
 	if (in_irq == pchip->irq0) {
-		generic_handle_irq(irq_find_mapping(pchip->irqdomain, 0));
+		generic_handle_domain_irq(pchip->irqdomain, 0);
 	} else if (in_irq == pchip->irq1) {
-		generic_handle_irq(irq_find_mapping(pchip->irqdomain, 1));
+		generic_handle_domain_irq(pchip->irqdomain, 1);
 	} else {
 		pr_err("%s() unknown irq %d\n", __func__, in_irq);
 		return IRQ_NONE;
@@ -578,7 +566,7 @@ static int pxa_irq_domain_map(struct irq_domain *d, unsigned int irq,
 	return 0;
 }
 
-const struct irq_domain_ops pxa_irq_domain_ops = {
+static const struct irq_domain_ops pxa_irq_domain_ops = {
 	.map	= pxa_irq_domain_map,
 	.xlate	= irq_domain_xlate_twocell,
 };
@@ -623,7 +611,6 @@ static int pxa_gpio_probe(struct platform_device *pdev)
 {
 	struct pxa_gpio_chip *pchip;
 	struct pxa_gpio_bank *c;
-	struct resource *res;
 	struct clk *clk;
 	struct pxa_gpio_platform_data *info;
 	void __iomem *gpio_reg_base;
@@ -651,14 +638,13 @@ static int pxa_gpio_probe(struct platform_device *pdev)
 	if (!pxa_last_gpio)
 		return -EINVAL;
 
-	pchip->irqdomain = irq_domain_add_legacy(pdev->dev.of_node,
-						 pxa_last_gpio + 1, irq_base,
-						 0, &pxa_irq_domain_ops, pchip);
+	pchip->irqdomain = irq_domain_create_legacy(dev_fwnode(&pdev->dev), pxa_last_gpio + 1,
+						    irq_base, 0, &pxa_irq_domain_ops, pchip);
 	if (!pchip->irqdomain)
 		return -ENOMEM;
 
-	irq0 = platform_get_irq_byname(pdev, "gpio0");
-	irq1 = platform_get_irq_byname(pdev, "gpio1");
+	irq0 = platform_get_irq_byname_optional(pdev, "gpio0");
+	irq1 = platform_get_irq_byname_optional(pdev, "gpio1");
 	irq_mux = platform_get_irq_byname(pdev, "gpio_mux");
 	if ((irq0 > 0 && irq1 <= 0) || (irq0 <= 0 && irq1 > 0)
 		|| (irq_mux <= 0))
@@ -666,33 +652,22 @@ static int pxa_gpio_probe(struct platform_device *pdev)
 
 	pchip->irq0 = irq0;
 	pchip->irq1 = irq1;
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res)
-		return -EINVAL;
-	gpio_reg_base = devm_ioremap(&pdev->dev, res->start,
-				     resource_size(res));
-	if (!gpio_reg_base)
-		return -EINVAL;
 
-	clk = clk_get(&pdev->dev, NULL);
+	gpio_reg_base = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(gpio_reg_base))
+		return PTR_ERR(gpio_reg_base);
+
+	clk = devm_clk_get_enabled(&pdev->dev, NULL);
 	if (IS_ERR(clk)) {
 		dev_err(&pdev->dev, "Error %ld to get gpio clock\n",
 			PTR_ERR(clk));
 		return PTR_ERR(clk);
 	}
-	ret = clk_prepare_enable(clk);
-	if (ret) {
-		clk_put(clk);
-		return ret;
-	}
 
 	/* Initialize GPIO chips */
-	ret = pxa_init_gpio_chip(pchip, pxa_last_gpio + 1, pdev->dev.of_node,
-				 gpio_reg_base);
-	if (ret) {
-		clk_put(clk);
+	ret = pxa_init_gpio_chip(pchip, pxa_last_gpio + 1, gpio_reg_base);
+	if (ret)
 		return ret;
-	}
 
 	/* clear all GPIO edge detects */
 	for_each_gpio_bank(gpio, c, pchip) {
@@ -817,7 +792,7 @@ static void pxa_gpio_resume(void)
 #define pxa_gpio_resume		NULL
 #endif
 
-struct syscore_ops pxa_gpio_syscore_ops = {
+static struct syscore_ops pxa_gpio_syscore_ops = {
 	.suspend	= pxa_gpio_suspend,
 	.resume		= pxa_gpio_resume,
 };

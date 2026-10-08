@@ -1,16 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (c) 2016 Rockchip Electronics Co. Ltd.
  * Author: Lin Huang <hl@rock-chips.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/arm-smccc.h>
@@ -64,17 +55,18 @@ rockchip_ddrclk_sip_recalc_rate(struct clk_hw *hw,
 	return res.a0;
 }
 
-static long rockchip_ddrclk_sip_round_rate(struct clk_hw *hw,
-					   unsigned long rate,
-					   unsigned long *prate)
+static int rockchip_ddrclk_sip_determine_rate(struct clk_hw *hw,
+					      struct clk_rate_request *req)
 {
 	struct arm_smccc_res res;
 
-	arm_smccc_smc(ROCKCHIP_SIP_DRAM_FREQ, rate, 0,
+	arm_smccc_smc(ROCKCHIP_SIP_DRAM_FREQ, req->rate, 0,
 		      ROCKCHIP_SIP_CONFIG_DRAM_ROUND_RATE,
 		      0, 0, 0, 0, &res);
 
-	return res.a0;
+	req->rate = res.a0;
+
+	return 0;
 }
 
 static u8 rockchip_ddrclk_get_parent(struct clk_hw *hw)
@@ -82,7 +74,7 @@ static u8 rockchip_ddrclk_get_parent(struct clk_hw *hw)
 	struct rockchip_ddrclk *ddrclk = to_rockchip_ddrclk_hw(hw);
 	u32 val;
 
-	val = clk_readl(ddrclk->reg_base +
+	val = readl(ddrclk->reg_base +
 			ddrclk->mux_offset) >> ddrclk->mux_shift;
 	val &= GENMASK(ddrclk->mux_width - 1, 0);
 
@@ -92,7 +84,7 @@ static u8 rockchip_ddrclk_get_parent(struct clk_hw *hw)
 static const struct clk_ops rockchip_ddrclk_sip_ops = {
 	.recalc_rate = rockchip_ddrclk_sip_recalc_rate,
 	.set_rate = rockchip_ddrclk_sip_set_rate,
-	.round_rate = rockchip_ddrclk_sip_round_rate,
+	.determine_rate = rockchip_ddrclk_sip_determine_rate,
 	.get_parent = rockchip_ddrclk_get_parent,
 };
 
@@ -105,7 +97,7 @@ struct clk *rockchip_clk_register_ddrclk(const char *name, int flags,
 					 spinlock_t *lock)
 {
 	struct rockchip_ddrclk *ddrclk;
-	struct clk_init_data init = {};
+	struct clk_init_data init;
 	struct clk *clk;
 
 	ddrclk = kzalloc(sizeof(*ddrclk), GFP_KERNEL);
@@ -145,3 +137,4 @@ struct clk *rockchip_clk_register_ddrclk(const char *name, int flags,
 
 	return clk;
 }
+EXPORT_SYMBOL_GPL(rockchip_clk_register_ddrclk);

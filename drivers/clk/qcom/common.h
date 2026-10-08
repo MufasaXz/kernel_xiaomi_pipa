@@ -1,12 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/*
- * Copyright (c) 2014, 2017-2018, The Linux Foundation. All rights reserved.
- */
+/* Copyright (c) 2014, The Linux Foundation. All rights reserved. */
 
 #ifndef __QCOM_CLK_COMMON_H__
 #define __QCOM_CLK_COMMON_H__
-
-#include <linux/reset-controller.h>
 
 struct platform_device;
 struct regmap_config;
@@ -23,16 +19,37 @@ struct clk_hw;
 #define PLL_VOTE_FSM_ENA	BIT(20)
 #define PLL_VOTE_FSM_RESET	BIT(21)
 
+struct qcom_icc_hws_data {
+	int master_id;
+	int slave_id;
+	int clk_id;
+};
+
+struct qcom_cc_driver_data {
+	struct clk_alpha_pll **alpha_plls;
+	size_t num_alpha_plls;
+	u32 *clk_cbcrs;
+	size_t num_clk_cbcrs;
+	const struct clk_rcg_dfs_data *dfs_rcgs;
+	size_t num_dfs_rcgs;
+	void (*clk_regs_configure)(struct device *dev, struct regmap *regmap);
+};
+
 struct qcom_cc_desc {
 	const struct regmap_config *config;
 	struct clk_regmap **clks;
-	struct clk_hw **hwclks;
 	size_t num_clks;
-	size_t num_hwclks;
 	const struct qcom_reset_map *resets;
 	size_t num_resets;
 	struct gdsc **gdscs;
 	size_t num_gdscs;
+	struct clk_hw **clk_hws;
+	size_t num_clk_hws;
+	const struct qcom_icc_hws_data *icc_hws;
+	size_t num_icc_hws;
+	unsigned int icc_first_node_id;
+	bool use_rpm;
+	struct qcom_cc_driver_data *driver_data;
 };
 
 /**
@@ -45,16 +62,12 @@ struct parent_map {
 	u8 cfg;
 };
 
-struct clk_dummy {
-	struct clk_hw hw;
-	struct reset_controller_dev reset;
-	unsigned long rrate;
-};
-
 extern const struct freq_tbl *qcom_find_freq(const struct freq_tbl *f,
 					     unsigned long rate);
 extern const struct freq_tbl *qcom_find_freq_floor(const struct freq_tbl *f,
 						   unsigned long rate);
+extern const struct freq_multi_tbl *qcom_find_freq_multi(const struct freq_multi_tbl *f,
+							 unsigned long rate);
 extern void
 qcom_pll_set_fsm_mode(struct regmap *m, u32 reg, u8 bias_count, u8 lock_count);
 extern int qcom_find_src_index(struct clk_hw *hw, const struct parent_map *map,
@@ -68,27 +81,12 @@ extern int qcom_cc_register_sleep_clk(struct device *dev);
 
 extern struct regmap *qcom_cc_map(struct platform_device *pdev,
 				  const struct qcom_cc_desc *desc);
-extern int qcom_cc_really_probe(struct platform_device *pdev,
+extern int qcom_cc_really_probe(struct device *dev,
 				const struct qcom_cc_desc *desc,
 				struct regmap *regmap);
 extern int qcom_cc_probe(struct platform_device *pdev,
 			 const struct qcom_cc_desc *desc);
-extern const struct clk_ops clk_dummy_ops;
+extern int qcom_cc_probe_by_index(struct platform_device *pdev, int index,
+				  const struct qcom_cc_desc *desc);
 
-extern void clk_debug_print_hw(struct clk_core *clk, struct seq_file *f);
-
-#define WARN_CLK(core, name, cond, fmt, ...) do {	\
-	clk_debug_print_hw(core, NULL);			\
-	WARN(cond, "%s: " fmt, name, ##__VA_ARGS__);	\
-} while (0)
-
-#define clock_debug_output(m, c, fmt, ...)			\
-	do {							\
-		if (m)						\
-			seq_printf(m, fmt, ##__VA_ARGS__);      \
-		else if (c)					\
-			pr_alert(fmt, ##__VA_ARGS__);		\
-		else						\
-			pr_info(fmt, ##__VA_ARGS__);		\
-} while (0)
 #endif

@@ -3,13 +3,15 @@
  * USB Raw Gadget driver.
  * See Documentation/usb/raw-gadget.rst for more details.
  *
- * Andrey Konovalov <andreyknvl@gmail.com>
+ * Copyright (c) 2020 Google, Inc.
+ * Author: Andrey Konovalov <andreyknvl@gmail.com>
  */
 
 #include <linux/compiler.h>
 #include <linux/ctype.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
+#include <linux/idr.h>
 #include <linux/kref.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
@@ -23,6 +25,7 @@
 #include <linux/usb/ch9.h>
 #include <linux/usb/ch11.h>
 #include <linux/usb/gadget.h>
+#include <linux/usb/composite.h>
 
 #include <uapi/linux/usb/raw_gadget.h>
 
@@ -34,6 +37,10 @@ MODULE_AUTHOR("Andrey Konovalov");
 MODULE_LICENSE("GPL");
 
 /*----------------------------------------------------------------------*/
+
+static DEFINE_IDA(driver_id_numbers);
+#define DRIVER_DRIVER_NAME_LENGTH_MAX	32
+#define USB_RAW_IO_LENGTH_MAX KMALLOC_MAX_SIZE
 
 #define RAW_EVENT_QUEUE_SIZE	16
 
@@ -59,7 +66,7 @@ static int raw_event_queue_add(struct raw_event_queue *queue,
 	struct usb_raw_event *event;
 
 	spin_lock_irqsave(&queue->lock, flags);
-	if (WARN_ON(queue->size >= RAW_EVENT_QUEUE_SIZE)) {
+	if (queue->size >= RAW_EVENT_QUEUE_SIZE) {
 		spin_unlock_irqrestore(&queue->lock, flags);
 		return -ENOMEM;
 	}
@@ -144,6 +151,7 @@ enum dev_state {
 	STATE_DEV_INVALID = 0,
 	STATE_DEV_OPENED,
 	STATE_DEV_INITIALIZED,
+	STATE_DEV_REGISTERING,
 	STATE_DEV_RUNNING,
 	STATE_DEV_CLOSED,
 	STATE_DEV_FAILED
@@ -158,6 +166,9 @@ struct raw_dev {
 
 	/* Reference to misc device: */
 	struct device			*dev;
+
+	/* Make driver names unique */
+	int				driver_id_number;
 
 	/* Protected by lock: */
 	enum dev_state			state;
@@ -187,6 +198,7 @@ static struct raw_dev *dev_new(void)
 	spin_lock_init(&dev->lock);
 	init_completion(&dev->ep0_done);
 	raw_event_queue_init(&dev->queue);
+	dev->driver_id_number = -1;
 	return dev;
 }
 
@@ -197,6 +209,9 @@ static void dev_free(struct kref *kref)
 
 	kfree(dev->udc_name);
 	kfree(dev->driver.udc_name);
+	kfree(dev->driver.driver.name);
+	if (dev->driver_id_number >= 0)
+		ida_free(&driver_id_numbers, dev->driver_id_number);
 	if (dev->req) {
 		if (dev->ep0_urb_queued)
 			usb_ep_dequeue(dev->gadget->ep0, dev->req);
@@ -297,13 +312,16 @@ static int gadget_bind(struct usb_gadget *gadget,
 	dev->eps_num = i;
 	spin_unlock_irqrestore(&dev->lock, flags);
 
+	dev_dbg(&gadget->dev, "gadget connected\n");
+	ret = raw_queue_event(dev, USB_RAW_EVENT_CONNECT, 0, NULL);
+	if (ret < 0) {
+		dev_err(&gadget->dev, "failed to queue connect event\n");
+		set_gadget_data(gadget, NULL);
+		return ret;
+	}
+
 	/* Matches kref_put() in gadget_unbind(). */
 	kref_get(&dev->count);
-
-	ret = raw_queue_event(dev, USB_RAW_EVENT_CONNECT, 0, NULL);
-	if (ret < 0)
-		dev_err(&gadget->dev, "failed to queue event\n");
-
 	return ret;
 }
 
@@ -342,20 +360,65 @@ static int gadget_setup(struct usb_gadget *gadget,
 
 	ret = raw_queue_event(dev, USB_RAW_EVENT_CONTROL, sizeof(*ctrl), ctrl);
 	if (ret < 0)
-		dev_err(&gadget->dev, "failed to queue event\n");
+		dev_err(&gadget->dev, "failed to queue control event\n");
 	goto out;
 
 out_unlock:
 	spin_unlock_irqrestore(&dev->lock, flags);
 out:
+	if (ret == 0 && ctrl->wLength == 0) {
+		/*
+		 * Return USB_GADGET_DELAYED_STATUS as a workaround to stop
+		 * some UDC drivers (e.g. dwc3) from automatically proceeding
+		 * with the status stage for 0-length transfers.
+		 * Should be removed once all UDC drivers are fixed to always
+		 * delay the status stage until a response is queued to EP0.
+		 */
+		return USB_GADGET_DELAYED_STATUS;
+	}
 	return ret;
 }
 
-/* These are currently unused but present in case UDC driver requires them. */
-static void gadget_disconnect(struct usb_gadget *gadget) { }
-static void gadget_suspend(struct usb_gadget *gadget) { }
-static void gadget_resume(struct usb_gadget *gadget) { }
-static void gadget_reset(struct usb_gadget *gadget) { }
+static void gadget_disconnect(struct usb_gadget *gadget)
+{
+	struct raw_dev *dev = get_gadget_data(gadget);
+	int ret;
+
+	dev_dbg(&gadget->dev, "gadget disconnected\n");
+	ret = raw_queue_event(dev, USB_RAW_EVENT_DISCONNECT, 0, NULL);
+	if (ret < 0)
+		dev_err(&gadget->dev, "failed to queue disconnect event\n");
+}
+static void gadget_suspend(struct usb_gadget *gadget)
+{
+	struct raw_dev *dev = get_gadget_data(gadget);
+	int ret;
+
+	dev_dbg(&gadget->dev, "gadget suspended\n");
+	ret = raw_queue_event(dev, USB_RAW_EVENT_SUSPEND, 0, NULL);
+	if (ret < 0)
+		dev_err(&gadget->dev, "failed to queue suspend event\n");
+}
+static void gadget_resume(struct usb_gadget *gadget)
+{
+	struct raw_dev *dev = get_gadget_data(gadget);
+	int ret;
+
+	dev_dbg(&gadget->dev, "gadget resumed\n");
+	ret = raw_queue_event(dev, USB_RAW_EVENT_RESUME, 0, NULL);
+	if (ret < 0)
+		dev_err(&gadget->dev, "failed to queue resume event\n");
+}
+static void gadget_reset(struct usb_gadget *gadget)
+{
+	struct raw_dev *dev = get_gadget_data(gadget);
+	int ret;
+
+	dev_dbg(&gadget->dev, "gadget reset\n");
+	ret = raw_queue_event(dev, USB_RAW_EVENT_RESET, 0, NULL);
+	if (ret < 0)
+		dev_err(&gadget->dev, "failed to queue reset event\n");
+}
 
 /*----------------------------------------------------------------------*/
 
@@ -417,9 +480,11 @@ out_put:
 static int raw_ioctl_init(struct raw_dev *dev, unsigned long value)
 {
 	int ret = 0;
+	int driver_id_number;
 	struct usb_raw_init arg;
 	char *udc_driver_name;
 	char *udc_device_name;
+	char *driver_driver_name;
 	unsigned long flags;
 
 	if (copy_from_user(&arg, (void __user *)value, sizeof(arg)))
@@ -438,36 +503,43 @@ static int raw_ioctl_init(struct raw_dev *dev, unsigned long value)
 		return -EINVAL;
 	}
 
+	driver_id_number = ida_alloc(&driver_id_numbers, GFP_KERNEL);
+	if (driver_id_number < 0)
+		return driver_id_number;
+
+	driver_driver_name = kmalloc(DRIVER_DRIVER_NAME_LENGTH_MAX, GFP_KERNEL);
+	if (!driver_driver_name) {
+		ret = -ENOMEM;
+		goto out_free_driver_id_number;
+	}
+	snprintf(driver_driver_name, DRIVER_DRIVER_NAME_LENGTH_MAX,
+				DRIVER_NAME ".%d", driver_id_number);
+
 	udc_driver_name = kmalloc(UDC_NAME_LENGTH_MAX, GFP_KERNEL);
-	if (!udc_driver_name)
-		return -ENOMEM;
+	if (!udc_driver_name) {
+		ret = -ENOMEM;
+		goto out_free_driver_driver_name;
+	}
 	ret = strscpy(udc_driver_name, &arg.driver_name[0],
 				UDC_NAME_LENGTH_MAX);
-	if (ret < 0) {
-		kfree(udc_driver_name);
-		return ret;
-	}
+	if (ret < 0)
+		goto out_free_udc_driver_name;
 	ret = 0;
 
 	udc_device_name = kmalloc(UDC_NAME_LENGTH_MAX, GFP_KERNEL);
 	if (!udc_device_name) {
-		kfree(udc_driver_name);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto out_free_udc_driver_name;
 	}
 	ret = strscpy(udc_device_name, &arg.device_name[0],
 				UDC_NAME_LENGTH_MAX);
-	if (ret < 0) {
-		kfree(udc_driver_name);
-		kfree(udc_device_name);
-		return ret;
-	}
+	if (ret < 0)
+		goto out_free_udc_device_name;
 	ret = 0;
 
 	spin_lock_irqsave(&dev->lock, flags);
 	if (dev->state != STATE_DEV_OPENED) {
 		dev_dbg(dev->dev, "fail, device is not opened\n");
-		kfree(udc_driver_name);
-		kfree(udc_device_name);
 		ret = -EINVAL;
 		goto out_unlock;
 	}
@@ -482,14 +554,25 @@ static int raw_ioctl_init(struct raw_dev *dev, unsigned long value)
 	dev->driver.suspend = gadget_suspend;
 	dev->driver.resume = gadget_resume;
 	dev->driver.reset = gadget_reset;
-	dev->driver.driver.name = DRIVER_NAME;
+	dev->driver.driver.name = driver_driver_name;
 	dev->driver.udc_name = udc_device_name;
 	dev->driver.match_existing_only = 1;
+	dev->driver_id_number = driver_id_number;
 
 	dev->state = STATE_DEV_INITIALIZED;
+	spin_unlock_irqrestore(&dev->lock, flags);
+	return ret;
 
 out_unlock:
 	spin_unlock_irqrestore(&dev->lock, flags);
+out_free_udc_device_name:
+	kfree(udc_device_name);
+out_free_udc_driver_name:
+	kfree(udc_driver_name);
+out_free_driver_driver_name:
+	kfree(driver_driver_name);
+out_free_driver_id_number:
+	ida_free(&driver_id_numbers, driver_id_number);
 	return ret;
 }
 
@@ -507,14 +590,15 @@ static int raw_ioctl_run(struct raw_dev *dev, unsigned long value)
 		ret = -EINVAL;
 		goto out_unlock;
 	}
+	dev->state = STATE_DEV_REGISTERING;
 	spin_unlock_irqrestore(&dev->lock, flags);
 
-	ret = usb_gadget_probe_driver(&dev->driver);
+	ret = usb_gadget_register_driver(&dev->driver);
 
 	spin_lock_irqsave(&dev->lock, flags);
 	if (ret) {
 		dev_err(dev->dev,
-			"fail, usb_gadget_probe_driver returned %d\n", ret);
+			"fail, usb_gadget_register_driver returned %d\n", ret);
 		dev->state = STATE_DEV_FAILED;
 		goto out_unlock;
 	}
@@ -564,9 +648,12 @@ static int raw_ioctl_event_fetch(struct raw_dev *dev, unsigned long value)
 		return -ENODEV;
 	}
 	length = min(arg.length, event->length);
-	if (copy_to_user((void __user *)value, event, sizeof(*event) + length))
+	if (copy_to_user((void __user *)value, event, sizeof(*event) + length)) {
+		kfree(event);
 		return -EFAULT;
+	}
 
+	kfree(event);
 	return 0;
 }
 
@@ -581,7 +668,7 @@ static void *raw_alloc_io_data(struct usb_raw_ep_io *io, void __user *ptr,
 		return ERR_PTR(-EINVAL);
 	if (!usb_raw_io_flags_valid(io->flags))
 		return ERR_PTR(-EINVAL);
-	if (io->length > PAGE_SIZE)
+	if (io->length > USB_RAW_IO_LENGTH_MAX)
 		return ERR_PTR(-EINVAL);
 	if (get_from_user)
 		data = memdup_user(ptr + sizeof(*io), io->length);
@@ -643,7 +730,6 @@ static int raw_process_ep0_io(struct raw_dev *dev, struct usb_raw_ep_io *io,
 		dev_err(&dev->gadget->dev,
 				"fail, usb_ep_queue returned %d\n", ret);
 		spin_lock_irqsave(&dev->lock, flags);
-		dev->state = STATE_DEV_FAILED;
 		goto out_queue_failed;
 	}
 
@@ -697,7 +783,7 @@ static int raw_ioctl_ep0_read(struct raw_dev *dev, unsigned long value)
 	if (ret < 0)
 		goto free;
 
-	length = min(io.length, (unsigned int)ret);
+	length = min_t(unsigned int, io.length, ret);
 	if (copy_to_user((void __user *)(value + sizeof(io)), data, length))
 		ret = -EFAULT;
 	else
@@ -757,6 +843,7 @@ static int raw_ioctl_ep_enable(struct raw_dev *dev, unsigned long value)
 	unsigned long flags;
 	struct usb_endpoint_descriptor *desc;
 	struct raw_ep *ep;
+	bool ep_props_matched = false;
 
 	desc = memdup_user((void __user *)value, sizeof(*desc));
 	if (IS_ERR(desc))
@@ -786,12 +873,13 @@ static int raw_ioctl_ep_enable(struct raw_dev *dev, unsigned long value)
 
 	for (i = 0; i < dev->eps_num; i++) {
 		ep = &dev->eps[i];
-		if (ep->state != STATE_EP_DISABLED)
-			continue;
 		if (ep->addr != usb_endpoint_num(desc) &&
 				ep->addr != USB_RAW_EP_ADDR_ANY)
 			continue;
 		if (!usb_gadget_ep_match_desc(dev->gadget, ep->ep, desc, NULL))
+			continue;
+		ep_props_matched = true;
+		if (ep->state != STATE_EP_DISABLED)
 			continue;
 		ep->ep->desc = desc;
 		ret = usb_ep_enable(ep->ep);
@@ -814,8 +902,13 @@ static int raw_ioctl_ep_enable(struct raw_dev *dev, unsigned long value)
 		goto out_unlock;
 	}
 
-	dev_dbg(&dev->gadget->dev, "fail, no gadget endpoints available\n");
-	ret = -EBUSY;
+	if (!ep_props_matched) {
+		dev_dbg(&dev->gadget->dev, "fail, bad endpoint descriptor\n");
+		ret = -EINVAL;
+	} else {
+		dev_dbg(&dev->gadget->dev, "fail, no endpoints available\n");
+		ret = -EBUSY;
+	}
 
 out_free:
 	kfree(desc);
@@ -1023,7 +1116,6 @@ static int raw_process_ep_io(struct raw_dev *dev, struct usb_raw_ep_io *io,
 		dev_err(&dev->gadget->dev,
 				"fail, usb_ep_queue returned %d\n", ret);
 		spin_lock_irqsave(&dev->lock, flags);
-		dev->state = STATE_DEV_FAILED;
 		goto out_queue_failed;
 	}
 
@@ -1077,7 +1169,7 @@ static int raw_ioctl_ep_read(struct raw_dev *dev, unsigned long value)
 	if (ret < 0)
 		goto free;
 
-	length = min(io.length, (unsigned int)ret);
+	length = min_t(unsigned int, io.length, ret);
 	if (copy_to_user((void __user *)(value + sizeof(io)), data, length))
 		ret = -EFAULT;
 	else
@@ -1159,7 +1251,7 @@ static int raw_ioctl_eps_info(struct raw_dev *dev, unsigned long value)
 	struct usb_raw_eps_info *info;
 	struct raw_ep *ep;
 
-	info = kmalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc(sizeof(*info), GFP_KERNEL);
 	if (!info) {
 		ret = -ENOMEM;
 		goto out;
@@ -1179,7 +1271,6 @@ static int raw_ioctl_eps_info(struct raw_dev *dev, unsigned long value)
 		goto out_free;
 	}
 
-	memset(info, 0, sizeof(*info));
 	for (i = 0; i < dev->eps_num; i++) {
 		ep = &dev->eps[i];
 		strscpy(&info->eps[i].name[0], ep->ep->name,
@@ -1274,7 +1365,6 @@ static const struct file_operations raw_fops = {
 	.unlocked_ioctl =	raw_ioctl,
 	.compat_ioctl =		raw_ioctl,
 	.release =		raw_release,
-	.llseek =		no_llseek,
 };
 
 static struct miscdevice raw_misc_device = {

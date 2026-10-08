@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2015, 2016 IBM Corporation
  * Copyright (C) 2016 Intel Corporation
@@ -7,12 +8,6 @@
  * Maintained by: <tpmdd-devel@lists.sourceforge.net>
  *
  * Device driver for vTPM (vTPM proxy driver)
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
- *
  */
 
 #include <linux/types.h>
@@ -96,7 +91,7 @@ static ssize_t vtpm_proxy_fops_read(struct file *filp, char __user *buf,
 
 	len = proxy_dev->req_len;
 
-	if (count < len) {
+	if (count < len || len > sizeof(proxy_dev->buffer)) {
 		mutex_unlock(&proxy_dev->buf_lock);
 		pr_debug("Invalid size in recv: count=%zd, req_len=%zd\n",
 			 count, len);
@@ -248,7 +243,6 @@ static int vtpm_proxy_fops_release(struct inode *inode, struct file *filp)
 
 static const struct file_operations vtpm_proxy_fops = {
 	.owner = THIS_MODULE,
-	.llseek = no_llseek,
 	.read = vtpm_proxy_fops_read,
 	.write = vtpm_proxy_fops_write,
 	.poll = vtpm_proxy_fops_poll,
@@ -303,9 +297,9 @@ out:
 static int vtpm_proxy_is_driver_command(struct tpm_chip *chip,
 					u8 *buf, size_t count)
 {
-	struct tpm_input_header *hdr = (struct tpm_input_header *)buf;
+	struct tpm_header *hdr = (struct tpm_header *)buf;
 
-	if (count < sizeof(struct tpm_input_header))
+	if (count < sizeof(struct tpm_header))
 		return 0;
 
 	if (chip->flags & TPM_CHIP_FLAG_TPM2) {
@@ -327,12 +321,14 @@ static int vtpm_proxy_is_driver_command(struct tpm_chip *chip,
  *
  * @chip: tpm chip to use
  * @buf: send buffer
+ * @bufsiz: size of the buffer
  * @count: bytes to send
  *
  * Return:
  *      0 in case of success, negative error value otherwise.
  */
-static int vtpm_proxy_tpm_op_send(struct tpm_chip *chip, u8 *buf, size_t count)
+static int vtpm_proxy_tpm_op_send(struct tpm_chip *chip, u8 *buf, size_t bufsiz,
+				  size_t count)
 {
 	struct proxy_dev *proxy_dev = dev_get_drvdata(&chip->dev);
 
@@ -401,7 +397,7 @@ static int vtpm_proxy_request_locality(struct tpm_chip *chip, int locality)
 {
 	struct tpm_buf buf;
 	int rc;
-	const struct tpm_output_header *header;
+	const struct tpm_header *header;
 	struct proxy_dev *proxy_dev = dev_get_drvdata(&chip->dev);
 
 	if (chip->flags & TPM_CHIP_FLAG_TPM2)
@@ -416,9 +412,7 @@ static int vtpm_proxy_request_locality(struct tpm_chip *chip, int locality)
 
 	proxy_dev->state |= STATE_DRIVER_COMMAND;
 
-	rc = tpm_transmit_cmd(chip, NULL, buf.data, tpm_buf_length(&buf), 0,
-			      TPM_TRANSMIT_NESTED,
-			      "attempting to set locality");
+	rc = tpm_transmit_cmd(chip, &buf, 0, "attempting to set locality");
 
 	proxy_dev->state &= ~STATE_DRIVER_COMMAND;
 
@@ -427,7 +421,7 @@ static int vtpm_proxy_request_locality(struct tpm_chip *chip, int locality)
 		goto out;
 	}
 
-	header = (const struct tpm_output_header *)buf.data;
+	header = (const struct tpm_header *)buf.data;
 	rc = be32_to_cpu(header->return_code);
 	if (rc)
 		locality = -1;
@@ -677,20 +671,10 @@ static long vtpmx_fops_ioctl(struct file *f, unsigned int ioctl,
 	}
 }
 
-#ifdef CONFIG_COMPAT
-static long vtpmx_fops_compat_ioctl(struct file *f, unsigned int ioctl,
-					  unsigned long arg)
-{
-	return vtpmx_fops_ioctl(f, ioctl, (unsigned long)compat_ptr(arg));
-}
-#endif
-
 static const struct file_operations vtpmx_fops = {
 	.owner = THIS_MODULE,
 	.unlocked_ioctl = vtpmx_fops_ioctl,
-#ifdef CONFIG_COMPAT
-	.compat_ioctl = vtpmx_fops_compat_ioctl,
-#endif
+	.compat_ioctl = compat_ptr_ioctl,
 	.llseek = noop_llseek,
 };
 
@@ -728,7 +712,7 @@ static void __exit vtpm_module_exit(void)
 module_init(vtpm_module_init);
 module_exit(vtpm_module_exit);
 
-MODULE_AUTHOR("Stefan Berger (stefanb@us.ibm.com)");
+MODULE_AUTHOR("Stefan Berger <stefanb@us.ibm.com>");
 MODULE_DESCRIPTION("vTPM Driver");
 MODULE_VERSION("0.1");
 MODULE_LICENSE("GPL");

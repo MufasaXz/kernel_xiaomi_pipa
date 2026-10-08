@@ -1,25 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* SCTP kernel implementation
  * (C) Copyright Red Hat Inc. 2017
  *
  * This file is part of the SCTP kernel implementation
  *
  * These functions implement sctp diag support.
- *
- * This SCTP implementation is free software;
- * you can redistribute it and/or modify it under the terms of
- * the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This SCTP implementation is distributed in the hope that it
- * will be useful, but WITHOUT ANY WARRANTY; without even the implied
- *                 ************************
- * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
  *
  * Please send any bug reports or fixes you make to the
  * email addresched(es):
@@ -88,19 +73,26 @@ static int inet_diag_msg_sctpladdrs_fill(struct sk_buff *skb,
 	struct nlattr *attr;
 	void *info = NULL;
 
+	rcu_read_lock();
 	list_for_each_entry_rcu(laddr, address_list, list)
 		addrcnt++;
+	rcu_read_unlock();
 
 	attr = nla_reserve(skb, INET_DIAG_LOCALS, addrlen * addrcnt);
 	if (!attr)
 		return -EMSGSIZE;
 
 	info = nla_data(attr);
+	rcu_read_lock();
 	list_for_each_entry_rcu(laddr, address_list, list) {
 		memcpy(info, &laddr->a, sizeof(laddr->a));
 		memset(info + sizeof(laddr->a), 0, addrlen - sizeof(laddr->a));
 		info += addrlen;
+
+		if (!--addrcnt)
+			break;
 	}
+	rcu_read_unlock();
 
 	return 0;
 }
@@ -187,8 +179,8 @@ static int inet_sctp_diag_fill(struct sock *sk, struct sctp_association *asoc,
 		mem[SK_MEMINFO_FWD_ALLOC] = sk->sk_forward_alloc;
 		mem[SK_MEMINFO_WMEM_QUEUED] = sk->sk_wmem_queued;
 		mem[SK_MEMINFO_OPTMEM] = atomic_read(&sk->sk_omem_alloc);
-		mem[SK_MEMINFO_BACKLOG] = sk->sk_backlog.len;
-		mem[SK_MEMINFO_DROPS] = atomic_read(&sk->sk_drops);
+		mem[SK_MEMINFO_BACKLOG] = READ_ONCE(sk->sk_backlog.len);
+		mem[SK_MEMINFO_DROPS] = sk_drops_read(sk);
 
 		if (nla_put(skb, INET_DIAG_SKMEMINFO, sizeof(mem), &mem) < 0)
 			goto errout;
@@ -238,14 +230,15 @@ struct sctp_comm_param {
 	bool net_admin;
 };
 
-static size_t inet_assoc_attr_size(struct sctp_association *asoc)
+static size_t inet_assoc_attr_size(struct sock *sk,
+				   struct sctp_association *asoc)
 {
 	int addrlen = sizeof(struct sockaddr_storage);
 	int addrcnt = 0;
 	struct sctp_sockaddr_entry *laddr;
 
 	list_for_each_entry_rcu(laddr, &asoc->base.bind_addr.address_list,
-				list)
+				list, lockdep_sock_is_held(sk))
 		addrcnt++;
 
 	return	  nla_total_size(sizeof(struct sctp_info))
@@ -257,50 +250,47 @@ static size_t inet_assoc_attr_size(struct sctp_association *asoc)
 		+ 64;
 }
 
-static int sctp_tsp_dump_one(struct sctp_transport *tsp, void *p)
+static int sctp_sock_dump_one(struct sctp_endpoint *ep, struct sctp_transport *tsp, void *p)
 {
 	struct sctp_association *assoc = tsp->asoc;
-	struct sock *sk = tsp->asoc->base.sk;
 	struct sctp_comm_param *commp = p;
-	struct sk_buff *in_skb = commp->skb;
+	struct sock *sk = ep->base.sk;
 	const struct inet_diag_req_v2 *req = commp->r;
-	const struct nlmsghdr *nlh = commp->nlh;
-	struct net *net = sock_net(in_skb->sk);
+	struct sk_buff *skb = commp->skb;
 	struct sk_buff *rep;
 	int err;
 
 	err = sock_diag_check_cookie(sk, req->id.idiag_cookie);
 	if (err)
-		goto out;
-
-	err = -ENOMEM;
-	rep = nlmsg_new(inet_assoc_attr_size(assoc), GFP_KERNEL);
-	if (!rep)
-		goto out;
+		return err;
 
 	lock_sock(sk);
-	if (sk != assoc->base.sk) {
+
+	rep = nlmsg_new(inet_assoc_attr_size(sk, assoc), GFP_KERNEL);
+	if (!rep) {
 		release_sock(sk);
-		sk = assoc->base.sk;
-		lock_sock(sk);
+		return -ENOMEM;
 	}
-	err = inet_sctp_diag_fill(sk, assoc, rep, req,
-				  sk_user_ns(NETLINK_CB(in_skb).sk),
-				  NETLINK_CB(in_skb).portid,
-				  nlh->nlmsg_seq, 0, nlh,
-				  commp->net_admin);
-	release_sock(sk);
-	if (err < 0) {
-		WARN_ON(err == -EMSGSIZE);
-		kfree_skb(rep);
+
+	if (ep != assoc->ep) {
+		err = -EAGAIN;
 		goto out;
 	}
 
-	err = netlink_unicast(net->diag_nlsk, rep, NETLINK_CB(in_skb).portid,
-			      MSG_DONTWAIT);
-	if (err > 0)
-		err = 0;
+	err = inet_sctp_diag_fill(sk, assoc, rep, req, sk_user_ns(NETLINK_CB(skb).sk),
+				  NETLINK_CB(skb).portid, commp->nlh->nlmsg_seq, 0,
+				  commp->nlh, commp->net_admin);
+	if (err < 0) {
+		WARN_ON(err == -EMSGSIZE);
+		goto out;
+	}
+	release_sock(sk);
+
+	return nlmsg_unicast(sock_net(skb->sk)->diag_nlsk, rep, NETLINK_CB(skb).portid);
+
 out:
+	release_sock(sk);
+	kfree_skb(rep);
 	return err;
 }
 
@@ -364,11 +354,9 @@ static int sctp_sock_filter(struct sctp_endpoint *ep, struct sctp_transport *tsp
 	struct sctp_comm_param *commp = p;
 	struct sock *sk = ep->base.sk;
 	const struct inet_diag_req_v2 *r = commp->r;
-	struct sctp_association *assoc =
-		list_entry(ep->asocs.next, struct sctp_association, asocs);
 
 	/* find the ep only once through the transports by this condition */
-	if (tsp->asoc != assoc)
+	if (!list_is_first(&tsp->asoc->asocs, &ep->asocs))
 		return 0;
 
 	if (r->sdiag_family != AF_UNSPEC && sk->sk_family != r->sdiag_family)
@@ -433,24 +421,26 @@ static void sctp_diag_get_info(struct sock *sk, struct inet_diag_msg *r,
 		r->idiag_rqueue = atomic_read(&infox->asoc->rmem_alloc);
 		r->idiag_wqueue = infox->asoc->sndbuf_used;
 	} else {
-		r->idiag_rqueue = sk->sk_ack_backlog;
-		r->idiag_wqueue = sk->sk_max_ack_backlog;
+		r->idiag_rqueue = READ_ONCE(sk->sk_ack_backlog);
+		r->idiag_wqueue = READ_ONCE(sk->sk_max_ack_backlog);
 	}
 	if (infox->sctpinfo)
 		sctp_get_sctp_info(sk, infox->asoc, infox->sctpinfo);
 }
 
-static int sctp_diag_dump_one(struct sk_buff *in_skb,
-			      const struct nlmsghdr *nlh,
+static int sctp_diag_dump_one(struct netlink_callback *cb,
 			      const struct inet_diag_req_v2 *req)
 {
-	struct net *net = sock_net(in_skb->sk);
+	struct sk_buff *skb = cb->skb;
+	struct net *net = sock_net(skb->sk);
+	const struct nlmsghdr *nlh = cb->nlh;
 	union sctp_addr laddr, paddr;
+	int dif = req->id.idiag_if;
 	struct sctp_comm_param commp = {
-		.skb = in_skb,
+		.skb = skb,
 		.r = req,
 		.nlh = nlh,
-		.net_admin = netlink_net_capable(in_skb, CAP_NET_ADMIN),
+		.net_admin = netlink_net_capable(skb, CAP_NET_ADMIN),
 	};
 
 	if (req->sdiag_family == AF_INET) {
@@ -473,12 +463,12 @@ static int sctp_diag_dump_one(struct sk_buff *in_skb,
 		paddr.v6.sin6_family = AF_INET6;
 	}
 
-	return sctp_transport_lookup_process(sctp_tsp_dump_one,
-					     net, &laddr, &paddr, &commp);
+	return sctp_transport_lookup_process(sctp_sock_dump_one,
+					     net, &laddr, &paddr, &commp, dif);
 }
 
 static void sctp_diag_dump(struct sk_buff *skb, struct netlink_callback *cb,
-			   const struct inet_diag_req_v2 *r, struct nlattr *bc)
+			   const struct inet_diag_req_v2 *r)
 {
 	u32 idiag_states = r->idiag_states;
 	struct net *net = sock_net(skb->sk);
@@ -528,6 +518,7 @@ done:
 }
 
 static const struct inet_diag_handler sctp_diag_handler = {
+	.owner		 = THIS_MODULE,
 	.dump		 = sctp_diag_dump,
 	.dump_one	 = sctp_diag_dump_one,
 	.idiag_get_info  = sctp_diag_get_info,
@@ -548,4 +539,5 @@ static void __exit sctp_diag_exit(void)
 module_init(sctp_diag_init);
 module_exit(sctp_diag_exit);
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("SCTP socket monitoring via SOCK_DIAG");
 MODULE_ALIAS_NET_PF_PROTO_TYPE(PF_NETLINK, NETLINK_SOCK_DIAG, 2-132);

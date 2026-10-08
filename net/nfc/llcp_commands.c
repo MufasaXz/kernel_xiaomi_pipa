@@ -1,18 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2011  Intel Corporation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 #define pr_fmt(fmt) "llcp: %s: " fmt, __func__
@@ -349,8 +337,6 @@ int nfc_llcp_send_disconnect(struct nfc_llcp_sock *sock)
 	struct nfc_dev *dev;
 	struct nfc_llcp_local *local;
 
-	pr_debug("Sending DISC\n");
-
 	local = sock->local;
 	if (local == NULL)
 		return -ENODEV;
@@ -373,8 +359,7 @@ int nfc_llcp_send_symm(struct nfc_dev *dev)
 	struct sk_buff *skb;
 	struct nfc_llcp_local *local;
 	u16 size = 0;
-
-	pr_debug("Sending SYMM\n");
+	int err;
 
 	local = nfc_llcp_find_local(dev);
 	if (local == NULL)
@@ -384,8 +369,10 @@ int nfc_llcp_send_symm(struct nfc_dev *dev)
 	size += dev->tx_headroom + dev->tx_tailroom + NFC_HEADER_SIZE;
 
 	skb = alloc_skb(size, GFP_KERNEL);
-	if (skb == NULL)
-		return -ENOMEM;
+	if (skb == NULL) {
+		err = -ENOMEM;
+		goto out;
+	}
 
 	skb_reserve(skb, dev->tx_headroom + NFC_HEADER_SIZE);
 
@@ -395,8 +382,11 @@ int nfc_llcp_send_symm(struct nfc_dev *dev)
 
 	nfc_llcp_send_to_raw_sock(local, skb, NFC_DIRECTION_TX);
 
-	return nfc_data_exchange(dev, local->target_idx, skb,
+	err = nfc_data_exchange(dev, local->target_idx, skb,
 				 nfc_llcp_recv, local);
+out:
+	nfc_llcp_local_put(local);
+	return err;
 }
 
 int nfc_llcp_send_connect(struct nfc_llcp_sock *sock)
@@ -411,8 +401,6 @@ int nfc_llcp_send_connect(struct nfc_llcp_sock *sock)
 	int err;
 	u16 size = 0;
 	__be16 miux;
-
-	pr_debug("Sending CONNECT\n");
 
 	local = sock->local;
 	if (local == NULL)
@@ -487,8 +475,6 @@ int nfc_llcp_send_cc(struct nfc_llcp_sock *sock)
 	int err;
 	u16 size = 0;
 	__be16 miux;
-
-	pr_debug("Sending CC\n");
 
 	local = sock->local;
 	if (local == NULL)
@@ -792,8 +778,23 @@ int nfc_llcp_send_ui_frame(struct nfc_llcp_sock *sock, u8 ssap, u8 dsap,
 		if (likely(frag_len > 0))
 			skb_put_data(pdu, msg_ptr, frag_len);
 
+		spin_lock(&local->tx_queue.lock);
+
+		if (list_empty(&local->list)) {
+			spin_unlock(&local->tx_queue.lock);
+
+			kfree_skb(pdu);
+
+			len -= remaining_len;
+			if (len == 0)
+				len = -ENXIO;
+			break;
+		}
+
 		/* No need to check for the peer RW for UI frames */
-		skb_queue_tail(&local->tx_queue, pdu);
+		__skb_queue_tail(&local->tx_queue, pdu);
+
+		spin_unlock(&local->tx_queue.lock);
 
 		remaining_len -= frag_len;
 		msg_ptr += frag_len;

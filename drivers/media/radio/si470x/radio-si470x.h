@@ -1,19 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *  drivers/media/radio/si470x/radio-si470x.h
  *
  *  Driver for radios with Silicon Labs Si470x FM Radio Receivers
  *
  *  Copyright (c) 2009 Tobias Lorenz <tobias.lorenz@gmx.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 
@@ -35,7 +26,7 @@
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-device.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 
 
@@ -189,6 +180,7 @@ struct si470x_device {
 
 #if IS_ENABLED(CONFIG_I2C_SI470X)
 	struct i2c_client *client;
+	struct gpio_desc *gpio_reset;
 #endif
 };
 

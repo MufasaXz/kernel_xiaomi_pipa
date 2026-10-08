@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * PowerNV OPAL Firmware Update Interface
  *
  * Copyright 2013 IBM Corp.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #define DEBUG
@@ -436,7 +432,7 @@ static int alloc_image_buf(char *buffer, size_t count)
  * and pre-allocate required memory.
  */
 static ssize_t image_data_write(struct file *filp, struct kobject *kobj,
-				struct bin_attribute *bin_attr,
+				const struct bin_attribute *bin_attr,
 				char *buffer, loff_t pos, size_t count)
 {
 	int rc;
@@ -516,13 +512,17 @@ static struct attribute *image_op_attrs[] = {
 	NULL	/* need to NULL terminate the list of attributes */
 };
 
-static struct attribute_group image_op_attr_group = {
+static const struct attribute_group image_op_attr_group = {
 	.attrs = image_op_attrs,
 };
 
 void __init opal_flash_update_init(void)
 {
 	int ret;
+
+	/* Firmware update is not supported by firmware */
+	if (!opal_check_token(OPAL_FLASH_VALIDATE))
+		return;
 
 	/* Allocate validate image buffer */
 	validate_flash_data.buf = kzalloc(VALIDATE_BUF_SIZE, GFP_KERNEL);

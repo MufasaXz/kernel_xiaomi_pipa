@@ -2,11 +2,13 @@
 #ifndef __GENELF_H__
 #define __GENELF_H__
 
+#include <linux/math.h>
+
 /* genelf.c */
 int jit_write_elf(int fd, uint64_t code_addr, const char *sym,
 		  const void *code, int csize, void *debug, int nr_debug_entries,
 		  void *unwinding, uint64_t unwinding_header_size, uint64_t unwinding_size);
-#ifdef HAVE_DWARF_SUPPORT
+#ifdef HAVE_LIBDW_SUPPORT
 /* genelf_debug.c */
 int jit_add_debug_info(Elf *e, uint64_t code_addr, void *debug, int nr_debug_entries);
 #endif
@@ -29,11 +31,29 @@ int jit_add_debug_info(Elf *e, uint64_t code_addr, void *debug, int nr_debug_ent
 #elif defined(__powerpc__)
 #define GEN_ELF_ARCH	EM_PPC
 #define GEN_ELF_CLASS	ELFCLASS32
+#elif defined(__sparc__) && defined(__arch64__)
+#define GEN_ELF_ARCH	EM_SPARCV9
+#define GEN_ELF_CLASS	ELFCLASS64
+#elif defined(__sparc__)
+#define GEN_ELF_ARCH	EM_SPARC
+#define GEN_ELF_CLASS	ELFCLASS32
+#elif defined(__s390x__)
+#define GEN_ELF_ARCH	EM_S390
+#define GEN_ELF_CLASS	ELFCLASS64
+#elif defined(__riscv) && __riscv_xlen == 64
+#define GEN_ELF_ARCH	EM_RISCV
+#define GEN_ELF_CLASS	ELFCLASS64
+#elif defined(__riscv) && __riscv_xlen == 32
+#define GEN_ELF_ARCH	EM_RISCV
+#define GEN_ELF_CLASS	ELFCLASS32
+#elif defined(__loongarch__)
+#define GEN_ELF_ARCH	EM_LOONGARCH
+#define GEN_ELF_CLASS	ELFCLASS64
 #else
 #error "unsupported architecture"
 #endif
 
-#if __BYTE_ORDER == __BIG_ENDIAN
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 #define GEN_ELF_ENDIAN	ELFDATA2MSB
 #else
 #define GEN_ELF_ENDIAN	ELFDATA2LSB
@@ -64,6 +84,6 @@ int jit_add_debug_info(Elf *e, uint64_t code_addr, void *debug, int nr_debug_ent
 #endif
 
 /* The .text section is directly after the ELF header */
-#define GEN_ELF_TEXT_OFFSET sizeof(Elf_Ehdr)
+#define GEN_ELF_TEXT_OFFSET round_up(sizeof(Elf_Ehdr) + sizeof(Elf_Phdr), 16)
 
 #endif

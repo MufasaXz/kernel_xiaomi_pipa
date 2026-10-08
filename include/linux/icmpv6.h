@@ -79,15 +79,34 @@ extern int				icmpv6_init(void);
 extern int				icmpv6_err_convert(u8 type, u8 code,
 							   int *err);
 extern void				icmpv6_cleanup(void);
-extern void				icmpv6_param_prob(struct sk_buff *skb,
-							  u8 code, int pos);
+extern void				icmpv6_param_prob_reason(struct sk_buff *skb,
+								 u8 code, int pos,
+								 enum skb_drop_reason reason);
 
 struct flowi6;
 struct in6_addr;
-extern void				icmpv6_flow_init(struct sock *sk,
-							 struct flowi6 *fl6,
-							 u8 type,
-							 const struct in6_addr *saddr,
-							 const struct in6_addr *daddr,
-							 int oif);
+
+void icmpv6_flow_init(const struct sock *sk, struct flowi6 *fl6, u8 type,
+		      const struct in6_addr *saddr,
+		      const struct in6_addr *daddr, int oif);
+
+static inline void icmpv6_param_prob(struct sk_buff *skb, u8 code, int pos)
+{
+	icmpv6_param_prob_reason(skb, code, pos,
+				 SKB_DROP_REASON_NOT_SPECIFIED);
+}
+
+static inline bool icmpv6_is_err(int type)
+{
+	switch (type) {
+	case ICMPV6_DEST_UNREACH:
+	case ICMPV6_PKT_TOOBIG:
+	case ICMPV6_TIME_EXCEED:
+	case ICMPV6_PARAMPROB:
+		return true;
+	}
+
+	return false;
+}
+
 #endif

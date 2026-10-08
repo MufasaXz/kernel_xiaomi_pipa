@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* mountpoint management
  *
  * Copyright (C) 2002 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/kernel.h>
@@ -34,9 +30,8 @@ const struct file_operations afs_mntpt_file_operations = {
 
 const struct inode_operations afs_mntpt_inode_operations = {
 	.lookup		= afs_mntpt_lookup,
-	.readlink	= page_readlink,
+	.readlink	= afs_readlink,
 	.getattr	= afs_getattr,
-	.listxattr	= afs_listxattr,
 };
 
 const struct inode_operations afs_autocell_inode_operations = {
@@ -92,7 +87,7 @@ static int afs_mntpt_set_params(struct fs_context *fc, struct dentry *mntpt)
 		ctx->force = true;
 	}
 	if (ctx->cell) {
-		afs_put_cell(ctx->net, ctx->cell);
+		afs_unuse_cell(ctx->cell, afs_cell_trace_unuse_mntpt);
 		ctx->cell = NULL;
 	}
 	if (test_bit(AFS_VNODE_PSEUDODIR, &vnode->flags)) {
@@ -112,7 +107,9 @@ static int afs_mntpt_set_params(struct fs_context *fc, struct dentry *mntpt)
 		if (size > AFS_MAXCELLNAME)
 			return -ENAMETOOLONG;
 
-		cell = afs_lookup_cell(ctx->net, p, size, NULL, false);
+		cell = afs_lookup_cell(ctx->net, p, size, NULL,
+				       AFS_LOOKUP_CELL_MOUNTPOINT,
+				       afs_cell_trace_use_lookup_mntpt);
 		if (IS_ERR(cell)) {
 			pr_err("kAFS: unable to lookup cell '%pd'\n", mntpt);
 			return PTR_ERR(cell);
@@ -123,32 +120,34 @@ static int afs_mntpt_set_params(struct fs_context *fc, struct dentry *mntpt)
 		ctx->volnamesz = sizeof(afs_root_volume) - 1;
 	} else {
 		/* read the contents of the AFS special symlink */
-		struct page *page;
+		DEFINE_DELAYED_CALL(cleanup);
+		const char *content;
 		loff_t size = i_size_read(d_inode(mntpt));
-		char *buf;
 
 		if (src_as->cell)
-			ctx->cell = afs_get_cell(src_as->cell);
+			ctx->cell = afs_use_cell(src_as->cell, afs_cell_trace_use_mntpt);
 
-		if (size > PAGE_SIZE - 1)
+		if (size < 2 || size > PAGE_SIZE - 1)
 			return -EINVAL;
 
-		page = read_mapping_page(d_inode(mntpt)->i_mapping, 0, NULL);
-		if (IS_ERR(page))
-			return PTR_ERR(page);
-
-		if (PageError(page)) {
-			ret = afs_bad(AFS_FS_I(d_inode(mntpt)), afs_file_error_mntpt);
-			put_page(page);
-			return ret;
+		content = afs_get_link(mntpt, d_inode(mntpt), &cleanup);
+		if (IS_ERR(content)) {
+			do_delayed_call(&cleanup);
+			return PTR_ERR(content);
 		}
 
-		buf = kmap(page);
-		ret = vfs_parse_fs_string(fc, "source", buf, size);
-		kunmap(page);
-		put_page(page);
+		ret = -EINVAL;
+		if (content[size - 1] == '.')
+			ret = vfs_parse_fs_qstr(fc, "source",
+						&QSTR_LEN(content, size - 1));
+		do_delayed_call(&cleanup);
 		if (ret < 0)
 			return ret;
+
+		/* Don't cross a backup volume mountpoint from a backup volume */
+		if (src_as->volume && src_as->volume->type == AFSVL_BACKVOL &&
+		    ctx->type == AFSVL_BACKVOL)
+			return -ENODEV;
 	}
 
 	return 0;
@@ -192,7 +191,6 @@ struct vfsmount *afs_d_automount(struct path *path)
 	if (IS_ERR(newmnt))
 		return newmnt;
 
-	mntget(newmnt); /* prevent immediate expiration */
 	mnt_set_expiry(newmnt, &afs_vfsmounts);
 	queue_delayed_work(afs_wq, &afs_mntpt_expiry_timer,
 			   afs_mntpt_expiry_timeout * HZ);

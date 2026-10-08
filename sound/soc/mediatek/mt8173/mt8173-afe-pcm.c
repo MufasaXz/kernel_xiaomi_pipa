@@ -13,6 +13,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/of_reserved_mem.h>
 #include <linux/dma-mapping.h>
 #include <linux/pm_runtime.h>
 #include <sound/soc.h>
@@ -286,10 +287,8 @@ static int mt8173_afe_dais_set_clks(struct mtk_base_afe *afe,
 static void mt8173_afe_dais_disable_clks(struct mtk_base_afe *afe,
 					 struct clk *m_ck, struct clk *b_ck)
 {
-	if (m_ck)
-		clk_disable_unprepare(m_ck);
-	if (b_ck)
-		clk_disable_unprepare(b_ck);
+	clk_disable_unprepare(m_ck);
+	clk_disable_unprepare(b_ck);
 }
 
 static int mt8173_afe_i2s_startup(struct snd_pcm_substream *substream,
@@ -297,7 +296,7 @@ static int mt8173_afe_i2s_startup(struct snd_pcm_substream *substream,
 {
 	struct mtk_base_afe *afe = snd_soc_dai_get_drvdata(dai);
 
-	if (dai->active)
+	if (snd_soc_dai_active(dai))
 		return 0;
 
 	regmap_update_bits(afe->regmap, AUDIO_TOP_CON0,
@@ -310,7 +309,7 @@ static void mt8173_afe_i2s_shutdown(struct snd_pcm_substream *substream,
 {
 	struct mtk_base_afe *afe = snd_soc_dai_get_drvdata(dai);
 
-	if (dai->active)
+	if (snd_soc_dai_active(dai))
 		return;
 
 	mt8173_afe_set_i2s_enable(afe, false);
@@ -347,7 +346,7 @@ static int mt8173_afe_hdmi_startup(struct snd_pcm_substream *substream,
 	struct mtk_base_afe *afe = snd_soc_dai_get_drvdata(dai);
 	struct mt8173_afe_private *afe_priv = afe->platform_priv;
 
-	if (dai->active)
+	if (snd_soc_dai_active(dai))
 		return 0;
 
 	mt8173_afe_dais_enable_clks(afe, afe_priv->clocks[MT8173_CLK_I2S3_M],
@@ -361,7 +360,7 @@ static void mt8173_afe_hdmi_shutdown(struct snd_pcm_substream *substream,
 	struct mtk_base_afe *afe = snd_soc_dai_get_drvdata(dai);
 	struct mt8173_afe_private *afe_priv = afe->platform_priv;
 
-	if (dai->active)
+	if (snd_soc_dai_active(dai))
 		return;
 
 	mt8173_afe_dais_disable_clks(afe, afe_priv->clocks[MT8173_CLK_I2S3_M],
@@ -482,10 +481,10 @@ static int mt8173_afe_hdmi_trigger(struct snd_pcm_substream *substream, int cmd,
 static int mt8173_memif_fs(struct snd_pcm_substream *substream,
 			   unsigned int rate)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_component *component = snd_soc_rtdcom_lookup(rtd, AFE_PCM_NAME);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(component);
-	struct mtk_base_afe_memif *memif = &afe->memif[rtd->cpu_dai->id];
+	struct mtk_base_afe_memif *memif = &afe->memif[snd_soc_rtd_to_cpu(rtd, 0)->id];
 	int fs;
 
 	if (memif->data->id == MT8173_AFE_MEMIF_DAI ||
@@ -533,8 +532,6 @@ static struct snd_soc_dai_driver mt8173_afe_pcm_dais[] = {
 	{
 		.name = "DL1", /* downlink 1 */
 		.id = MT8173_AFE_MEMIF_DL1,
-		.suspend = mtk_afe_dai_suspend,
-		.resume = mtk_afe_dai_resume,
 		.playback = {
 			.stream_name = "DL1",
 			.channels_min = 1,
@@ -546,8 +543,6 @@ static struct snd_soc_dai_driver mt8173_afe_pcm_dais[] = {
 	}, {
 		.name = "VUL", /* voice uplink */
 		.id = MT8173_AFE_MEMIF_VUL,
-		.suspend = mtk_afe_dai_suspend,
-		.resume = mtk_afe_dai_resume,
 		.capture = {
 			.stream_name = "VUL",
 			.channels_min = 1,
@@ -575,7 +570,7 @@ static struct snd_soc_dai_driver mt8173_afe_pcm_dais[] = {
 			.formats = SNDRV_PCM_FMTBIT_S16_LE,
 		},
 		.ops = &mt8173_afe_i2s_ops,
-		.symmetric_rates = 1,
+		.symmetric_rate = 1,
 	},
 };
 
@@ -584,8 +579,6 @@ static struct snd_soc_dai_driver mt8173_afe_hdmi_dais[] = {
 	{
 		.name = "HDMI",
 		.id = MT8173_AFE_MEMIF_HDMI,
-		.suspend = mtk_afe_dai_suspend,
-		.resume = mtk_afe_dai_resume,
 		.playback = {
 			.stream_name = "HDMI",
 			.channels_min = 2,
@@ -681,12 +674,16 @@ static const struct snd_soc_component_driver mt8173_afe_pcm_dai_component = {
 	.num_dapm_widgets = ARRAY_SIZE(mt8173_afe_pcm_widgets),
 	.dapm_routes = mt8173_afe_pcm_routes,
 	.num_dapm_routes = ARRAY_SIZE(mt8173_afe_pcm_routes),
+	.suspend = mtk_afe_suspend,
+	.resume = mtk_afe_resume,
 };
 
 static const struct snd_soc_component_driver mt8173_afe_hdmi_dai_component = {
 	.name = "mt8173-afe-hdmi-dai",
 	.dapm_routes = mt8173_afe_hdmi_routes,
 	.num_dapm_routes = ARRAY_SIZE(mt8173_afe_hdmi_routes),
+	.suspend = mtk_afe_suspend,
+	.resume = mtk_afe_resume,
 };
 
 static const char *aud_clks[MT8173_CLK_NUM] = {
@@ -714,13 +711,11 @@ static const struct mtk_base_memif_data memif_data[MT8173_AFE_MEMIF_NUM] = {
 		.mono_reg = AFE_DAC_CON1,
 		.mono_shift = 21,
 		.hd_reg = -1,
-		.hd_shift = -1,
 		.enable_reg = AFE_DAC_CON0,
 		.enable_shift = 1,
 		.msb_reg = AFE_MEMIF_MSB,
 		.msb_shift = 0,
 		.agent_disable_reg = -1,
-		.agent_disable_shift = -1,
 	}, {
 		.name = "DL2",
 		.id = MT8173_AFE_MEMIF_DL2,
@@ -732,13 +727,11 @@ static const struct mtk_base_memif_data memif_data[MT8173_AFE_MEMIF_NUM] = {
 		.mono_reg = AFE_DAC_CON1,
 		.mono_shift = 22,
 		.hd_reg = -1,
-		.hd_shift = -1,
 		.enable_reg = AFE_DAC_CON0,
 		.enable_shift = 2,
 		.msb_reg = AFE_MEMIF_MSB,
 		.msb_shift = 1,
 		.agent_disable_reg = -1,
-		.agent_disable_shift = -1,
 	}, {
 		.name = "VUL",
 		.id = MT8173_AFE_MEMIF_VUL,
@@ -750,13 +743,11 @@ static const struct mtk_base_memif_data memif_data[MT8173_AFE_MEMIF_NUM] = {
 		.mono_reg = AFE_DAC_CON1,
 		.mono_shift = 27,
 		.hd_reg = -1,
-		.hd_shift = -1,
 		.enable_reg = AFE_DAC_CON0,
 		.enable_shift = 3,
 		.msb_reg = AFE_MEMIF_MSB,
 		.msb_shift = 6,
 		.agent_disable_reg = -1,
-		.agent_disable_shift = -1,
 	}, {
 		.name = "DAI",
 		.id = MT8173_AFE_MEMIF_DAI,
@@ -768,13 +759,11 @@ static const struct mtk_base_memif_data memif_data[MT8173_AFE_MEMIF_NUM] = {
 		.mono_reg = -1,
 		.mono_shift = -1,
 		.hd_reg = -1,
-		.hd_shift = -1,
 		.enable_reg = AFE_DAC_CON0,
 		.enable_shift = 4,
 		.msb_reg = AFE_MEMIF_MSB,
 		.msb_shift = 5,
 		.agent_disable_reg = -1,
-		.agent_disable_shift = -1,
 	}, {
 		.name = "AWB",
 		.id = MT8173_AFE_MEMIF_AWB,
@@ -786,13 +775,11 @@ static const struct mtk_base_memif_data memif_data[MT8173_AFE_MEMIF_NUM] = {
 		.mono_reg = AFE_DAC_CON1,
 		.mono_shift = 24,
 		.hd_reg = -1,
-		.hd_shift = -1,
 		.enable_reg = AFE_DAC_CON0,
 		.enable_shift = 6,
 		.msb_reg = AFE_MEMIF_MSB,
 		.msb_shift = 3,
 		.agent_disable_reg = -1,
-		.agent_disable_shift = -1,
 	}, {
 		.name = "MOD_DAI",
 		.id = MT8173_AFE_MEMIF_MOD_DAI,
@@ -804,13 +791,11 @@ static const struct mtk_base_memif_data memif_data[MT8173_AFE_MEMIF_NUM] = {
 		.mono_reg = AFE_DAC_CON1,
 		.mono_shift = 30,
 		.hd_reg = -1,
-		.hd_shift = -1,
 		.enable_reg = AFE_DAC_CON0,
 		.enable_shift = 7,
 		.msb_reg = AFE_MEMIF_MSB,
 		.msb_shift = 4,
 		.agent_disable_reg = -1,
-		.agent_disable_shift = -1,
 	}, {
 		.name = "HDMI",
 		.id = MT8173_AFE_MEMIF_HDMI,
@@ -822,13 +807,10 @@ static const struct mtk_base_memif_data memif_data[MT8173_AFE_MEMIF_NUM] = {
 		.mono_reg = -1,
 		.mono_shift = -1,
 		.hd_reg = -1,
-		.hd_shift = -1,
 		.enable_reg = -1,
-		.enable_shift = -1,
 		.msb_reg = AFE_MEMIF_MSB,
 		.msb_shift = 8,
 		.agent_disable_reg = -1,
-		.agent_disable_shift = -1,
 	},
 };
 
@@ -914,7 +896,6 @@ static const struct mtk_base_irq_data irq_data[MT8173_AFE_IRQ_NUM] = {
 		.irq_en_reg = AFE_IRQ_MCU_CON,
 		.irq_en_shift = 12,
 		.irq_fs_reg = -1,
-		.irq_fs_shift = -1,
 		.irq_fs_maskbit = -1,
 		.irq_clr_reg = AFE_IRQ_CLR,
 		.irq_clr_shift = 4,
@@ -944,14 +925,14 @@ static irqreturn_t mt8173_afe_irq_handler(int irq, void *dev_id)
 
 	for (i = 0; i < MT8173_AFE_MEMIF_NUM; i++) {
 		struct mtk_base_afe_memif *memif = &afe->memif[i];
-		struct mtk_base_afe_irq *irq;
+		struct mtk_base_afe_irq *irq_p;
 
 		if (memif->irq_usage < 0)
 			continue;
 
-		irq = &afe->irqs[memif->irq_usage];
+		irq_p = &afe->irqs[memif->irq_usage];
 
-		if (!(reg_value & (1 << irq->irq_data->irq_clr_shift)))
+		if (!(reg_value & (1 << irq_p->irq_data->irq_clr_shift)))
 			continue;
 
 		snd_pcm_period_elapsed(memif->substream);
@@ -1072,62 +1053,59 @@ static int mt8173_afe_pcm_dev_probe(struct platform_device *pdev)
 	int irq_id;
 	struct mtk_base_afe *afe;
 	struct mt8173_afe_private *afe_priv;
-	struct resource *res;
+	struct snd_soc_component *comp_pcm, *comp_hdmi;
+	struct device *dev = &pdev->dev;
 
-	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(33));
+	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(33));
 	if (ret)
 		return ret;
 
-	afe = devm_kzalloc(&pdev->dev, sizeof(*afe), GFP_KERNEL);
+	afe = devm_kzalloc(dev, sizeof(*afe), GFP_KERNEL);
 	if (!afe)
 		return -ENOMEM;
 
-	afe->platform_priv = devm_kzalloc(&pdev->dev, sizeof(*afe_priv),
-					  GFP_KERNEL);
+	afe->platform_priv = devm_kzalloc(dev, sizeof(*afe_priv), GFP_KERNEL);
 	afe_priv = afe->platform_priv;
 	if (!afe_priv)
 		return -ENOMEM;
 
-	afe->dev = &pdev->dev;
+	afe->dev = dev;
+
+	ret = of_reserved_mem_device_init(dev);
+	if (ret) {
+		dev_info(dev, "no reserved memory found, pre-allocating buffers instead\n");
+		afe->preallocate_buffers = true;
+	}
 
 	irq_id = platform_get_irq(pdev, 0);
-	if (irq_id <= 0) {
-		dev_err(afe->dev, "np %s no irq\n", afe->dev->of_node->name);
+	if (irq_id <= 0)
 		return irq_id < 0 ? irq_id : -ENXIO;
-	}
-	ret = devm_request_irq(afe->dev, irq_id, mt8173_afe_irq_handler,
-			       0, "Afe_ISR_Handle", (void *)afe);
-	if (ret) {
-		dev_err(afe->dev, "could not request_irq\n");
-		return ret;
-	}
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	afe->base_addr = devm_ioremap_resource(&pdev->dev, res);
+	afe->base_addr = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(afe->base_addr))
 		return PTR_ERR(afe->base_addr);
 
-	afe->regmap = devm_regmap_init_mmio(&pdev->dev, afe->base_addr,
-		&mt8173_afe_regmap_config);
+	afe->regmap = devm_regmap_init_mmio(dev, afe->base_addr,
+					    &mt8173_afe_regmap_config);
 	if (IS_ERR(afe->regmap))
 		return PTR_ERR(afe->regmap);
 
 	/* initial audio related clock */
 	ret = mt8173_afe_init_audio_clk(afe);
 	if (ret) {
-		dev_err(afe->dev, "mt8173_afe_init_audio_clk fail\n");
+		dev_err(dev, "mt8173_afe_init_audio_clk fail\n");
 		return ret;
 	}
 
 	/* memif % irq initialize*/
 	afe->memif_size = MT8173_AFE_MEMIF_NUM;
-	afe->memif = devm_kcalloc(afe->dev, afe->memif_size,
+	afe->memif = devm_kcalloc(dev, afe->memif_size,
 				  sizeof(*afe->memif), GFP_KERNEL);
 	if (!afe->memif)
 		return -ENOMEM;
 
 	afe->irqs_size = MT8173_AFE_IRQ_NUM;
-	afe->irqs = devm_kcalloc(afe->dev, afe->irqs_size,
+	afe->irqs = devm_kcalloc(dev, afe->irqs_size,
 				 sizeof(*afe->irqs), GFP_KERNEL);
 	if (!afe->irqs)
 		return -ENOMEM;
@@ -1146,9 +1124,9 @@ static int mt8173_afe_pcm_dev_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, afe);
 
-	pm_runtime_enable(&pdev->dev);
-	if (!pm_runtime_enabled(&pdev->dev)) {
-		ret = mt8173_afe_runtime_resume(&pdev->dev);
+	pm_runtime_enable(dev);
+	if (!pm_runtime_enabled(dev)) {
+		ret = mt8173_afe_runtime_resume(dev);
 		if (ret)
 			goto err_pm_disable;
 	}
@@ -1158,40 +1136,81 @@ static int mt8173_afe_pcm_dev_probe(struct platform_device *pdev)
 	afe->runtime_resume = mt8173_afe_runtime_resume;
 	afe->runtime_suspend = mt8173_afe_runtime_suspend;
 
-	ret = devm_snd_soc_register_component(&pdev->dev,
-					 &mtk_afe_pcm_platform,
-					 NULL, 0);
+	ret = devm_snd_soc_register_component(dev, &mtk_afe_pcm_platform,
+					      NULL, 0);
 	if (ret)
 		goto err_pm_disable;
 
-	ret = devm_snd_soc_register_component(&pdev->dev,
-					 &mt8173_afe_pcm_dai_component,
-					 mt8173_afe_pcm_dais,
-					 ARRAY_SIZE(mt8173_afe_pcm_dais));
+	comp_pcm = devm_kzalloc(dev, sizeof(*comp_pcm), GFP_KERNEL);
+	if (!comp_pcm) {
+		ret = -ENOMEM;
+		goto err_pm_disable;
+	}
+
+	ret = snd_soc_component_initialize(comp_pcm,
+					   &mt8173_afe_pcm_dai_component,
+					   dev);
 	if (ret)
 		goto err_pm_disable;
 
-	ret = devm_snd_soc_register_component(&pdev->dev,
-					 &mt8173_afe_hdmi_dai_component,
-					 mt8173_afe_hdmi_dais,
-					 ARRAY_SIZE(mt8173_afe_hdmi_dais));
+#ifdef CONFIG_DEBUG_FS
+	comp_pcm->debugfs_prefix = "pcm";
+#endif
+
+	ret = snd_soc_add_component(comp_pcm,
+				    mt8173_afe_pcm_dais,
+				    ARRAY_SIZE(mt8173_afe_pcm_dais));
 	if (ret)
 		goto err_pm_disable;
 
-	dev_info(&pdev->dev, "MT8173 AFE driver initialized.\n");
+	comp_hdmi = devm_kzalloc(dev, sizeof(*comp_hdmi), GFP_KERNEL);
+	if (!comp_hdmi) {
+		ret = -ENOMEM;
+		goto err_cleanup_components;
+	}
+
+	ret = snd_soc_component_initialize(comp_hdmi,
+					   &mt8173_afe_hdmi_dai_component,
+					   dev);
+	if (ret)
+		goto err_cleanup_components;
+
+#ifdef CONFIG_DEBUG_FS
+	comp_hdmi->debugfs_prefix = "hdmi";
+#endif
+
+	ret = snd_soc_add_component(comp_hdmi,
+				    mt8173_afe_hdmi_dais,
+				    ARRAY_SIZE(mt8173_afe_hdmi_dais));
+	if (ret)
+		goto err_cleanup_components;
+
+	ret = devm_request_irq(dev, irq_id, mt8173_afe_irq_handler,
+			       0, "Afe_ISR_Handle", (void *)afe);
+	if (ret) {
+		dev_err(dev, "could not request_irq\n");
+		goto err_cleanup_components;
+	}
+
+	dev_info(dev, "MT8173 AFE driver initialized.\n");
 	return 0;
 
+err_cleanup_components:
+	snd_soc_unregister_component(dev);
 err_pm_disable:
-	pm_runtime_disable(&pdev->dev);
+	pm_runtime_disable(dev);
 	return ret;
 }
 
-static int mt8173_afe_pcm_dev_remove(struct platform_device *pdev)
+static void mt8173_afe_pcm_dev_remove(struct platform_device *pdev)
 {
-	pm_runtime_disable(&pdev->dev);
-	if (!pm_runtime_status_suspended(&pdev->dev))
-		mt8173_afe_runtime_suspend(&pdev->dev);
-	return 0;
+	struct device *dev = &pdev->dev;
+
+	snd_soc_unregister_component(dev);
+
+	pm_runtime_disable(dev);
+	if (!pm_runtime_status_suspended(dev))
+		mt8173_afe_runtime_suspend(dev);
 }
 
 static const struct of_device_id mt8173_afe_pcm_dt_match[] = {
@@ -1201,15 +1220,15 @@ static const struct of_device_id mt8173_afe_pcm_dt_match[] = {
 MODULE_DEVICE_TABLE(of, mt8173_afe_pcm_dt_match);
 
 static const struct dev_pm_ops mt8173_afe_pm_ops = {
-	SET_RUNTIME_PM_OPS(mt8173_afe_runtime_suspend,
-			   mt8173_afe_runtime_resume, NULL)
+	RUNTIME_PM_OPS(mt8173_afe_runtime_suspend,
+		       mt8173_afe_runtime_resume, NULL)
 };
 
 static struct platform_driver mt8173_afe_pcm_driver = {
 	.driver = {
 		   .name = "mt8173-afe-pcm",
 		   .of_match_table = mt8173_afe_pcm_dt_match,
-		   .pm = &mt8173_afe_pm_ops,
+		   .pm = pm_ptr(&mt8173_afe_pm_ops),
 	},
 	.probe = mt8173_afe_pcm_dev_probe,
 	.remove = mt8173_afe_pcm_dev_remove,

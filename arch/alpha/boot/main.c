@@ -14,9 +14,8 @@
 
 #include <asm/console.h>
 #include <asm/hwrpb.h>
-#include <linux/pgtable.h>
 
-#include <stdarg.h>
+#include <linux/stdarg.h>
 
 #include "ksize.h"
 

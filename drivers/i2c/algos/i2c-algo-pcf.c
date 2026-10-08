@@ -1,18 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * i2c-algo-pcf.c i2c driver algorithms for PCF8584 adapters
  *
  *   Copyright (C) 1995-1997 Simon G. Vogl
  *		   1998-2000 Hans Berglund
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- *  GNU General Public License for more details.
  *
  * With some changes from Kyösti Mälkki <kmalkki@cc.hut.fi> and
  * Frodo Looijaard <frodol@dds.nl>, and also from Martin Bailey
@@ -28,6 +19,7 @@
 #include <linux/errno.h>
 #include <linux/i2c.h>
 #include <linux/i2c-algo-pcf.h>
+#include <linux/string_choices.h>
 #include "i2c-algo-pcf.h"
 
 
@@ -325,7 +317,7 @@ static int pcf_xfer(struct i2c_adapter *i2c_adap,
 		pmsg = &msgs[i];
 
 		DEB2(printk(KERN_DEBUG "i2c-algo-pcf.o: Doing %s %d bytes to 0x%02x - %d of %d messages\n",
-		     pmsg->flags & I2C_M_RD ? "read" : "write",
+		     str_read_write(pmsg->flags & I2C_M_RD),
 		     pmsg->len, pmsg->addr, i + 1, num);)
 
 		ret = pcf_doAddress(adap, pmsg);
@@ -397,8 +389,8 @@ static u32 pcf_func(struct i2c_adapter *adap)
 
 /* exported algorithm data: */
 static const struct i2c_algorithm pcf_algo = {
-	.master_xfer	= pcf_xfer,
-	.functionality	= pcf_func,
+	.xfer = pcf_xfer,
+	.functionality = pcf_func,
 };
 
 /*

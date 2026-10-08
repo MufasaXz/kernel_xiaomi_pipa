@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Shared Memory Communications over RDMA (SMC-R) and RoCE
  *
@@ -20,18 +21,15 @@
 
 #include "smc.h"
 #include "smc_core.h"
+#include "smc_ism.h"
 
-static void smc_gid_be16_convert(__u8 *buf, u8 *gid_raw)
+struct smc_diag_dump_ctx {
+	int pos[2];
+};
+
+static struct smc_diag_dump_ctx *smc_dump_context(struct netlink_callback *cb)
 {
-	sprintf(buf, "%04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x",
-		be16_to_cpu(((__be16 *)gid_raw)[0]),
-		be16_to_cpu(((__be16 *)gid_raw)[1]),
-		be16_to_cpu(((__be16 *)gid_raw)[2]),
-		be16_to_cpu(((__be16 *)gid_raw)[3]),
-		be16_to_cpu(((__be16 *)gid_raw)[4]),
-		be16_to_cpu(((__be16 *)gid_raw)[5]),
-		be16_to_cpu(((__be16 *)gid_raw)[6]),
-		be16_to_cpu(((__be16 *)gid_raw)[7]));
+	return (struct smc_diag_dump_ctx *)cb->ctx;
 }
 
 static void smc_diag_msg_common_fill(struct smc_diag_msg *r, struct sock *sk)
@@ -66,7 +64,7 @@ static int smc_diag_msg_attrs_fill(struct sock *sk, struct sk_buff *skb,
 	if (nla_put_u8(skb, SMC_DIAG_SHUTDOWN, sk->sk_shutdown))
 		return 1;
 
-	r->diag_uid = from_kuid_munged(user_ns, sock_i_uid(sk));
+	r->diag_uid = from_kuid_munged(user_ns, sk_uid(sk));
 	r->diag_inode = sock_i_ino(sk);
 	return 0;
 }
@@ -92,7 +90,7 @@ static int __smc_diag_dump(struct sock *sk, struct sk_buff *skb,
 	r->diag_state = sk->sk_state;
 	if (smc->use_fallback)
 		r->diag_mode = SMC_DIAG_MODE_FALLBACK_TCP;
-	else if (smc->conn.lgr && smc->conn.lgr->is_smcd)
+	else if (smc_conn_lgr_valid(&smc->conn) && smc->conn.lgr->is_smcd)
 		r->diag_mode = SMC_DIAG_MODE_SMCD;
 	else
 		r->diag_mode = SMC_DIAG_MODE_SMCR;
@@ -145,37 +143,41 @@ static int __smc_diag_dump(struct sock *sk, struct sk_buff *skb,
 			goto errout;
 	}
 
-	if (smc->conn.lgr && !smc->conn.lgr->is_smcd &&
+	if (smc_conn_lgr_valid(&smc->conn) && !smc->conn.lgr->is_smcd &&
 	    (req->diag_ext & (1 << (SMC_DIAG_LGRINFO - 1))) &&
 	    !list_empty(&smc->conn.lgr->list)) {
+		struct smc_link *link = smc->conn.lnk;
+
 		struct smc_diag_lgrinfo linfo = {
 			.role = smc->conn.lgr->role,
-			.lnk[0].ibport = smc->conn.lgr->lnk[0].ibport,
-			.lnk[0].link_id = smc->conn.lgr->lnk[0].link_id,
+			.lnk[0].ibport = link->ibport,
+			.lnk[0].link_id = link->link_id,
 		};
 
-		memcpy(linfo.lnk[0].ibname,
-		       smc->conn.lgr->lnk[0].smcibdev->ibdev->name,
-		       sizeof(smc->conn.lgr->lnk[0].smcibdev->ibdev->name));
-		smc_gid_be16_convert(linfo.lnk[0].gid,
-				     smc->conn.lgr->lnk[0].gid);
-		smc_gid_be16_convert(linfo.lnk[0].peer_gid,
-				     smc->conn.lgr->lnk[0].peer_gid);
+		memcpy(linfo.lnk[0].ibname, link->smcibdev->ibdev->name,
+		       sizeof(link->smcibdev->ibdev->name));
+		smc_gid_be16_convert(linfo.lnk[0].gid, link->gid);
+		smc_gid_be16_convert(linfo.lnk[0].peer_gid, link->peer_gid);
 
 		if (nla_put(skb, SMC_DIAG_LGRINFO, sizeof(linfo), &linfo) < 0)
 			goto errout;
 	}
-	if (smc->conn.lgr && smc->conn.lgr->is_smcd &&
+	if (smc_conn_lgr_valid(&smc->conn) && smc->conn.lgr->is_smcd &&
 	    (req->diag_ext & (1 << (SMC_DIAG_DMBINFO - 1))) &&
 	    !list_empty(&smc->conn.lgr->list) && smc->conn.rmb_desc) {
 		struct smc_connection *conn = &smc->conn;
 		struct smcd_diag_dmbinfo dinfo;
+		struct smcd_dev *smcd = conn->lgr->smcd;
+		struct smcd_gid smcd_gid;
 
 		memset(&dinfo, 0, sizeof(dinfo));
 
 		dinfo.linkid = *((u32 *)conn->lgr->id);
-		dinfo.peer_gid = conn->lgr->peer_gid;
-		dinfo.my_gid = conn->lgr->smcd->local_gid;
+		dinfo.peer_gid = conn->lgr->peer_gid.gid;
+		dinfo.peer_gid_ext = conn->lgr->peer_gid.gid_ext;
+		copy_to_smcdgid(&smcd_gid, &smcd->dibs->gid);
+		dinfo.my_gid = smcd_gid.gid;
+		dinfo.my_gid_ext = smcd_gid.gid_ext;
 		dinfo.token = conn->rmb_desc->token;
 		dinfo.peer_token = conn->peer_token;
 
@@ -192,13 +194,15 @@ errout:
 }
 
 static int smc_diag_dump_proto(struct proto *prot, struct sk_buff *skb,
-			       struct netlink_callback *cb)
+			       struct netlink_callback *cb, int p_type)
 {
+	struct smc_diag_dump_ctx *cb_ctx = smc_dump_context(cb);
 	struct net *net = sock_net(skb->sk);
+	int snum = cb_ctx->pos[p_type];
 	struct nlattr *bc = NULL;
 	struct hlist_head *head;
+	int rc = 0, num = 0;
 	struct sock *sk;
-	int rc = 0;
 
 	read_lock(&prot->h.smc_hash->lock);
 	head = &prot->h.smc_hash->ht;
@@ -208,13 +212,18 @@ static int smc_diag_dump_proto(struct proto *prot, struct sk_buff *skb,
 	sk_for_each(sk, head) {
 		if (!net_eq(sock_net(sk), net))
 			continue;
+		if (num < snum)
+			goto next;
 		rc = __smc_diag_dump(sk, skb, cb, nlmsg_data(cb->nlh), bc);
-		if (rc)
-			break;
+		if (rc < 0)
+			goto out;
+next:
+		num++;
 	}
 
 out:
 	read_unlock(&prot->h.smc_hash->lock);
+	cb_ctx->pos[p_type] = num;
 	return rc;
 }
 
@@ -222,10 +231,10 @@ static int smc_diag_dump(struct sk_buff *skb, struct netlink_callback *cb)
 {
 	int rc = 0;
 
-	rc = smc_diag_dump_proto(&smc_proto, skb, cb);
+	rc = smc_diag_dump_proto(&smc_proto, skb, cb, SMCPROTO_SMC);
 	if (!rc)
-		rc = smc_diag_dump_proto(&smc_proto6, skb, cb);
-	return rc;
+		smc_diag_dump_proto(&smc_proto6, skb, cb, SMCPROTO_SMC6);
+	return skb->len;
 }
 
 static int smc_diag_handler_dump(struct sk_buff *skb, struct nlmsghdr *h)
@@ -246,6 +255,7 @@ static int smc_diag_handler_dump(struct sk_buff *skb, struct nlmsghdr *h)
 }
 
 static const struct sock_diag_handler smc_diag_handler = {
+	.owner = THIS_MODULE,
 	.family = AF_SMC,
 	.dump = smc_diag_handler_dump,
 };
@@ -263,4 +273,6 @@ static void __exit smc_diag_exit(void)
 module_init(smc_diag_init);
 module_exit(smc_diag_exit);
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("SMC socket monitoring via SOCK_DIAG");
 MODULE_ALIAS_NET_PF_PROTO_TYPE(PF_NETLINK, NETLINK_SOCK_DIAG, 43 /* AF_SMC */);
+MODULE_ALIAS_GENL_FAMILY(SMCR_GENL_FAMILY_NAME);

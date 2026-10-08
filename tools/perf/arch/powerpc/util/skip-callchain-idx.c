@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Use DWARF Debug information to skip unnecessary callchain entries.
  *
  * Copyright (C) 2014 Sukadev Bhattiprolu, IBM Corporation.
  * Copyright (C) 2014 Ulrich Weigand, IBM Corporation.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 #include <inttypes.h>
 #include <dwarf.h>
@@ -16,6 +12,10 @@
 #include "util/thread.h"
 #include "util/callchain.h"
 #include "util/debug.h"
+#include "util/dso.h"
+#include "util/event.h" // struct ip_callchain
+#include "util/map.h"
+#include "util/symbol.h"
 
 /*
  * When saving the callchain on Power, the kernel conservatively saves
@@ -45,7 +45,7 @@ static const Dwfl_Callbacks offline_callbacks = {
  */
 static int check_return_reg(int ra_regno, Dwarf_Frame *frame)
 {
-	Dwarf_Op ops_mem[2];
+	Dwarf_Op ops_mem[3];
 	Dwarf_Op dummy;
 	Dwarf_Op *ops = &dummy;
 	size_t nops;
@@ -159,9 +159,9 @@ static int check_return_addr(struct dso *dso, u64 map_start, Dwarf_Addr pc)
 	Dwarf_Addr	start = pc;
 	Dwarf_Addr	end = pc;
 	bool		signalp;
-	const char	*exec_file = dso->long_name;
+	const char	*exec_file = dso__long_name(dso);
 
-	dwfl = dso->dwfl;
+	dwfl = RC_CHK_ACCESS(dso)->dwfl;
 
 	if (!dwfl) {
 		dwfl = dwfl_begin(&offline_callbacks);
@@ -183,7 +183,7 @@ static int check_return_addr(struct dso *dso, u64 map_start, Dwarf_Addr pc)
 			dwfl_end(dwfl);
 			goto out;
 		}
-		dso->dwfl = dwfl;
+		RC_CHK_ACCESS(dso)->dwfl = dwfl;
 	}
 
 	mod = dwfl_addrmodule(dwfl, pc);
@@ -250,22 +250,24 @@ int arch_skip_callchain_idx(struct thread *thread, struct ip_callchain *chain)
 	if (!chain || chain->nr < 3)
 		return skip_slot;
 
+	addr_location__init(&al);
 	ip = chain->ips[1];
 
 	thread__find_symbol(thread, PERF_RECORD_MISC_USER, ip, &al);
 
 	if (al.map)
-		dso = al.map->dso;
+		dso = map__dso(al.map);
 
 	if (!dso) {
 		pr_debug("%" PRIx64 " dso is NULL\n", ip);
+		addr_location__exit(&al);
 		return skip_slot;
 	}
 
-	rc = check_return_addr(dso, al.map->start, ip);
+	rc = check_return_addr(dso, map__start(al.map), ip);
 
 	pr_debug("[DSO %s, sym %s, ip 0x%" PRIx64 "] rc %d\n",
-				dso->long_name, al.sym->name, ip, rc);
+		dso__long_name(dso), al.sym->name, ip, rc);
 
 	if (rc == 0) {
 		/*
@@ -279,5 +281,7 @@ int arch_skip_callchain_idx(struct thread *thread, struct ip_callchain *chain)
 		 */
 		skip_slot = 3;
 	}
+
+	addr_location__exit(&al);
 	return skip_slot;
 }

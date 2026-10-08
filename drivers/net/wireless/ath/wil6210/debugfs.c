@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: ISC
 /*
  * Copyright (c) 2012-2017 Qualcomm Atheros, Inc.
- * Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/module.h>
@@ -99,22 +99,6 @@ static void wil_print_ring(struct seq_file *s, struct wil6210_priv *wil,
 
 		v = (ring_id % 2 ? (v >> 16) : (v & 0xffff));
 		seq_printf(s, "  hwhead = %u\n", v);
-		if (!ring->is_rx) {
-			struct wil_ring_tx_data *txdata =
-				&wil->ring_tx_data[ring_id];
-
-			seq_printf(s, "  available = %d\n",
-				   wil_ring_avail_tx(ring) -
-				   txdata->tx_reserved_count);
-			seq_printf(s, "  used = %d\n",
-				   wil_ring_used_tx(ring));
-			seq_printf(s, "\n  tx_res_count = %d\n",
-				   txdata->tx_reserved_count);
-			seq_printf(s, "  tx_res_count_used = %d\n",
-				   txdata->tx_reserved_count_used);
-			seq_printf(s, "  tx_res_count_unavail = %d\n",
-				   txdata->tx_reserved_count_not_avail);
-		}
 	}
 	seq_printf(s, "  hwtail = [0x%08x] -> ", ring->hwtail);
 	x = wmi_addr(wil, ring->hwtail);
@@ -145,7 +129,7 @@ static void wil_print_ring(struct seq_file *s, struct wil6210_priv *wil,
 	seq_puts(s, "}\n");
 }
 
-static int wil_ring_debugfs_show(struct seq_file *s, void *data)
+static int ring_show(struct seq_file *s, void *data)
 {
 	uint i;
 	struct wil6210_priv *wil = s->private;
@@ -183,7 +167,7 @@ static int wil_ring_debugfs_show(struct seq_file *s, void *data)
 
 			snprintf(name, sizeof(name), "tx_%2d", i);
 
-			if (cid < max_assoc_sta)
+			if (cid < wil->max_assoc_sta)
 				seq_printf(s,
 					   "\n%pM CID %d TID %d 1x%s BACK([%u] %u TU A%s) [%3d|%3d] idle %s\n",
 					   wil->sta[cid].addr, cid, tid,
@@ -204,18 +188,7 @@ static int wil_ring_debugfs_show(struct seq_file *s, void *data)
 
 	return 0;
 }
-
-static int wil_ring_seq_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, wil_ring_debugfs_show, inode->i_private);
-}
-
-static const struct file_operations fops_ring = {
-	.open		= wil_ring_seq_open,
-	.release	= single_release,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-};
+DEFINE_SHOW_ATTRIBUTE(ring);
 
 static void wil_print_sring(struct seq_file *s, struct wil6210_priv *wil,
 			    struct wil_status_ring *sring)
@@ -275,7 +248,7 @@ static void wil_print_sring(struct seq_file *s, struct wil6210_priv *wil,
 	seq_puts(s, "}\n");
 }
 
-static int wil_srings_debugfs_show(struct seq_file *s, void *data)
+static int srings_show(struct seq_file *s, void *data)
 {
 	struct wil6210_priv *wil = s->private;
 	int i = 0;
@@ -286,18 +259,7 @@ static int wil_srings_debugfs_show(struct seq_file *s, void *data)
 
 	return 0;
 }
-
-static int wil_srings_seq_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, wil_srings_debugfs_show, inode->i_private);
-}
-
-static const struct file_operations fops_srings = {
-	.open		= wil_srings_seq_open,
-	.release	= single_release,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-};
+DEFINE_SHOW_ATTRIBUTE(srings);
 
 static void wil_seq_hexdump(struct seq_file *s, void *p, int len,
 			    const char *prefix)
@@ -389,7 +351,7 @@ static void wil_print_mbox_ring(struct seq_file *s, const char *prefix,
 	wil_halp_unvote(wil);
 }
 
-static int wil_mbox_debugfs_show(struct seq_file *s, void *data)
+static int mbox_show(struct seq_file *s, void *data)
 {
 	struct wil6210_priv *wil = s->private;
 	int ret;
@@ -407,18 +369,7 @@ static int wil_mbox_debugfs_show(struct seq_file *s, void *data)
 
 	return 0;
 }
-
-static int wil_mbox_seq_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, wil_mbox_debugfs_show, inode->i_private);
-}
-
-static const struct file_operations fops_mbox = {
-	.open		= wil_mbox_seq_open,
-	.release	= single_release,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-};
+DEFINE_SHOW_ATTRIBUTE(mbox);
 
 static int wil_debugfs_iomem_x32_set(void *data, u64 val)
 {
@@ -451,34 +402,28 @@ static int wil_debugfs_iomem_x32_get(void *data, u64 *val)
 	if (ret < 0)
 		return ret;
 
-	*val = readl_relaxed((void __iomem *)d->offset);
+	*val = readl((void __iomem *)d->offset);
 
 	wil_pm_runtime_put(wil);
 
 	return 0;
 }
 
-DEFINE_SIMPLE_ATTRIBUTE(fops_iomem_x32, wil_debugfs_iomem_x32_get,
-			wil_debugfs_iomem_x32_set, "0x%08llx\n");
+DEFINE_DEBUGFS_ATTRIBUTE(fops_iomem_x32, wil_debugfs_iomem_x32_get,
+			 wil_debugfs_iomem_x32_set, "0x%08llx\n");
 
-static struct dentry *wil_debugfs_create_iomem_x32(const char *name,
-						   umode_t mode,
-						   struct dentry *parent,
-						   void *value,
-						   struct wil6210_priv *wil)
+static void wil_debugfs_create_iomem_x32(const char *name, umode_t mode,
+					 struct dentry *parent, void *value,
+					 struct wil6210_priv *wil)
 {
-	struct dentry *file;
 	struct wil_debugfs_iomem_data *data = &wil->dbg_data.data_arr[
 					      wil->dbg_data.iomem_data_count];
 
 	data->wil = wil;
 	data->offset = value;
 
-	file = debugfs_create_file(name, mode, parent, data, &fops_iomem_x32);
-	if (!IS_ERR_OR_NULL(file))
-		wil->dbg_data.iomem_data_count++;
-
-	return file;
+	debugfs_create_file_unsafe(name, mode, parent, data, &fops_iomem_x32);
+	wil->dbg_data.iomem_data_count++;
 }
 
 static int wil_debugfs_ulong_set(void *data, u64 val)
@@ -493,22 +438,15 @@ static int wil_debugfs_ulong_get(void *data, u64 *val)
 	return 0;
 }
 
-DEFINE_SIMPLE_ATTRIBUTE(wil_fops_ulong, wil_debugfs_ulong_get,
-			wil_debugfs_ulong_set, "0x%llx\n");
-
-static struct dentry *wil_debugfs_create_ulong(const char *name, umode_t mode,
-					       struct dentry *parent,
-					       ulong *value)
-{
-	return debugfs_create_file(name, mode, parent, value, &wil_fops_ulong);
-}
+DEFINE_DEBUGFS_ATTRIBUTE(wil_fops_ulong, wil_debugfs_ulong_get,
+			 wil_debugfs_ulong_set, "0x%llx\n");
 
 /**
  * wil6210_debugfs_init_offset - create set of debugfs files
- * @wil - driver's context, used for printing
- * @dbg - directory on the debugfs, where files will be created
- * @base - base address used in address calculation
- * @tbl - table with file descriptions. Should be terminated with empty element.
+ * @wil: driver's context, used for printing
+ * @dbg: directory on the debugfs, where files will be created
+ * @base: base address used in address calculation
+ * @tbl: table with file descriptions. Should be terminated with empty element.
  *
  * Creates files accordingly to the @tbl.
  */
@@ -519,37 +457,30 @@ static void wil6210_debugfs_init_offset(struct wil6210_priv *wil,
 	int i;
 
 	for (i = 0; tbl[i].name; i++) {
-		struct dentry *f;
-
 		switch (tbl[i].type) {
 		case doff_u32:
-			f = debugfs_create_u32(tbl[i].name, tbl[i].mode, dbg,
-					       base + tbl[i].off);
+			debugfs_create_u32(tbl[i].name, tbl[i].mode, dbg,
+					   base + tbl[i].off);
 			break;
 		case doff_x32:
-			f = debugfs_create_x32(tbl[i].name, tbl[i].mode, dbg,
-					       base + tbl[i].off);
+			debugfs_create_x32(tbl[i].name, tbl[i].mode, dbg,
+					   base + tbl[i].off);
 			break;
 		case doff_ulong:
-			f = wil_debugfs_create_ulong(tbl[i].name, tbl[i].mode,
-						     dbg, base + tbl[i].off);
+			debugfs_create_file_unsafe(tbl[i].name, tbl[i].mode,
+						   dbg, base + tbl[i].off,
+						   &wil_fops_ulong);
 			break;
 		case doff_io32:
-			f = wil_debugfs_create_iomem_x32(tbl[i].name,
-							 tbl[i].mode, dbg,
-							 base + tbl[i].off,
-							 wil);
+			wil_debugfs_create_iomem_x32(tbl[i].name, tbl[i].mode,
+						     dbg, base + tbl[i].off,
+						     wil);
 			break;
 		case doff_u8:
-			f = debugfs_create_u8(tbl[i].name, tbl[i].mode, dbg,
-					      base + tbl[i].off);
+			debugfs_create_u8(tbl[i].name, tbl[i].mode, dbg,
+					  base + tbl[i].off);
 			break;
-		default:
-			f = ERR_PTR(-EINVAL);
 		}
-		if (IS_ERR_OR_NULL(f))
-			wil_err(wil, "Create file \"%s\": err %ld\n",
-				tbl[i].name, PTR_ERR(f));
 	}
 }
 
@@ -564,19 +495,14 @@ static const struct dbg_off isr_off[] = {
 	{},
 };
 
-static int wil6210_debugfs_create_ISR(struct wil6210_priv *wil,
-				      const char *name,
-				      struct dentry *parent, u32 off)
+static void wil6210_debugfs_create_ISR(struct wil6210_priv *wil,
+				       const char *name, struct dentry *parent,
+				       u32 off)
 {
 	struct dentry *d = debugfs_create_dir(name, parent);
 
-	if (IS_ERR_OR_NULL(d))
-		return -ENODEV;
-
 	wil6210_debugfs_init_offset(wil, d, (void * __force)wil->csr + off,
 				    isr_off);
-
-	return 0;
 }
 
 static const struct dbg_off pseudo_isr_off[] = {
@@ -586,18 +512,13 @@ static const struct dbg_off pseudo_isr_off[] = {
 	{},
 };
 
-static int wil6210_debugfs_create_pseudo_ISR(struct wil6210_priv *wil,
-					     struct dentry *parent)
+static void wil6210_debugfs_create_pseudo_ISR(struct wil6210_priv *wil,
+					      struct dentry *parent)
 {
 	struct dentry *d = debugfs_create_dir("PSEUDO_ISR", parent);
 
-	if (IS_ERR_OR_NULL(d))
-		return -ENODEV;
-
 	wil6210_debugfs_init_offset(wil, d, (void * __force)wil->csr,
 				    pseudo_isr_off);
-
-	return 0;
 }
 
 static const struct dbg_off lgc_itr_cnt_off[] = {
@@ -645,13 +566,9 @@ static int wil6210_debugfs_create_ITR_CNT(struct wil6210_priv *wil,
 	struct dentry *d, *dtx, *drx;
 
 	d = debugfs_create_dir("ITR_CNT", parent);
-	if (IS_ERR_OR_NULL(d))
-		return -ENODEV;
 
 	dtx = debugfs_create_dir("TX", d);
 	drx = debugfs_create_dir("RX", d);
-	if (IS_ERR_OR_NULL(dtx) || IS_ERR_OR_NULL(drx))
-		return -ENODEV;
 
 	wil6210_debugfs_init_offset(wil, d, (void * __force)wil->csr,
 				    lgc_itr_cnt_off);
@@ -664,7 +581,7 @@ static int wil6210_debugfs_create_ITR_CNT(struct wil6210_priv *wil,
 	return 0;
 }
 
-static int wil_memread_debugfs_show(struct seq_file *s, void *data)
+static int memread_show(struct seq_file *s, void *data)
 {
 	struct wil6210_priv *wil = s->private;
 	void __iomem *a;
@@ -688,23 +605,11 @@ static int wil_memread_debugfs_show(struct seq_file *s, void *data)
 		seq_printf(s, "[0x%08x] = INVALID\n", mem_addr);
 
 	wil_mem_access_unlock(wil);
-
 	wil_pm_runtime_put(wil);
 
 	return 0;
 }
-
-static int wil_memread_seq_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, wil_memread_debugfs_show, inode->i_private);
-}
-
-static const struct file_operations fops_memread = {
-	.open		= wil_memread_seq_open,
-	.release	= single_release,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-};
+DEFINE_SHOW_ATTRIBUTE(memread);
 
 static ssize_t wil_read_file_ioblob(struct file *file, char __user *user_buf,
 				    size_t count, loff_t *ppos)
@@ -864,57 +769,6 @@ static const struct file_operations fops_rbufcap = {
 	.open  = simple_open,
 };
 
-static int wil_tx_latency_threshold_low_show(struct seq_file *s, void *data)
-{
-	struct wil6210_priv *wil = s->private;
-
-	seq_printf(s, "%d\n", wil->tx_latency_threshold_low);
-	return 0;
-}
-
-static int wil_tx_latency_threshold_low_seq_open(struct inode *inode,
-						 struct file *file)
-{
-	return single_open(file, wil_tx_latency_threshold_low_show,
-			   inode->i_private);
-}
-
-static ssize_t wil_tx_latency_threshold_low_write(struct file *file,
-						  const char __user *buf,
-						  size_t len, loff_t *ppos)
-{
-	struct seq_file *s = file->private_data;
-	struct wil6210_priv *wil = s->private;
-	int rc;
-	u32 val;
-
-	rc = kstrtouint_from_user(buf, len, 0, &val);
-	if (rc) {
-		wil_err(wil, "Invalid argument\n");
-		return rc;
-	}
-
-	if (!wil->tx_latency_threshold_base) {
-		/* tx latency debug - failure can be safely ignored */
-		rc = wmi_ut_update_txlatency_base(wil);
-		wil_dbg_misc(wil, "ut_update_txlatency base returned %d\n", rc);
-	}
-
-	wil->tx_latency_threshold_low = val;
-
-	wil_info(wil, "Setting tx_latency_threshold_low to %d\n",
-		 wil->tx_latency_threshold_low);
-	return len;
-}
-
-static const struct file_operations fops_tx_latency_threshold_low = {
-	.open		= wil_tx_latency_threshold_low_seq_open,
-	.release	= single_release,
-	.read		= seq_read,
-	.write		= wil_tx_latency_threshold_low_write,
-	.llseek		= seq_lseek,
-};
-
 /* block ack control, write:
  * - "add <ringid> <agg_size> <timeout>" to trigger ADDBA
  * - "del_tx <ringid> <reason>" to trigger DELBA for Tx side
@@ -977,7 +831,7 @@ static ssize_t wil_write_back(struct file *file, const char __user *buf,
 				"BACK: del_rx require at least 2 params\n");
 			return -EINVAL;
 		}
-		if (p1 < 0 || p1 >= max_assoc_sta) {
+		if (p1 < 0 || p1 >= wil->max_assoc_sta) {
 			wil_err(wil, "BACK: invalid CID %d\n", p1);
 			return -EINVAL;
 		}
@@ -1194,8 +1048,7 @@ static void wil_seq_print_skb(struct seq_file *s, struct sk_buff *skb)
 	if (nr_frags) {
 		seq_printf(s, "    nr_frags = %d\n", nr_frags);
 		for (i = 0; i < nr_frags; i++) {
-			const struct skb_frag_struct *frag =
-					&skb_shinfo(skb)->frags[i];
+			const skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
 
 			len = skb_frag_size(frag);
 			p = skb_frag_address_safe(frag);
@@ -1206,7 +1059,7 @@ static void wil_seq_print_skb(struct seq_file *s, struct sk_buff *skb)
 }
 
 /*---------Tx/Rx descriptor------------*/
-static int wil_txdesc_debugfs_show(struct seq_file *s, void *data)
+static int txdesc_show(struct seq_file *s, void *data)
 {
 	struct wil6210_priv *wil = s->private;
 	struct wil_ring *ring;
@@ -1298,21 +1151,10 @@ static int wil_txdesc_debugfs_show(struct seq_file *s, void *data)
 
 	return 0;
 }
-
-static int wil_txdesc_seq_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, wil_txdesc_debugfs_show, inode->i_private);
-}
-
-static const struct file_operations fops_txdesc = {
-	.open		= wil_txdesc_seq_open,
-	.release	= single_release,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-};
+DEFINE_SHOW_ATTRIBUTE(txdesc);
 
 /*---------Tx/Rx status message------------*/
-static int wil_status_msg_debugfs_show(struct seq_file *s, void *data)
+static int status_msg_show(struct seq_file *s, void *data)
 {
 	struct wil6210_priv *wil = s->private;
 	int sring_idx = dbg_sring_index;
@@ -1355,19 +1197,7 @@ static int wil_status_msg_debugfs_show(struct seq_file *s, void *data)
 
 	return 0;
 }
-
-static int wil_status_msg_seq_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, wil_status_msg_debugfs_show,
-			   inode->i_private);
-}
-
-static const struct file_operations fops_status_msg = {
-	.open		= wil_status_msg_seq_open,
-	.release	= single_release,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-};
+DEFINE_SHOW_ATTRIBUTE(status_msg);
 
 static int wil_print_rx_buff(struct seq_file *s, struct list_head *lh)
 {
@@ -1385,7 +1215,7 @@ static int wil_print_rx_buff(struct seq_file *s, struct list_head *lh)
 	return i;
 }
 
-static int wil_rx_buff_mgmt_debugfs_show(struct seq_file *s, void *data)
+static int rx_buff_mgmt_show(struct seq_file *s, void *data)
 {
 	struct wil6210_priv *wil = s->private;
 	struct wil_rx_buff_mgmt *rbm = &wil->rx_buff_mgmt;
@@ -1410,19 +1240,7 @@ static int wil_rx_buff_mgmt_debugfs_show(struct seq_file *s, void *data)
 
 	return 0;
 }
-
-static int wil_rx_buff_mgmt_seq_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, wil_rx_buff_mgmt_debugfs_show,
-			   inode->i_private);
-}
-
-static const struct file_operations fops_rx_buff_mgmt = {
-	.open		= wil_rx_buff_mgmt_seq_open,
-	.release	= single_release,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-};
+DEFINE_SHOW_ATTRIBUTE(rx_buff_mgmt);
 
 /*---------beamforming------------*/
 static char *wil_bfstatus_str(u32 status)
@@ -1452,7 +1270,7 @@ static bool is_all_zeros(void * const x_, size_t sz)
 	return true;
 }
 
-static int wil_bf_debugfs_show(struct seq_file *s, void *data)
+static int bf_show(struct seq_file *s, void *data)
 {
 	int rc;
 	int i;
@@ -1468,8 +1286,9 @@ static int wil_bf_debugfs_show(struct seq_file *s, void *data)
 
 	memset(&reply, 0, sizeof(reply));
 
-	for (i = 0; i < max_assoc_sta; i++) {
+	for (i = 0; i < wil->max_assoc_sta; i++) {
 		u32 status;
+		u8 bf_mcs;
 
 		cmd.cid = i;
 		rc = wmi_call(wil, WMI_NOTIFY_REQ_CMDID, vif->mid,
@@ -1481,9 +1300,10 @@ static int wil_bf_debugfs_show(struct seq_file *s, void *data)
 			continue;
 
 		status = le32_to_cpu(reply.evt.status);
+		bf_mcs = le16_to_cpu(reply.evt.bf_mcs);
 		seq_printf(s, "CID %d {\n"
 			   "  TSF = 0x%016llx\n"
-			   "  TxMCS = %2d TxTpt = %4d\n"
+			   "  TxMCS = %s TxTpt = %4d\n"
 			   "  SQI = %4d\n"
 			   "  RSSI = %4d\n"
 			   "  Status = 0x%08x %s\n"
@@ -1492,7 +1312,7 @@ static int wil_bf_debugfs_show(struct seq_file *s, void *data)
 			   "}\n",
 			   i,
 			   le64_to_cpu(reply.evt.tsf),
-			   le16_to_cpu(reply.evt.bf_mcs),
+			   WIL_EXTENDED_MCS_CHECK(bf_mcs),
 			   le32_to_cpu(reply.evt.tx_tpt),
 			   reply.evt.sqi,
 			   reply.evt.rssi,
@@ -1506,18 +1326,7 @@ static int wil_bf_debugfs_show(struct seq_file *s, void *data)
 	}
 	return 0;
 }
-
-static int wil_bf_seq_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, wil_bf_debugfs_show, inode->i_private);
-}
-
-static const struct file_operations fops_bf = {
-	.open		= wil_bf_seq_open,
-	.release	= single_release,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-};
+DEFINE_SHOW_ATTRIBUTE(bf);
 
 /*---------temp------------*/
 static void print_temp(struct seq_file *s, const char *prefix, s32 t)
@@ -1534,7 +1343,7 @@ static void print_temp(struct seq_file *s, const char *prefix, s32 t)
 	}
 }
 
-static int wil_temp_debugfs_show(struct seq_file *s, void *data)
+static int temp_show(struct seq_file *s, void *data)
 {
 	struct wil6210_priv *wil = s->private;
 	int rc, i;
@@ -1574,45 +1383,10 @@ static int wil_temp_debugfs_show(struct seq_file *s, void *data)
 	}
 	return 0;
 }
-
-static int wil_temp_seq_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, wil_temp_debugfs_show, inode->i_private);
-}
-
-static const struct file_operations fops_temp = {
-	.open		= wil_temp_seq_open,
-	.release	= single_release,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-};
-
-/*---------freq------------*/
-static int wil_freq_debugfs_show(struct seq_file *s, void *data)
-{
-	struct wil6210_priv *wil = s->private;
-	struct wireless_dev *wdev = wil->main_ndev->ieee80211_ptr;
-	u32 freq = wdev->chandef.chan ? wdev->chandef.chan->center_freq : 0;
-
-	seq_printf(s, "Freq = %d\n", freq);
-
-	return 0;
-}
-
-static int wil_freq_seq_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, wil_freq_debugfs_show, inode->i_private);
-}
-
-static const struct file_operations fops_freq = {
-	.open		= wil_freq_seq_open,
-	.release	= single_release,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-};
+DEFINE_SHOW_ATTRIBUTE(temp);
 
 /*---------link------------*/
-static int wil_link_debugfs_show(struct seq_file *s, void *data)
+static int link_show(struct seq_file *s, void *data)
 {
 	struct wil6210_priv *wil = s->private;
 	struct station_info *sinfo;
@@ -1622,7 +1396,7 @@ static int wil_link_debugfs_show(struct seq_file *s, void *data)
 	if (!sinfo)
 		return -ENOMEM;
 
-	for (i = 0; i < max_assoc_sta; i++) {
+	for (i = 0; i < wil->max_assoc_sta; i++) {
 		struct wil_sta_info *p = &wil->sta[i];
 		char *status = "unknown";
 		struct wil6210_vif *vif;
@@ -1652,8 +1426,10 @@ static int wil_link_debugfs_show(struct seq_file *s, void *data)
 			if (rc)
 				goto out;
 
-			seq_printf(s, "  Tx_mcs = %d\n", sinfo->txrate.mcs);
-			seq_printf(s, "  Rx_mcs = %d\n", sinfo->rxrate.mcs);
+			seq_printf(s, "  Tx_mcs = %s\n",
+				   WIL_EXTENDED_MCS_CHECK(sinfo->txrate.mcs));
+			seq_printf(s, "  Rx_mcs = %s\n",
+				   WIL_EXTENDED_MCS_CHECK(sinfo->rxrate.mcs));
 			seq_printf(s, "  SQ     = %d\n", sinfo->signal);
 		} else {
 			seq_puts(s, "  INVALID MID\n");
@@ -1664,21 +1440,10 @@ out:
 	kfree(sinfo);
 	return rc;
 }
-
-static int wil_link_seq_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, wil_link_debugfs_show, inode->i_private);
-}
-
-static const struct file_operations fops_link = {
-	.open		= wil_link_seq_open,
-	.release	= single_release,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-};
+DEFINE_SHOW_ATTRIBUTE(link);
 
 /*---------info------------*/
-static int wil_info_debugfs_show(struct seq_file *s, void *data)
+static int info_show(struct seq_file *s, void *data)
 {
 	struct wil6210_priv *wil = s->private;
 	struct net_device *ndev = wil->main_ndev;
@@ -1713,18 +1478,7 @@ static int wil_info_debugfs_show(struct seq_file *s, void *data)
 #undef CHECK_QSTATE
 	return 0;
 }
-
-static int wil_info_seq_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, wil_info_debugfs_show, inode->i_private);
-}
-
-static const struct file_operations fops_info = {
-	.open		= wil_info_seq_open,
-	.release	= single_release,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-};
+DEFINE_SHOW_ATTRIBUTE(info);
 
 /*---------recovery------------*/
 /* mode = [manual|auto]
@@ -1840,13 +1594,13 @@ has_keys:
 	seq_puts(s, "\n");
 }
 
-static int wil_sta_debugfs_show(struct seq_file *s, void *data)
+static int sta_show(struct seq_file *s, void *data)
 __acquires(&p->tid_rx_lock) __releases(&p->tid_rx_lock)
 {
 	struct wil6210_priv *wil = s->private;
 	int i, tid, mcs;
 
-	for (i = 0; i < max_assoc_sta; i++) {
+	for (i = 0; i < wil->max_assoc_sta; i++) {
 		struct wil_sta_info *p = &wil->sta[i];
 		char *status = "unknown";
 		u8 aid = 0;
@@ -1922,20 +1676,9 @@ __acquires(&p->tid_rx_lock) __releases(&p->tid_rx_lock)
 
 	return 0;
 }
+DEFINE_SHOW_ATTRIBUTE(sta);
 
-static int wil_sta_seq_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, wil_sta_debugfs_show, inode->i_private);
-}
-
-static const struct file_operations fops_sta = {
-	.open		= wil_sta_seq_open,
-	.release	= single_release,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-};
-
-static int wil_mids_debugfs_show(struct seq_file *s, void *data)
+static int mids_show(struct seq_file *s, void *data)
 {
 	struct wil6210_priv *wil = s->private;
 	struct wil6210_vif *vif;
@@ -1958,18 +1701,7 @@ static int wil_mids_debugfs_show(struct seq_file *s, void *data)
 
 	return 0;
 }
-
-static int wil_mids_seq_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, wil_mids_debugfs_show, inode->i_private);
-}
-
-static const struct file_operations fops_mids = {
-	.open		= wil_mids_seq_open,
-	.release	= single_release,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-};
+DEFINE_SHOW_ATTRIBUTE(mids);
 
 static int wil_tx_latency_debugfs_show(struct seq_file *s, void *data)
 __acquires(&p->tid_rx_lock) __releases(&p->tid_rx_lock)
@@ -1977,7 +1709,7 @@ __acquires(&p->tid_rx_lock) __releases(&p->tid_rx_lock)
 	struct wil6210_priv *wil = s->private;
 	int i, bin;
 
-	for (i = 0; i < max_assoc_sta; i++) {
+	for (i = 0; i < wil->max_assoc_sta; i++) {
 		struct wil_sta_info *p = &wil->sta[i];
 		char *status = "unknown";
 		u8 aid = 0;
@@ -2066,7 +1798,7 @@ static ssize_t wil_tx_latency_write(struct file *file, const char __user *buf,
 		size_t sz = sizeof(u64) * WIL_NUM_LATENCY_BINS;
 
 		wil->tx_latency_res = val;
-		for (i = 0; i < max_assoc_sta; i++) {
+		for (i = 0; i < wil->max_assoc_sta; i++) {
 			struct wil_sta_info *sta = &wil->sta[i];
 
 			kfree(sta->tx_latency_bins);
@@ -2101,7 +1833,7 @@ static void wil_link_stats_print_basic(struct wil6210_vif *vif,
 		snprintf(per, sizeof(per), "%d%%", basic->per_average);
 
 	seq_printf(s, "CID %d {\n"
-		   "\tTxMCS %d TxTpt %d\n"
+		   "\tTxMCS %s TxTpt %d\n"
 		   "\tGoodput(rx:tx) %d:%d\n"
 		   "\tRxBcastFrames %d\n"
 		   "\tRSSI %d SQI %d SNR %d PER %s\n"
@@ -2109,7 +1841,8 @@ static void wil_link_stats_print_basic(struct wil6210_vif *vif,
 		   "\tSectors(rx:tx) my %d:%d peer %d:%d\n"
 		   "}\n",
 		   basic->cid,
-		   basic->bf_mcs, le32_to_cpu(basic->tx_tpt),
+		   WIL_EXTENDED_MCS_CHECK(basic->bf_mcs),
+		   le32_to_cpu(basic->tx_tpt),
 		   le32_to_cpu(basic->rx_goodput),
 		   le32_to_cpu(basic->tx_goodput),
 		   le32_to_cpu(basic->rx_bcast_frames),
@@ -2151,7 +1884,7 @@ static void wil_link_stats_debugfs_show_vif(struct wil6210_vif *vif,
 	}
 
 	seq_printf(s, "TSF %lld\n", vif->fw_stats_tsf);
-	for (i = 0; i < max_assoc_sta; i++) {
+	for (i = 0; i < wil->max_assoc_sta; i++) {
 		if (wil->sta[i].status == wil_sta_unused)
 			continue;
 		if (wil->sta[i].mid != vif->mid)
@@ -2355,29 +2088,6 @@ static const struct file_operations fops_led_cfg = {
 	.open  = simple_open,
 };
 
-int wil_led_blink_set(struct wil6210_priv *wil, const char *buf)
-{
-	int rc;
-
-	/* "<blink_on_slow> <blink_off_slow> <blink_on_med> <blink_off_med>
-	 * <blink_on_fast> <blink_off_fast>"
-	 */
-	rc = sscanf(buf, "%u %u %u %u %u %u",
-		    &led_blink_time[WIL_LED_TIME_SLOW].on_ms,
-		    &led_blink_time[WIL_LED_TIME_SLOW].off_ms,
-		    &led_blink_time[WIL_LED_TIME_MED].on_ms,
-		    &led_blink_time[WIL_LED_TIME_MED].off_ms,
-		    &led_blink_time[WIL_LED_TIME_FAST].on_ms,
-		    &led_blink_time[WIL_LED_TIME_FAST].off_ms);
-
-	if (rc < 0)
-		return rc;
-	if (rc < 6)
-		return -EINVAL;
-
-	return 0;
-}
-
 /* led_blink_time, write:
  * "<blink_on_slow> <blink_off_slow> <blink_on_med> <blink_off_med> <blink_on_fast> <blink_off_fast>
  */
@@ -2385,7 +2095,6 @@ static ssize_t wil_write_led_blink_time(struct file *file,
 					const char __user *buf,
 					size_t len, loff_t *ppos)
 {
-	struct wil6210_priv *wil = file->private_data;
 	int rc;
 	char *kbuf = kmalloc(len + 1, GFP_KERNEL);
 
@@ -2399,11 +2108,19 @@ static ssize_t wil_write_led_blink_time(struct file *file,
 	}
 
 	kbuf[len] = '\0';
-	rc = wil_led_blink_set(wil, kbuf);
+	rc = sscanf(kbuf, "%d %d %d %d %d %d",
+		    &led_blink_time[WIL_LED_TIME_SLOW].on_ms,
+		    &led_blink_time[WIL_LED_TIME_SLOW].off_ms,
+		    &led_blink_time[WIL_LED_TIME_MED].on_ms,
+		    &led_blink_time[WIL_LED_TIME_MED].off_ms,
+		    &led_blink_time[WIL_LED_TIME_FAST].on_ms,
+		    &led_blink_time[WIL_LED_TIME_FAST].off_ms);
 	kfree(kbuf);
 
 	if (rc < 0)
 		return rc;
+	if (rc < 6)
+		return -EINVAL;
 
 	return len;
 }
@@ -2437,7 +2154,7 @@ static const struct file_operations fops_led_blink_time = {
 };
 
 /*---------FW capabilities------------*/
-static int wil_fw_capabilities_debugfs_show(struct seq_file *s, void *data)
+static int fw_capabilities_show(struct seq_file *s, void *data)
 {
 	struct wil6210_priv *wil = s->private;
 
@@ -2446,22 +2163,10 @@ static int wil_fw_capabilities_debugfs_show(struct seq_file *s, void *data)
 
 	return 0;
 }
-
-static int wil_fw_capabilities_seq_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, wil_fw_capabilities_debugfs_show,
-			   inode->i_private);
-}
-
-static const struct file_operations fops_fw_capabilities = {
-	.open		= wil_fw_capabilities_seq_open,
-	.release	= single_release,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-};
+DEFINE_SHOW_ATTRIBUTE(fw_capabilities);
 
 /*---------FW version------------*/
-static int wil_fw_version_debugfs_show(struct seq_file *s, void *data)
+static int fw_version_show(struct seq_file *s, void *data)
 {
 	struct wil6210_priv *wil = s->private;
 
@@ -2472,19 +2177,7 @@ static int wil_fw_version_debugfs_show(struct seq_file *s, void *data)
 
 	return 0;
 }
-
-static int wil_fw_version_seq_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, wil_fw_version_debugfs_show,
-			   inode->i_private);
-}
-
-static const struct file_operations fops_fw_version = {
-	.open		= wil_fw_version_seq_open,
-	.release	= single_release,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-};
+DEFINE_SHOW_ATTRIBUTE(fw_version);
 
 /*---------suspend_stats---------*/
 static ssize_t wil_write_suspend_stats(struct file *file,
@@ -2629,13 +2322,13 @@ static const struct {
 	umode_t mode;
 	const struct file_operations *fops;
 } dbg_files[] = {
-	{"mbox",	0444,		&fops_mbox},
-	{"rings",	0444,		&fops_ring},
-	{"stations", 0444,		&fops_sta},
-	{"mids",	0444,		&fops_mids},
-	{"desc",	0444,		&fops_txdesc},
-	{"bf",		0444,		&fops_bf},
-	{"mem_val",	0644,		&fops_memread},
+	{"mbox",	0444,		&mbox_fops},
+	{"rings",	0444,		&ring_fops},
+	{"stations", 0444,		&sta_fops},
+	{"mids",	0444,		&mids_fops},
+	{"desc",	0444,		&txdesc_fops},
+	{"bf",		0444,		&bf_fops},
+	{"mem_val",	0644,		&memread_fops},
 	{"rxon",	0244,		&fops_rxon},
 	{"tx_mgmt",	0244,		&fops_txmgmt},
 	{"wmi_send", 0244,		&fops_wmi},
@@ -2643,25 +2336,23 @@ static const struct {
 	{"pmccfg",	0644,		&fops_pmccfg},
 	{"pmcdata",	0444,		&fops_pmcdata},
 	{"pmcring",	0444,		&fops_pmcring},
-	{"temp",	0444,		&fops_temp},
-	{"freq",	0444,		&fops_freq},
-	{"link",	0444,		&fops_link},
-	{"info",	0444,		&fops_info},
+	{"temp",	0444,		&temp_fops},
+	{"link",	0444,		&link_fops},
+	{"info",	0444,		&info_fops},
 	{"recovery", 0644,		&fops_recovery},
 	{"led_cfg",	0644,		&fops_led_cfg},
 	{"led_blink_time",	0644,	&fops_led_blink_time},
-	{"fw_capabilities",	0444,	&fops_fw_capabilities},
-	{"fw_version",	0444,		&fops_fw_version},
+	{"fw_capabilities",	0444,	&fw_capabilities_fops},
+	{"fw_version",	0444,		&fw_version_fops},
 	{"suspend_stats",	0644,	&fops_suspend_stats},
 	{"compressed_rx_status", 0644,	&fops_compressed_rx_status},
-	{"srings",	0444,		&fops_srings},
-	{"status_msg",	0444,		&fops_status_msg},
-	{"rx_buff_mgmt",	0444,	&fops_rx_buff_mgmt},
+	{"srings",	0444,		&srings_fops},
+	{"status_msg",	0444,		&status_msg_fops},
+	{"rx_buff_mgmt",	0444,	&rx_buff_mgmt_fops},
 	{"tx_latency",	0644,		&fops_tx_latency},
 	{"link_stats",	0644,		&fops_link_stats},
 	{"link_stats_global",	0644,	&fops_link_stats_global},
 	{"rbufcap",	0244,		&fops_rbufcap},
-	{"tx_latency_threshold_low", 0644, &fops_tx_latency_threshold_low},
 };
 
 static void wil6210_debugfs_init_files(struct wil6210_priv *wil,
@@ -2713,11 +2404,6 @@ static const struct dbg_off dbg_wil_off[] = {
 	WIL_FIELD(tx_status_ring_order, 0644,	doff_u32),
 	WIL_FIELD(rx_buff_id_count, 0644,	doff_u32),
 	WIL_FIELD(amsdu_en, 0644,	doff_u8),
-	WIL_FIELD(force_edmg_channel, 0644,	doff_u8),
-	WIL_FIELD(ap_ps, 0644, doff_u8),
-	WIL_FIELD(tx_reserved_entries, 0644, doff_u32),
-	WIL_FIELD(tx_latency_threshold_high,	0644,	doff_u32),
-	WIL_FIELD(tx_latency_threshold_info.threshold_detected, 0644, doff_u8),
 	{},
 };
 
@@ -2791,7 +2477,7 @@ void wil6210_debugfs_remove(struct wil6210_priv *wil)
 	wil->debug = NULL;
 
 	kfree(wil->dbg_data.data_arr);
-	for (i = 0; i < max_assoc_sta; i++)
+	for (i = 0; i < wil->max_assoc_sta; i++)
 		kfree(wil->sta[i].tx_latency_bins);
 
 	/* free pmc memory without sending command to fw, as it will

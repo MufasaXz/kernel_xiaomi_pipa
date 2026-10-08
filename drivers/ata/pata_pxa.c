@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Generic PXA PATA driver
  *
  * Copyright (C) 2010 Marek Vasut <marek.vasut@gmail.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2, or (at your option)
- *  any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; see the file COPYING.  If not, write to
- *  the Free Software Foundation, 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/kernel.h>
@@ -25,7 +12,6 @@
 #include <linux/libata.h>
 #include <linux/platform_device.h>
 #include <linux/dmaengine.h>
-#include <linux/gpio.h>
 #include <linux/slab.h>
 #include <linux/completion.h>
 
@@ -150,7 +136,7 @@ static int pxa_check_atapi_dma(struct ata_queued_cmd *qc)
 	return -EOPNOTSUPP;
 }
 
-static struct scsi_host_template pxa_ata_sht = {
+static const struct scsi_host_template pxa_ata_sht = {
 	ATA_BMDMA_SHT(DRV_NAME),
 };
 
@@ -178,10 +164,10 @@ static int pxa_ata_probe(struct platform_device *pdev)
 	struct resource *cmd_res;
 	struct resource *ctl_res;
 	struct resource *dma_res;
-	struct resource *irq_res;
 	struct pata_pxa_pdata *pdata = dev_get_platdata(&pdev->dev);
 	struct dma_slave_config	config;
 	int ret = 0;
+	int irq;
 
 	/*
 	 * Resource validation, three resources are needed:
@@ -219,9 +205,9 @@ static int pxa_ata_probe(struct platform_device *pdev)
 	/*
 	 * IRQ pin
 	 */
-	irq_res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
-	if (unlikely(irq_res == NULL))
-		return -EINVAL;
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0)
+		return irq;
 
 	/*
 	 * Allocate the host
@@ -294,10 +280,9 @@ static int pxa_ata_probe(struct platform_device *pdev)
 	/*
 	 * Request the DMA channel
 	 */
-	data->dma_chan =
-		dma_request_slave_channel(&pdev->dev, "data");
-	if (!data->dma_chan)
-		return -EBUSY;
+	data->dma_chan = dma_request_chan(&pdev->dev, "data");
+	if (IS_ERR(data->dma_chan))
+		return PTR_ERR(data->dma_chan);
 	ret = dmaengine_slave_config(data->dma_chan, &config);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "dma configuration failed: %d\n", ret);
@@ -307,7 +292,7 @@ static int pxa_ata_probe(struct platform_device *pdev)
 	/*
 	 * Activate the ATA host
 	 */
-	ret = ata_host_activate(host, irq_res->start, ata_sff_interrupt,
+	ret = ata_host_activate(host, irq, ata_sff_interrupt,
 				pdata->irq_flags, &pxa_ata_sht);
 	if (ret)
 		dma_release_channel(data->dma_chan);
@@ -315,7 +300,7 @@ static int pxa_ata_probe(struct platform_device *pdev)
 	return ret;
 }
 
-static int pxa_ata_remove(struct platform_device *pdev)
+static void pxa_ata_remove(struct platform_device *pdev)
 {
 	struct ata_host *host = platform_get_drvdata(pdev);
 	struct pata_pxa_data *data = host->ports[0]->private_data;
@@ -323,8 +308,6 @@ static int pxa_ata_remove(struct platform_device *pdev)
 	dma_release_channel(data->dma_chan);
 
 	ata_host_detach(host);
-
-	return 0;
 }
 
 static struct platform_driver pxa_ata_driver = {

@@ -1,22 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-2-Clause
 /*
- *
  *   Copyright (c) 2011, 2012, Qualcomm Atheros Communications Inc.
  *   Copyright (c) 2014, I2SE GmbH
- *
- *   Permission to use, copy, modify, and/or distribute this software
- *   for any purpose with or without fee is hereby granted, provided
- *   that the above copyright notice and this permission notice appear
- *   in all copies.
- *
- *   THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL
- *   WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED
- *   WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL
- *   THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR
- *   CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
- *   LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
- *   NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
- *   CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- *
  */
 
 /*   This module implements the Qualcomm Atheros SPI protocol for
@@ -81,8 +66,8 @@ qcaspi_read_register(struct qcaspi *qca, u16 reg, u16 *result)
 	return ret;
 }
 
-int
-qcaspi_write_register(struct qcaspi *qca, u16 reg, u16 value)
+static int
+__qcaspi_write_register(struct qcaspi *qca, u16 reg, u16 value)
 {
 	__be16 tx_data[2];
 	struct spi_transfer transfer[2];
@@ -114,6 +99,36 @@ qcaspi_write_register(struct qcaspi *qca, u16 reg, u16 value)
 
 	if (ret)
 		qcaspi_spi_error(qca);
+
+	return ret;
+}
+
+int
+qcaspi_write_register(struct qcaspi *qca, u16 reg, u16 value, int retry)
+{
+	int ret, i = 0;
+	u16 confirmed;
+
+	do {
+		ret = __qcaspi_write_register(qca, reg, value);
+		if (ret)
+			return ret;
+
+		if (!retry)
+			return 0;
+
+		ret = qcaspi_read_register(qca, reg, &confirmed);
+		if (ret)
+			return ret;
+
+		ret = confirmed != value;
+		if (!ret)
+			return 0;
+
+		i++;
+		qca->stats.write_verify_failed++;
+
+	} while (i <= retry);
 
 	return ret;
 }

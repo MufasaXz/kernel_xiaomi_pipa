@@ -1,28 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2012 Texas Instruments
  * Author: Rob Clark <robdclark@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <linux/pinctrl/pinmux.h>
-#include <linux/pinctrl/consumer.h>
 #include <linux/backlight.h>
 #include <linux/gpio/consumer.h>
+#include <linux/platform_device.h>
+
 #include <video/display_timing.h>
 #include <video/of_display_timing.h>
 #include <video/videomode.h>
-#include <drm/drm_atomic_helper.h>
+
+#include <drm/drm_atomic_state_helper.h>
+#include <drm/drm_connector.h>
+#include <drm/drm_modeset_helper_vtables.h>
+#include <drm/drm_probe_helper.h>
+#include <drm/drm_simple_kms_helper.h>
 
 #include "tilcdc_drv.h"
 #include "tilcdc_panel.h"
@@ -55,7 +49,7 @@ static void panel_encoder_dpms(struct drm_encoder *encoder, int mode)
 
 	if (backlight) {
 		backlight->props.power = mode == DRM_MODE_DPMS_ON ?
-					 FB_BLANK_UNBLANK : FB_BLANK_POWERDOWN;
+					 BACKLIGHT_POWER_ON : BACKLIGHT_POWER_OFF;
 		backlight_update_status(backlight);
 	}
 
@@ -81,10 +75,6 @@ static void panel_encoder_mode_set(struct drm_encoder *encoder,
 	/* nothing needed */
 }
 
-static const struct drm_encoder_funcs panel_encoder_funcs = {
-		.destroy        = drm_encoder_cleanup,
-};
-
 static const struct drm_encoder_helper_funcs panel_encoder_helper_funcs = {
 		.dpms           = panel_encoder_dpms,
 		.prepare        = panel_encoder_prepare,
@@ -109,8 +99,7 @@ static struct drm_encoder *panel_encoder_create(struct drm_device *dev,
 	encoder = &panel_encoder->base;
 	encoder->possible_crtcs = 1;
 
-	ret = drm_encoder_init(dev, encoder, &panel_encoder_funcs,
-			DRM_MODE_ENCODER_LVDS, NULL);
+	ret = drm_simple_encoder_init(dev, encoder, DRM_MODE_ENCODER_LVDS);
 	if (ret < 0)
 		goto fail;
 
@@ -314,10 +303,10 @@ put_node:
 
 static int panel_probe(struct platform_device *pdev)
 {
-	struct device_node *bl_node, *node = pdev->dev.of_node;
+	struct device_node *node = pdev->dev.of_node;
+	struct backlight_device *backlight;
 	struct panel_module *panel_mod;
 	struct tilcdc_module *mod;
-	struct pinctrl *pinctrl;
 	int ret;
 
 	/* bail out early if no DT data: */
@@ -330,16 +319,10 @@ static int panel_probe(struct platform_device *pdev)
 	if (!panel_mod)
 		return -ENOMEM;
 
-	bl_node = of_parse_phandle(node, "backlight", 0);
-	if (bl_node) {
-		panel_mod->backlight = of_find_backlight_by_node(bl_node);
-		of_node_put(bl_node);
-
-		if (!panel_mod->backlight)
-			return -EPROBE_DEFER;
-
-		dev_info(&pdev->dev, "found backlight\n");
-	}
+	backlight = devm_of_find_backlight(&pdev->dev);
+	if (IS_ERR(backlight))
+		return PTR_ERR(backlight);
+	panel_mod->backlight = backlight;
 
 	panel_mod->enable_gpio = devm_gpiod_get_optional(&pdev->dev, "enable",
 							 GPIOD_OUT_LOW);
@@ -356,10 +339,6 @@ static int panel_probe(struct platform_device *pdev)
 	pdev->dev.platform_data = mod;
 
 	tilcdc_module_init(mod, "panel", &panel_module_ops);
-
-	pinctrl = devm_pinctrl_get_select_default(&pdev->dev);
-	if (IS_ERR(pinctrl))
-		dev_warn(&pdev->dev, "pins are not configured\n");
 
 	panel_mod->timings = of_get_display_timings(node);
 	if (!panel_mod->timings) {
@@ -389,7 +368,7 @@ fail_backlight:
 	return ret;
 }
 
-static int panel_remove(struct platform_device *pdev)
+static void panel_remove(struct platform_device *pdev)
 {
 	struct tilcdc_module *mod = dev_get_platdata(&pdev->dev);
 	struct panel_module *panel_mod = to_panel_module(mod);
@@ -402,8 +381,6 @@ static int panel_remove(struct platform_device *pdev)
 
 	tilcdc_module_cleanup(mod);
 	kfree(panel_mod->info);
-
-	return 0;
 }
 
 static const struct of_device_id panel_of_match[] = {
@@ -411,11 +388,10 @@ static const struct of_device_id panel_of_match[] = {
 		{ },
 };
 
-struct platform_driver panel_driver = {
+static struct platform_driver panel_driver = {
 	.probe = panel_probe,
 	.remove = panel_remove,
 	.driver = {
-		.owner = THIS_MODULE,
 		.name = "tilcdc-panel",
 		.of_match_table = panel_of_match,
 	},

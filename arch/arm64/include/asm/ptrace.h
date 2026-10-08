@@ -1,29 +1,36 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Based on arch/arm/include/asm/ptrace.h
  *
  * Copyright (C) 1996-2003 Russell King
  * Copyright (C) 2012 ARM Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #ifndef __ASM_PTRACE_H
 #define __ASM_PTRACE_H
+
+#include <asm/cpufeature.h>
 
 #include <uapi/asm/ptrace.h>
 
 /* Current Exception Level values, as contained in CurrentEL */
 #define CurrentEL_EL1		(1 << 2)
 #define CurrentEL_EL2		(2 << 2)
+
+#define INIT_PSTATE_EL1 \
+	(PSR_D_BIT | PSR_A_BIT | PSR_I_BIT | PSR_F_BIT | PSR_MODE_EL1h)
+#define INIT_PSTATE_EL2 \
+	(PSR_D_BIT | PSR_A_BIT | PSR_I_BIT | PSR_F_BIT | PSR_MODE_EL2h)
+
+#include <linux/irqchip/arm-gic-v3-prio.h>
+
+#define GIC_PRIO_IRQON		GICV3_PRIO_UNMASKED
+#define GIC_PRIO_IRQOFF		GICV3_PRIO_IRQ
+
+#define GIC_PRIO_PSR_I_SET	GICV3_PRIO_PSR_I_SET
+
+/* Additional SPSR bits not exposed in the UABI */
+#define PSR_MODE_THREAD_BIT	(1 << 0)
+#define PSR_IL_BIT		(1 << 20)
 
 /* AArch32-specific ptrace requests */
 #define COMPAT_PTRACE_GETREGS		12
@@ -91,6 +98,8 @@
 #include <linux/bug.h>
 #include <linux/types.h>
 
+#include <asm/stacktrace/frame.h>
+
 /* sizeof(struct user) for AArch32 */
 #define COMPAT_USER_SZ	296
 
@@ -142,8 +151,7 @@ static inline unsigned long pstate_to_compat_psr(const unsigned long pstate)
 
 /*
  * This struct defines the way the registers are stored on the stack during an
- * exception. Note that sizeof(struct pt_regs) has to be a multiple of 16 (for
- * stack alignment). struct user_pt_regs must form a prefix of struct pt_regs.
+ * exception. struct user_pt_regs must form a prefix of struct pt_regs.
  */
 struct pt_regs {
 	union {
@@ -156,18 +164,15 @@ struct pt_regs {
 		};
 	};
 	u64 orig_x0;
-#ifdef __AARCH64EB__
-	u32 unused2;
 	s32 syscallno;
-#else
-	s32 syscallno;
-	u32 unused2;
-#endif
+	u32 pmr;
 
-	u64 orig_addr_limit;
-	u64 unused;	// maintain 16 byte alignment
-	u64 stackframe[2];
+	u64 sdei_ttbr1;
+	struct frame_record_meta stackframe;
 };
+
+/* For correct stack alignment, pt_regs has to be a multiple of 16 bytes. */
+static_assert(IS_ALIGNED(sizeof(struct pt_regs), 16));
 
 static inline bool in_syscall(struct pt_regs const *regs)
 {
@@ -200,17 +205,24 @@ static inline void forget_syscall(struct pt_regs *regs)
 #define processor_mode(regs) \
 	((regs)->pstate & PSR_MODE_MASK)
 
-#define interrupts_enabled(regs) \
-	(!((regs)->pstate & PSR_I_BIT))
+#define irqs_priority_unmasked(regs)					\
+	(system_uses_irq_prio_masking() ?				\
+		(regs)->pmr == GIC_PRIO_IRQON :				\
+		true)
 
-#define fast_interrupts_enabled(regs) \
-	(!((regs)->pstate & PSR_F_BIT))
+static __always_inline bool regs_irqs_disabled(const struct pt_regs *regs)
+{
+	return (regs->pstate & PSR_I_BIT) || !irqs_priority_unmasked(regs);
+}
 
-#define GET_USP(regs) \
-	(!compat_user_mode(regs) ? (regs)->sp : (regs)->compat_sp)
+#define interrupts_enabled(regs)	(!regs_irqs_disabled(regs))
 
-#define SET_USP(ptregs, value) \
-	(!compat_user_mode(regs) ? ((regs)->sp = value) : ((regs)->compat_sp = value))
+static inline unsigned long user_stack_pointer(struct pt_regs *regs)
+{
+	if (compat_user_mode(regs))
+		return regs->compat_sp;
+	return regs->sp;
+}
 
 extern int regs_query_register_offset(const char *name);
 extern unsigned long regs_get_kernel_stack_nth(struct pt_regs *regs,
@@ -280,20 +292,64 @@ static inline unsigned long kernel_stack_pointer(struct pt_regs *regs)
 
 static inline unsigned long regs_return_value(struct pt_regs *regs)
 {
-	return regs->regs[0];
+	unsigned long val = regs->regs[0];
+
+	/*
+	 * Audit currently uses regs_return_value() instead of
+	 * syscall_get_return_value(). Apply the same sign-extension here until
+	 * audit is updated to use syscall_get_return_value().
+	 */
+	if (compat_user_mode(regs))
+		val = sign_extend64(val, 31);
+
+	return val;
+}
+
+static inline void regs_set_return_value(struct pt_regs *regs, unsigned long rc)
+{
+	regs->regs[0] = rc;
+}
+
+/**
+ * regs_get_kernel_argument() - get Nth function argument in kernel
+ * @regs:	pt_regs of that context
+ * @n:		function argument number (start from 0)
+ *
+ * regs_get_argument() returns @n th argument of the function call.
+ *
+ * Note that this chooses the most likely register mapping. In very rare
+ * cases this may not return correct data, for example, if one of the
+ * function parameters is 16 bytes or bigger. In such cases, we cannot
+ * get access the parameter correctly and the register assignment of
+ * subsequent parameters will be shifted.
+ */
+static inline unsigned long regs_get_kernel_argument(struct pt_regs *regs,
+						     unsigned int n)
+{
+#define NR_REG_ARGUMENTS 8
+	if (n < NR_REG_ARGUMENTS)
+		return pt_regs_read_reg(regs, n);
+	return 0;
 }
 
 /* We must avoid circular header include via sched.h */
 struct task_struct;
 int valid_user_regs(struct user_pt_regs *regs, struct task_struct *task);
 
-#define GET_IP(regs)		((unsigned long)(regs)->pc)
-#define SET_IP(regs, value)	((regs)->pc = ((u64) (value)))
+static inline unsigned long instruction_pointer(struct pt_regs *regs)
+{
+	return regs->pc;
+}
+static inline void instruction_pointer_set(struct pt_regs *regs,
+		unsigned long val)
+{
+	regs->pc = val;
+}
 
-#define GET_FP(ptregs)		((unsigned long)(ptregs)->regs[29])
-#define SET_FP(ptregs, value)	((ptregs)->regs[29] = ((u64) (value)))
-
-#include <asm-generic/ptrace.h>
+static inline unsigned long frame_pointer(struct pt_regs *regs)
+{
+	return regs->regs[29];
+}
 
 #define procedure_link_pointer(regs)	((regs)->regs[30])
 
@@ -303,7 +359,6 @@ static inline void procedure_link_pointer_set(struct pt_regs *regs,
 	procedure_link_pointer(regs) = val;
 }
 
-#undef profile_pc
 extern unsigned long profile_pc(struct pt_regs *regs);
 
 #endif /* __ASSEMBLY__ */

@@ -1,19 +1,5 @@
-/*
- * Copyright 2012 Cisco Systems, Inc.  All rights reserved.
- *
- * This program is free software; you may redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright 2012 Cisco Systems, Inc.  All rights reserved.
 
 #include <linux/module.h>
 #include <linux/mempool.h>
@@ -22,6 +8,7 @@
 #include <linux/kallsyms.h>
 #include <linux/time.h>
 #include <linux/vmalloc.h>
+#include <scsi/scsi_transport_fc.h>
 #include "fnic_io.h"
 #include "fnic.h"
 
@@ -43,6 +30,17 @@ int fnic_fc_tracing_enabled = 1;
 int fnic_fc_trace_cleared = 1;
 static DEFINE_SPINLOCK(fnic_fc_trace_lock);
 
+static const char * const fnic_role_str[] = {
+	[FNIC_ROLE_FCP_INITIATOR] = "FCP_Initiator",
+};
+
+const char *fnic_role_to_str(unsigned int role)
+{
+	if (role >= ARRAY_SIZE(fnic_role_str) || !fnic_role_str[role])
+		return "Unknown";
+
+	return fnic_role_str[role];
+}
 
 /*
  * fnic_trace_get_buf - Give buffer pointer to user to fill up trace information
@@ -138,7 +136,7 @@ int fnic_get_trace_data(fnic_dbgfs_t *fnic_dbgfs_prt)
 			 * Dump trace buffer entry to memory file
 			 * and increment read index @rd_idx
 			 */
-			len += snprintf(fnic_dbgfs_prt->buffer + len,
+			len += scnprintf(fnic_dbgfs_prt->buffer + len,
 				  (trace_max_pages * PAGE_SIZE * 3) - len,
 				  "%16llu.%09lu %-50s %8x %8x %16llx %16llx "
 				  "%16llx %16llx %16llx\n", (u64)val.tv_sec,
@@ -153,7 +151,7 @@ int fnic_get_trace_data(fnic_dbgfs_t *fnic_dbgfs_prt)
 			if (rd_idx > (fnic_max_trace_entries-1))
 				rd_idx = 0;
 			/*
-			 * Continure dumpping trace buffer entries into
+			 * Continue dumping trace buffer entries into
 			 * memory file till rd_idx reaches write index
 			 */
 			if (rd_idx == wr_idx)
@@ -180,7 +178,7 @@ int fnic_get_trace_data(fnic_dbgfs_t *fnic_dbgfs_prt)
 			 * Dump trace buffer entry to memory file
 			 * and increment read index @rd_idx
 			 */
-			len += snprintf(fnic_dbgfs_prt->buffer + len,
+			len += scnprintf(fnic_dbgfs_prt->buffer + len,
 				  (trace_max_pages * PAGE_SIZE * 3) - len,
 				  "%16llu.%09lu %-50s %8x %8x %16llx %16llx "
 				  "%16llx %16llx %16llx\n", (u64)val.tv_sec,
@@ -189,7 +187,7 @@ int fnic_get_trace_data(fnic_dbgfs_t *fnic_dbgfs_prt)
 				  tbp->data[3], tbp->data[4]);
 			rd_idx++;
 			/*
-			 * Continue dumpping trace buffer entries into
+			 * Continue dumping trace buffer entries into
 			 * memory file till rd_idx reaches write index
 			 */
 			if (rd_idx == wr_idx)
@@ -218,14 +216,15 @@ int fnic_get_stats_data(struct stats_debug_info *debug,
 	int len = 0;
 	int buf_size = debug->buf_size;
 	struct timespec64 val1, val2;
+	int i = 0;
 
 	ktime_get_real_ts64(&val1);
-	len = snprintf(debug->debug_buffer + len, buf_size - len,
+	len = scnprintf(debug->debug_buffer + len, buf_size - len,
 		"------------------------------------------\n"
 		 "\t\tTime\n"
 		"------------------------------------------\n");
 
-	len += snprintf(debug->debug_buffer + len, buf_size - len,
+	len += scnprintf(debug->debug_buffer + len, buf_size - len,
 		"Current time :          [%lld:%ld]\n"
 		"Last stats reset time:  [%lld:%09ld]\n"
 		"Last stats read time:   [%lld:%ld]\n"
@@ -243,11 +242,11 @@ int fnic_get_stats_data(struct stats_debug_info *debug,
 
 	stats->stats_timestamps.last_read_time = val1;
 
-	len += snprintf(debug->debug_buffer + len, buf_size - len,
+	len += scnprintf(debug->debug_buffer + len, buf_size - len,
 		  "------------------------------------------\n"
 		  "\t\tIO Statistics\n"
 		  "------------------------------------------\n");
-	len += snprintf(debug->debug_buffer + len, buf_size - len,
+	len += scnprintf(debug->debug_buffer + len, buf_size - len,
 		  "Number of Active IOs: %lld\nMaximum Active IOs: %lld\n"
 		  "Number of IOs: %lld\nNumber of IO Completions: %lld\n"
 		  "Number of IO Failures: %lld\nNumber of IO NOT Found: %lld\n"
@@ -280,16 +279,26 @@ int fnic_get_stats_data(struct stats_debug_info *debug,
 		  (u64)atomic64_read(&stats->io_stats.io_btw_10000_to_30000_msec),
 		  (u64)atomic64_read(&stats->io_stats.io_greater_than_30000_msec));
 
-	len += snprintf(debug->debug_buffer + len, buf_size - len,
+	len += scnprintf(debug->debug_buffer + len, buf_size - len,
+			"------------------------------------------\n"
+			"\t\tIO Queues and cumulative IOs\n"
+			"------------------------------------------\n");
+
+	for (i = 0; i < FNIC_MQ_MAX_QUEUES; i++) {
+		len += scnprintf(debug->debug_buffer + len, buf_size - len,
+				"Q:%d -> %lld\n", i, (u64)atomic64_read(&stats->io_stats.ios[i]));
+	}
+
+	len += scnprintf(debug->debug_buffer + len, buf_size - len,
 		  "\nCurrent Max IO time : %lld\n",
 		  (u64)atomic64_read(&stats->io_stats.current_max_io_time));
 
-	len += snprintf(debug->debug_buffer + len, buf_size - len,
+	len += scnprintf(debug->debug_buffer + len, buf_size - len,
 		  "\n------------------------------------------\n"
 		  "\t\tAbort Statistics\n"
 		  "------------------------------------------\n");
 
-	len += snprintf(debug->debug_buffer + len, buf_size - len,
+	len += scnprintf(debug->debug_buffer + len, buf_size - len,
 		  "Number of Aborts: %lld\n"
 		  "Number of Abort Failures: %lld\n"
 		  "Number of Abort Driver Timeouts: %lld\n"
@@ -318,12 +327,12 @@ int fnic_get_stats_data(struct stats_debug_info *debug,
 		  (u64)atomic64_read(&stats->abts_stats.abort_issued_btw_50_to_60_sec),
 		  (u64)atomic64_read(&stats->abts_stats.abort_issued_greater_than_60_sec));
 
-	len += snprintf(debug->debug_buffer + len, buf_size - len,
+	len += scnprintf(debug->debug_buffer + len, buf_size - len,
 		  "\n------------------------------------------\n"
 		  "\t\tTerminate Statistics\n"
 		  "------------------------------------------\n");
 
-	len += snprintf(debug->debug_buffer + len, buf_size - len,
+	len += scnprintf(debug->debug_buffer + len, buf_size - len,
 		  "Number of Terminates: %lld\n"
 		  "Maximum Terminates: %lld\n"
 		  "Number of Terminate Driver Timeouts: %lld\n"
@@ -337,12 +346,12 @@ int fnic_get_stats_data(struct stats_debug_info *debug,
 		  (u64)atomic64_read(&stats->term_stats.terminate_io_not_found),
 		  (u64)atomic64_read(&stats->term_stats.terminate_failures));
 
-	len += snprintf(debug->debug_buffer + len, buf_size - len,
+	len += scnprintf(debug->debug_buffer + len, buf_size - len,
 		  "\n------------------------------------------\n"
 		  "\t\tReset Statistics\n"
 		  "------------------------------------------\n");
 
-	len += snprintf(debug->debug_buffer + len, buf_size - len,
+	len += scnprintf(debug->debug_buffer + len, buf_size - len,
 		  "Number of Device Resets: %lld\n"
 		  "Number of Device Reset Failures: %lld\n"
 		  "Number of Device Reset Aborts: %lld\n"
@@ -368,12 +377,12 @@ int fnic_get_stats_data(struct stats_debug_info *debug,
 			  &stats->reset_stats.fnic_reset_completions),
 		  (u64)atomic64_read(&stats->reset_stats.fnic_reset_failures));
 
-	len += snprintf(debug->debug_buffer + len, buf_size - len,
+	len += scnprintf(debug->debug_buffer + len, buf_size - len,
 		  "\n------------------------------------------\n"
 		  "\t\tFirmware Statistics\n"
 		  "------------------------------------------\n");
 
-	len += snprintf(debug->debug_buffer + len, buf_size - len,
+	len += scnprintf(debug->debug_buffer + len, buf_size - len,
 		  "Number of Active FW Requests %lld\n"
 		  "Maximum FW Requests: %lld\n"
 		  "Number of FW out of resources: %lld\n"
@@ -383,12 +392,12 @@ int fnic_get_stats_data(struct stats_debug_info *debug,
 		  (u64)atomic64_read(&stats->fw_stats.fw_out_of_resources),
 		  (u64)atomic64_read(&stats->fw_stats.io_fw_errs));
 
-	len += snprintf(debug->debug_buffer + len, buf_size - len,
+	len += scnprintf(debug->debug_buffer + len, buf_size - len,
 		  "\n------------------------------------------\n"
 		  "\t\tVlan Discovery Statistics\n"
 		  "------------------------------------------\n");
 
-	len += snprintf(debug->debug_buffer + len, buf_size - len,
+	len += scnprintf(debug->debug_buffer + len, buf_size - len,
 		  "Number of Vlan Discovery Requests Sent %lld\n"
 		  "Vlan Response Received with no FCF VLAN ID: %lld\n"
 		  "No solicitations recvd after vlan set, expiry count: %lld\n"
@@ -398,7 +407,7 @@ int fnic_get_stats_data(struct stats_debug_info *debug,
 		  (u64)atomic64_read(&stats->vlan_stats.sol_expiry_count),
 		  (u64)atomic64_read(&stats->vlan_stats.flogi_rejects));
 
-	len += snprintf(debug->debug_buffer + len, buf_size - len,
+	len += scnprintf(debug->debug_buffer + len, buf_size - len,
 		  "\n------------------------------------------\n"
 		  "\t\tOther Important Statistics\n"
 		  "------------------------------------------\n");
@@ -406,9 +415,12 @@ int fnic_get_stats_data(struct stats_debug_info *debug,
 	jiffies_to_timespec64(stats->misc_stats.last_isr_time, &val1);
 	jiffies_to_timespec64(stats->misc_stats.last_ack_time, &val2);
 
-	len += snprintf(debug->debug_buffer + len, buf_size - len,
+	len += scnprintf(debug->debug_buffer + len, buf_size - len,
 		  "Last ISR time: %llu (%8llu.%09lu)\n"
 		  "Last ACK time: %llu (%8llu.%09lu)\n"
+		  "Max ISR jiffies: %llu\n"
+		  "Max ISR time (ms) (0 denotes < 1 ms): %llu\n"
+		  "Corr. work done: %llu\n"
 		  "Number of ISRs: %lld\n"
 		  "Maximum CQ Entries: %lld\n"
 		  "Number of ACK index out of range: %lld\n"
@@ -423,11 +435,15 @@ int fnic_get_stats_data(struct stats_debug_info *debug,
 		  "Number of Check Conditions encountered: %lld\n"
 		  "Number of QUEUE Fulls: %lld\n"
 		  "Number of rport not ready: %lld\n"
-		  "Number of receive frame errors: %lld\n",
+		 "Number of receive frame errors: %lld\n"
+		 "Port speed (in Mbps): %lld\n",
 		  (u64)stats->misc_stats.last_isr_time,
 		  (s64)val1.tv_sec, val1.tv_nsec,
 		  (u64)stats->misc_stats.last_ack_time,
 		  (s64)val2.tv_sec, val2.tv_nsec,
+		  (u64)atomic64_read(&stats->misc_stats.max_isr_jiffies),
+		  (u64)atomic64_read(&stats->misc_stats.max_isr_time_ms),
+		  (u64)atomic64_read(&stats->misc_stats.corr_work_done),
 		  (u64)atomic64_read(&stats->misc_stats.isr_count),
 		  (u64)atomic64_read(&stats->misc_stats.max_cq_entries),
 		  (u64)atomic64_read(&stats->misc_stats.ack_index_out_of_range),
@@ -443,11 +459,66 @@ int fnic_get_stats_data(struct stats_debug_info *debug,
 		  (u64)atomic64_read(&stats->misc_stats.no_icmnd_itmf_cmpls),
 		  (u64)atomic64_read(&stats->misc_stats.check_condition),
 		  (u64)atomic64_read(&stats->misc_stats.queue_fulls),
-		  (u64)atomic64_read(&stats->misc_stats.rport_not_ready),
-		  (u64)atomic64_read(&stats->misc_stats.frame_errors));
+		  (u64)atomic64_read(&stats->misc_stats.tport_not_ready),
+		  (u64)atomic64_read(&stats->misc_stats.frame_errors),
+		  (u64)atomic64_read(&stats->misc_stats.port_speed_in_mbps));
 
 	return len;
 
+}
+
+int fnic_get_debug_info(struct stats_debug_info *info, struct fnic *fnic)
+{
+	struct fnic_iport_s *iport = &fnic->iport;
+	int buf_size = info->buf_size;
+	int len = info->buffer_len;
+	struct fnic_tport_s *tport, *next;
+	unsigned long flags;
+
+	len += snprintf(info->debug_buffer + len, buf_size - len,
+					"------------------------------------------\n"
+					"\t\t Debug Info\n"
+					"------------------------------------------\n");
+	len += snprintf(info->debug_buffer + len, buf_size - len,
+					"fnic Name:%s number:%d Role:%s State:%s\n",
+					fnic->name, fnic->fnic_num,
+					fnic_role_to_str(fnic->role),
+					fnic_state_to_str(fnic->state));
+	len +=
+		snprintf(info->debug_buffer + len, buf_size - len,
+			 "iport State:%d Flags:0x%x vlan_id:%d fcid:0x%x\n",
+			 iport->state, iport->flags, iport->vlan_id, iport->fcid);
+	len +=
+		snprintf(info->debug_buffer + len, buf_size - len,
+			 "usefip:%d fip_state:%d fip_flogi_retry:%d\n",
+			 iport->usefip, iport->fip.state, iport->fip.flogi_retry);
+	len +=
+		snprintf(info->debug_buffer + len, buf_size - len,
+				 "fpma %02x:%02x:%02x:%02x:%02x:%02x",
+				 iport->fpma[5], iport->fpma[4], iport->fpma[3],
+				 iport->fpma[2], iport->fpma[1], iport->fpma[0]);
+	len +=
+		snprintf(info->debug_buffer + len, buf_size - len,
+				"fcfmac %02x:%02x:%02x:%02x:%02x:%02x\n",
+				iport->fcfmac[5], iport->fcfmac[4], iport->fcfmac[3],
+				iport->fcfmac[2], iport->fcfmac[1], iport->fcfmac[0]);
+	len +=
+		snprintf(info->debug_buffer + len, buf_size - len,
+		 "fabric state:%d flags:0x%x retry_counter:%d e_d_tov:%d r_a_tov:%d\n",
+		 iport->fabric.state, iport->fabric.flags,
+		 iport->fabric.retry_counter, iport->e_d_tov,
+		 iport->r_a_tov);
+
+	spin_lock_irqsave(&fnic->fnic_lock, flags);
+	list_for_each_entry_safe(tport, next, &iport->tport_list, links) {
+		len += snprintf(info->debug_buffer + len, buf_size - len,
+		"tport fcid:0x%x state:%d flags:0x%x inflight:%d retry_counter:%d\n",
+		tport->fcid, tport->state, tport->flags,
+		atomic_read(&tport->in_flight),
+		tport->retry_counter);
+	}
+	spin_unlock_irqrestore(&fnic->fnic_lock, flags);
+	return len;
 }
 
 /*
@@ -468,18 +539,16 @@ int fnic_trace_buf_init(void)
 	fnic_max_trace_entries = (trace_max_pages * PAGE_SIZE)/
 					  FNIC_ENTRY_SIZE_BYTES;
 
-	fnic_trace_buf_p = (unsigned long)vmalloc((trace_max_pages * PAGE_SIZE));
+	fnic_trace_buf_p = (unsigned long)vcalloc(trace_max_pages, PAGE_SIZE);
 	if (!fnic_trace_buf_p) {
 		printk(KERN_ERR PFX "Failed to allocate memory "
 				  "for fnic_trace_buf_p\n");
 		err = -ENOMEM;
 		goto err_fnic_trace_buf_init;
 	}
-	memset((void *)fnic_trace_buf_p, 0, (trace_max_pages * PAGE_SIZE));
 
 	fnic_trace_entries.page_offset =
-		vmalloc(array_size(fnic_max_trace_entries,
-				   sizeof(unsigned long)));
+		vcalloc(fnic_max_trace_entries, sizeof(unsigned long));
 	if (!fnic_trace_entries.page_offset) {
 		printk(KERN_ERR PFX "Failed to allocate memory for"
 				  " page_offset\n");
@@ -490,8 +559,6 @@ int fnic_trace_buf_init(void)
 		err = -ENOMEM;
 		goto err_fnic_trace_buf_init;
 	}
-	memset((void *)fnic_trace_entries.page_offset, 0,
-		  (fnic_max_trace_entries * sizeof(unsigned long)));
 	fnic_trace_entries.wr_idx = fnic_trace_entries.rd_idx = 0;
 	fnic_buf_head = fnic_trace_buf_p;
 
@@ -504,15 +571,10 @@ int fnic_trace_buf_init(void)
 		fnic_trace_entries.page_offset[i] = fnic_buf_head;
 		fnic_buf_head += FNIC_ENTRY_SIZE_BYTES;
 	}
-	err = fnic_trace_debugfs_init();
-	if (err < 0) {
-		pr_err("fnic: Failed to initialize debugfs for tracing\n");
-		goto err_fnic_trace_debugfs_init;
-	}
+	fnic_trace_debugfs_init();
 	pr_info("fnic: Successfully Initialized Trace Buffer\n");
 	return err;
-err_fnic_trace_debugfs_init:
-	fnic_trace_free();
+
 err_fnic_trace_buf_init:
 	return err;
 }
@@ -557,8 +619,7 @@ int fnic_fc_trace_init(void)
 	fc_trace_max_entries = (fnic_fc_trace_max_pages * PAGE_SIZE)/
 				FC_TRC_SIZE_BYTES;
 	fnic_fc_ctlr_trace_buf_p =
-		(unsigned long)vmalloc(array_size(PAGE_SIZE,
-						  fnic_fc_trace_max_pages));
+		(unsigned long)vcalloc(fnic_fc_trace_max_pages, PAGE_SIZE);
 	if (!fnic_fc_ctlr_trace_buf_p) {
 		pr_err("fnic: Failed to allocate memory for "
 		       "FC Control Trace Buf\n");
@@ -566,13 +627,9 @@ int fnic_fc_trace_init(void)
 		goto err_fnic_fc_ctlr_trace_buf_init;
 	}
 
-	memset((void *)fnic_fc_ctlr_trace_buf_p, 0,
-			fnic_fc_trace_max_pages * PAGE_SIZE);
-
 	/* Allocate memory for page offset */
 	fc_trace_entries.page_offset =
-		vmalloc(array_size(fc_trace_max_entries,
-				   sizeof(unsigned long)));
+		vcalloc(fc_trace_max_entries, sizeof(unsigned long));
 	if (!fc_trace_entries.page_offset) {
 		pr_err("fnic:Failed to allocate memory for page_offset\n");
 		if (fnic_fc_ctlr_trace_buf_p) {
@@ -583,8 +640,6 @@ int fnic_fc_trace_init(void)
 		err = -ENOMEM;
 		goto err_fnic_fc_ctlr_trace_buf_init;
 	}
-	memset((void *)fc_trace_entries.page_offset, 0,
-	       (fc_trace_max_entries * sizeof(unsigned long)));
 
 	fc_trace_entries.rd_idx = fc_trace_entries.wr_idx = 0;
 	fc_trace_buf_head = fnic_fc_ctlr_trace_buf_p;
@@ -597,16 +652,10 @@ int fnic_fc_trace_init(void)
 		fc_trace_entries.page_offset[i] = fc_trace_buf_head;
 		fc_trace_buf_head += FC_TRC_SIZE_BYTES;
 	}
-	err = fnic_fc_trace_debugfs_init();
-	if (err < 0) {
-		pr_err("fnic: Failed to initialize FC_CTLR tracing.\n");
-		goto err_fnic_fc_ctlr_trace_debugfs_init;
-	}
+	fnic_fc_trace_debugfs_init();
 	pr_info("fnic: Successfully Initialized FC_CTLR Trace Buffer\n");
 	return err;
 
-err_fnic_fc_ctlr_trace_debugfs_init:
-	fnic_fc_trace_free();
 err_fnic_fc_ctlr_trace_buf_init:
 	return err;
 }
@@ -633,7 +682,7 @@ void fnic_fc_trace_free(void)
  * fnic_fc_ctlr_set_trace_data:
  *       Maintain rd & wr idx accordingly and set data
  * Passed parameters:
- *       host_no: host number accociated with fnic
+ *       host_no: host number associated with fnic
  *       frame_type: send_frame, rece_frame or link event
  *       fc_frame: pointer to fc_frame
  *       frame_len: Length of the fc_frame
@@ -692,7 +741,7 @@ int fnic_fc_trace_set_data(u32 host_no, u8 frame_type,
 	 */
 	if (frame_type == FNIC_FC_RECV) {
 		eth_fcoe_hdr_len = sizeof(struct ethhdr) +
-					sizeof(struct fcoe_hdr);
+							sizeof(struct fcoe_hdr);
 		memset((char *)fc_trace, 0xff, eth_fcoe_hdr_len);
 		/* Copy the rest of data frame */
 		memcpy((char *)(fc_trace + eth_fcoe_hdr_len), (void *)frame,
@@ -716,13 +765,13 @@ int fnic_fc_trace_set_data(u32 host_no, u8 frame_type,
  * fnic_fc_ctlr_get_trace_data: Copy trace buffer to a memory file
  * Passed parameter:
  *       @fnic_dbgfs_t: pointer to debugfs trace buffer
- *       rdata_flag: 1 => Unformated file
- *                   0 => formated file
+ *       rdata_flag: 1 => Unformatted file
+ *                   0 => formatted file
  * Description:
  *       This routine will copy the trace data to memory file with
  *       proper formatting and also copy to another memory
- *       file without formatting for further procesing.
- * Retrun Value:
+ *       file without formatting for further processing.
+ * Return Value:
  *       Number of bytes that were dumped into fnic_dbgfs_t
  */
 
@@ -743,7 +792,7 @@ int fnic_fc_trace_get_data(fnic_dbgfs_t *fnic_dbgfs_prt, u8 rdata_flag)
 	rd_idx = fc_trace_entries.rd_idx;
 	wr_idx = fc_trace_entries.wr_idx;
 	if (rdata_flag == 0) {
-		len += snprintf(fnic_dbgfs_prt->buffer + len,
+		len += scnprintf(fnic_dbgfs_prt->buffer + len,
 			(fnic_fc_trace_max_pages * PAGE_SIZE * 3) - len,
 			"Time Stamp (UTC)\t\t"
 			"Host No:   F Type:  len:     FCoE_FRAME:\n");
@@ -763,11 +812,11 @@ int fnic_fc_trace_get_data(fnic_dbgfs_t *fnic_dbgfs_prt, u8 rdata_flag)
 		} else {
 			fc_trace = (char *)tdata;
 			for (j = 0; j < FC_TRC_SIZE_BYTES; j++) {
-				len += snprintf(fnic_dbgfs_prt->buffer + len,
+				len += scnprintf(fnic_dbgfs_prt->buffer + len,
 				(fnic_fc_trace_max_pages * PAGE_SIZE * 3)
 				- len, "%02x", fc_trace[j] & 0xff);
 			} /* for loop */
-			len += snprintf(fnic_dbgfs_prt->buffer + len,
+			len += scnprintf(fnic_dbgfs_prt->buffer + len,
 				(fnic_fc_trace_max_pages * PAGE_SIZE * 3) - len,
 				"\n");
 		}
@@ -786,63 +835,56 @@ int fnic_fc_trace_get_data(fnic_dbgfs_t *fnic_dbgfs_prt, u8 rdata_flag)
  *      @fc_trace_hdr_t: pointer to trace data
  *      @fnic_dbgfs_t: pointer to debugfs trace buffer
  *      @orig_len: pointer to len
- *      rdata_flag: 0 => Formated file, 1 => Unformated file
+ *      rdata_flag: 0 => Formatted file, 1 => Unformatted file
  * Description:
  *      This routine will format and copy the passed trace data
- *      for formated file or unformated file accordingly.
+ *      for formatted file or unformatted file accordingly.
  */
 
 void copy_and_format_trace_data(struct fc_trace_hdr *tdata,
 				fnic_dbgfs_t *fnic_dbgfs_prt, int *orig_len,
 				u8 rdata_flag)
 {
-	struct tm tm;
 	int j, i = 1, len;
-	char *fc_trace, *fmt;
 	int ethhdr_len = sizeof(struct ethhdr) - 1;
 	int fcoehdr_len = sizeof(struct fcoe_hdr);
 	int fchdr_len = sizeof(struct fc_frame_header);
 	int max_size = fnic_fc_trace_max_pages * PAGE_SIZE * 3;
+	char *fc_trace;
 
 	tdata->frame_type = tdata->frame_type & 0x7F;
 
 	len = *orig_len;
 
-	time64_to_tm(tdata->time_stamp.tv_sec, 0, &tm);
-
-	fmt = "%02d:%02d:%04ld %02d:%02d:%02d.%09lu ns%8x       %c%8x\t";
-	len += snprintf(fnic_dbgfs_prt->buffer + len,
-		max_size - len,
-		fmt,
-		tm.tm_mon + 1, tm.tm_mday, tm.tm_year + 1900,
-		tm.tm_hour, tm.tm_min, tm.tm_sec,
-		tdata->time_stamp.tv_nsec, tdata->host_no,
-		tdata->frame_type, tdata->frame_len);
+	len += scnprintf(fnic_dbgfs_prt->buffer + len, max_size - len,
+			 "%ptTs.%09lu ns%8x       %c%8x\t",
+			 &tdata->time_stamp.tv_sec, tdata->time_stamp.tv_nsec,
+			 tdata->host_no, tdata->frame_type, tdata->frame_len);
 
 	fc_trace = (char *)FC_TRACE_ADDRESS(tdata);
 
 	for (j = 0; j < min_t(u8, tdata->frame_len,
 		(u8)(FC_TRC_SIZE_BYTES - FC_TRC_HEADER_SIZE)); j++) {
 		if (tdata->frame_type == FNIC_FC_LE) {
-			len += snprintf(fnic_dbgfs_prt->buffer + len,
+			len += scnprintf(fnic_dbgfs_prt->buffer + len,
 				max_size - len, "%c", fc_trace[j]);
 		} else {
-			len += snprintf(fnic_dbgfs_prt->buffer + len,
+			len += scnprintf(fnic_dbgfs_prt->buffer + len,
 				max_size - len, "%02x", fc_trace[j] & 0xff);
-			len += snprintf(fnic_dbgfs_prt->buffer + len,
+			len += scnprintf(fnic_dbgfs_prt->buffer + len,
 				max_size - len, " ");
 			if (j == ethhdr_len ||
 				j == ethhdr_len + fcoehdr_len ||
 				j == ethhdr_len + fcoehdr_len + fchdr_len ||
 				(i > 3 && j%fchdr_len == 0)) {
-				len += snprintf(fnic_dbgfs_prt->buffer
+				len += scnprintf(fnic_dbgfs_prt->buffer
 					+ len, max_size - len,
 					"\n\t\t\t\t\t\t\t\t");
 				i++;
 			}
 		} /* end of else*/
 	} /* End of for loop*/
-	len += snprintf(fnic_dbgfs_prt->buffer + len,
+	len += scnprintf(fnic_dbgfs_prt->buffer + len,
 		max_size - len, "\n");
 	*orig_len = len;
 }

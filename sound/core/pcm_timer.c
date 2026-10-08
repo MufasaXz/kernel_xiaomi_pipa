@@ -1,22 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Digital Audio (PCM) abstract layer
  *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
- *
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
 #include <linux/time.h>
@@ -67,16 +52,9 @@ void snd_pcm_timer_resolution_change(struct snd_pcm_substream *substream)
 static unsigned long snd_pcm_timer_resolution(struct snd_timer * timer)
 {
 	struct snd_pcm_substream *substream;
-	unsigned long ret = 0, flags = 0;
 
 	substream = timer->private_data;
-	spin_lock_irqsave(&substream->runtime_lock, flags);
-	if (substream->runtime)
-		ret = substream->runtime->timer_resolution;
-	else
-		ret = 0;
-	spin_unlock_irqrestore(&substream->runtime_lock, flags);
-	return ret;
+	return substream->runtime ? substream->runtime->timer_resolution : 0;
 }
 
 static int snd_pcm_timer_start(struct snd_timer * timer)
@@ -97,7 +75,7 @@ static int snd_pcm_timer_stop(struct snd_timer * timer)
 	return 0;
 }
 
-static struct snd_timer_hardware snd_pcm_timer =
+static const struct snd_timer_hardware snd_pcm_timer =
 {
 	.flags =	SNDRV_TIMER_HW_AUTO | SNDRV_TIMER_HW_SLAVE,
 	.resolution =	0,
@@ -130,8 +108,7 @@ void snd_pcm_timer_init(struct snd_pcm_substream *substream)
 	if (snd_timer_new(substream->pcm->card, "PCM", &tid, &timer) < 0)
 		return;
 	sprintf(timer->name, "PCM %s %i-%i-%i",
-			substream->stream == SNDRV_PCM_STREAM_CAPTURE ?
-				"capture" : "playback",
+			snd_pcm_direction_name(substream->stream),
 			tid.card, tid.device, tid.subdevice);
 	timer->hw = snd_pcm_timer;
 	if (snd_device_register(timer->card, timer) < 0) {

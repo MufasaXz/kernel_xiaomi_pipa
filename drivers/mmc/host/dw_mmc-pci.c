@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Synopsys DesignWare Multimedia Card PCI Interface driver
  *
  * Copyright (C) 2012 Vayavya Labs Pvt. Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/interrupt.h>
@@ -79,11 +75,8 @@ static void dw_mci_pci_remove(struct pci_dev *pdev)
 }
 
 static const struct dev_pm_ops dw_mci_pci_dev_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
-	SET_RUNTIME_PM_OPS(dw_mci_runtime_suspend,
-			   dw_mci_runtime_resume,
-			   NULL)
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
+	RUNTIME_PM_OPS(dw_mci_runtime_suspend, dw_mci_runtime_resume, NULL)
 };
 
 static const struct pci_device_id dw_mci_pci_id[] = {
@@ -98,7 +91,7 @@ static struct pci_driver dw_mci_pci_driver = {
 	.probe		= dw_mci_pci_probe,
 	.remove		= dw_mci_pci_remove,
 	.driver		=	{
-		.pm =   &dw_mci_pci_dev_pm_ops,
+		.pm =   pm_ptr(&dw_mci_pci_dev_pm_ops),
 	},
 };
 

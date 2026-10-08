@@ -1,12 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2012 Freescale Semiconductor, Inc.
- *
- * The code contained herein is licensed under the GNU General Public
- * License. You may obtain a copy of the GNU General Public License
- * Version 2 or later at the following locations:
- *
- * http://www.opensource.org/licenses/gpl-license.html
- * http://www.gnu.org/copyleft/gpl.html
  */
 
 #include <linux/clk-provider.h>
@@ -90,7 +84,7 @@ struct clk *mxs_clk_pll(const char *name, const char *parent_name,
 {
 	struct clk_pll *pll;
 	struct clk *clk;
-	struct clk_init_data init = {};
+	struct clk_init_data init;
 
 	pll = kzalloc(sizeof(*pll), GFP_KERNEL);
 	if (!pll)

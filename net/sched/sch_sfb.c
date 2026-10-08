@@ -1,19 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * net/sched/sch_sfb.c	  Stochastic Fair Blue
  *
  * Copyright (c) 2008-2011 Juliusz Chroboczek <jch@pps.jussieu.fr>
  * Copyright (c) 2011 Eric Dumazet <eric.dumazet@gmail.com>
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
  * W. Feng, D. Kandlur, D. Saha, K. Shin. Blue:
  * A New Class of Active Queue Management Algorithms.
  * U. Michigan CSE-TR-387-99, April 1999.
  *
  * http://www.thefengs.com/wuchang/blue/CSE-TR-387-99.pdf
- *
  */
 
 #include <linux/module.h>
@@ -261,7 +257,7 @@ static bool sfb_classify(struct sk_buff *skb, struct tcf_proto *fl,
 	struct tcf_result res;
 	int result;
 
-	result = tcf_classify(skb, fl, &res, false);
+	result = tcf_classify(skb, NULL, fl, &res, false);
 	if (result >= 0) {
 #ifdef CONFIG_NET_CLS_ACT
 		switch (result) {
@@ -269,7 +265,7 @@ static bool sfb_classify(struct sk_buff *skb, struct tcf_proto *fl,
 		case TC_ACT_QUEUED:
 		case TC_ACT_TRAP:
 			*qerr = NET_XMIT_SUCCESS | __NET_XMIT_STOLEN;
-			/* fall through */
+			fallthrough;
 		case TC_ACT_SHOT:
 			return false;
 		}
@@ -284,6 +280,7 @@ static int sfb_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 		       struct sk_buff **to_free)
 {
 
+	enum skb_drop_reason reason = SKB_DROP_REASON_QDISC_OVERLIMIT;
 	struct sfb_sched_data *q = qdisc_priv(sch);
 	unsigned int len = qdisc_pkt_len(skb);
 	struct Qdisc *child = q->qdisc;
@@ -383,7 +380,8 @@ static int sfb_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 		goto enqueue;
 	}
 
-	r = prandom_u32() & SFB_MAX_PROB;
+	r = get_random_u16() & SFB_MAX_PROB;
+	reason = SKB_DROP_REASON_QDISC_CONGESTED;
 
 	if (unlikely(r < p_min)) {
 		if (unlikely(p_min > SFB_MAX_PROB / 2)) {
@@ -418,7 +416,7 @@ enqueue:
 	return ret;
 
 drop:
-	qdisc_drop(skb, sch, to_free);
+	qdisc_drop_reason(skb, sch, to_free, reason);
 	return NET_XMIT_CN;
 other_drop:
 	if (ret & __NET_XMIT_BYPASS)
@@ -459,9 +457,8 @@ static void sfb_reset(struct Qdisc *sch)
 {
 	struct sfb_sched_data *q = qdisc_priv(sch);
 
-	qdisc_reset(q->qdisc);
-	sch->qstats.backlog = 0;
-	sch->q.qlen = 0;
+	if (likely(q->qdisc))
+		qdisc_reset(q->qdisc);
 	q->slot = 0;
 	q->double_buffering = false;
 	sfb_zero_all_buckets(q);
@@ -496,14 +493,15 @@ static int sfb_change(struct Qdisc *sch, struct nlattr *opt,
 		      struct netlink_ext_ack *extack)
 {
 	struct sfb_sched_data *q = qdisc_priv(sch);
-	struct Qdisc *child;
+	struct Qdisc *child, *old;
 	struct nlattr *tb[TCA_SFB_MAX + 1];
 	const struct tc_sfb_qopt *ctl = &sfb_default_ops;
 	u32 limit;
 	int err;
 
 	if (opt) {
-		err = nla_parse_nested(tb, TCA_SFB_MAX, opt, sfb_policy, NULL);
+		err = nla_parse_nested_deprecated(tb, TCA_SFB_MAX, opt,
+						  sfb_policy, NULL);
 		if (err < 0)
 			return -EINVAL;
 
@@ -525,9 +523,8 @@ static int sfb_change(struct Qdisc *sch, struct nlattr *opt,
 		qdisc_hash_add(child, true);
 	sch_tree_lock(sch);
 
-	qdisc_tree_reduce_backlog(q->qdisc, q->qdisc->q.qlen,
-				  q->qdisc->qstats.backlog);
-	qdisc_put(q->qdisc);
+	qdisc_purge_queue(q->qdisc);
+	old = q->qdisc;
 	q->qdisc = child;
 
 	q->rehash_interval = msecs_to_jiffies(ctl->rehash_interval);
@@ -550,6 +547,7 @@ static int sfb_change(struct Qdisc *sch, struct nlattr *opt,
 	sfb_init_perturbation(1, q);
 
 	sch_tree_unlock(sch);
+	qdisc_put(old);
 
 	return 0;
 }
@@ -585,7 +583,7 @@ static int sfb_dump(struct Qdisc *sch, struct sk_buff *skb)
 	};
 
 	sch->qstats.backlog = q->qdisc->qstats.backlog;
-	opts = nla_nest_start(skb, TCA_OPTIONS);
+	opts = nla_nest_start_noflag(skb, TCA_OPTIONS);
 	if (opts == NULL)
 		goto nla_put_failure;
 	if (nla_put(skb, TCA_SFB_PARMS, sizeof(opt), &opt))
@@ -655,7 +653,8 @@ static int sfb_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 	return -ENOSYS;
 }
 
-static int sfb_delete(struct Qdisc *sch, unsigned long cl)
+static int sfb_delete(struct Qdisc *sch, unsigned long cl,
+		      struct netlink_ext_ack *extack)
 {
 	return -ENOSYS;
 }
@@ -663,12 +662,7 @@ static int sfb_delete(struct Qdisc *sch, unsigned long cl)
 static void sfb_walk(struct Qdisc *sch, struct qdisc_walker *walker)
 {
 	if (!walker->stop) {
-		if (walker->count >= walker->skip)
-			if (walker->fn(sch, 1, walker) < 0) {
-				walker->stop = 1;
-				return;
-			}
-		walker->count++;
+		tc_qdisc_stats_dump(sch, 1, walker);
 	}
 }
 
@@ -717,6 +711,7 @@ static struct Qdisc_ops sfb_qdisc_ops __read_mostly = {
 	.dump_stats	=	sfb_dump_stats,
 	.owner		=	THIS_MODULE,
 };
+MODULE_ALIAS_NET_SCH("sfb");
 
 static int __init sfb_module_init(void)
 {

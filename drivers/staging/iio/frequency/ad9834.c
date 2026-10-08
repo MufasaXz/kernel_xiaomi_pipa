@@ -1,9 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * AD9833/AD9834/AD9837/AD9838 SPI DDS driver
  *
  * Copyright 2010-2011 Analog Devices Inc.
- *
- * Licensed under the GPL-2.
  */
 
 #include <linux/clk.h>
@@ -57,9 +56,9 @@
 /**
  * struct ad9834_state - driver instance specific data
  * @spi:		spi_device
- * @reg:		supply regulator
  * @mclk:		external master clock
  * @control:		cached control word
+ * @devid:		device id
  * @xfer:		default spi transfer
  * @msg:		default spi message
  * @freq_xfer:		tuning word spi transfer
@@ -71,7 +70,6 @@
 
 struct ad9834_state {
 	struct spi_device		*spi;
-	struct regulator		*reg;
 	struct clk			*mclk;
 	unsigned short			control;
 	unsigned short			devid;
@@ -85,11 +83,11 @@ struct ad9834_state {
 	 * DMA (thus cache coherency maintenance) requires the
 	 * transfer buffers to live in their own cache lines.
 	 */
-	__be16				data ____cacheline_aligned;
+	__be16				data __aligned(IIO_DMA_MINALIGN);
 	__be16				freq_data[2];
 };
 
-/**
+/*
  * ad9834_supported_device_ids:
  */
 
@@ -286,7 +284,7 @@ ssize_t ad9834_show_out0_wavetype_available(struct device *dev,
 	struct ad9834_state *st = iio_priv(indio_dev);
 	char *str;
 
-	if ((st->devid == ID_AD9833) || (st->devid == ID_AD9837))
+	if (st->devid == ID_AD9833 || st->devid == ID_AD9837)
 		str = "sine triangle square";
 	else if (st->control & AD9834_OPBITEN)
 		str = "sine";
@@ -319,7 +317,7 @@ ssize_t ad9834_show_out1_wavetype_available(struct device *dev,
 static IIO_DEVICE_ATTR(out_altvoltage0_out1_wavetype_available, 0444,
 		       ad9834_show_out1_wavetype_available, NULL, 0);
 
-/**
+/*
  * see dds.h for further information
  */
 
@@ -333,11 +331,9 @@ static IIO_DEV_ATTR_PHASE(0, 1, 0200, NULL, ad9834_write, AD9834_REG_PHASE1);
 static IIO_DEV_ATTR_PHASESYMBOL(0, 0200, NULL, ad9834_write, AD9834_PSEL);
 static IIO_CONST_ATTR_PHASE_SCALE(0, "0.0015339808"); /* 2PI/2^12 rad*/
 
-static IIO_DEV_ATTR_PINCONTROL_EN(0, 0200, NULL,
-	ad9834_write, AD9834_PIN_SW);
+static IIO_DEV_ATTR_PINCONTROL_EN(0, 0200, NULL, ad9834_write, AD9834_PIN_SW);
 static IIO_DEV_ATTR_OUT_ENABLE(0, 0200, NULL, ad9834_write, AD9834_RESET);
-static IIO_DEV_ATTR_OUTY_ENABLE(0, 1, 0200, NULL,
-	ad9834_write, AD9834_OPBITEN);
+static IIO_DEV_ATTR_OUTY_ENABLE(0, 1, 0200, NULL, ad9834_write, AD9834_OPBITEN);
 static IIO_DEV_ATTR_OUT_WAVETYPE(0, 0, ad9834_store_wavetype, 0);
 static IIO_DEV_ATTR_OUT_WAVETYPE(0, 1, ad9834_store_wavetype, 1);
 
@@ -395,40 +391,27 @@ static int ad9834_probe(struct spi_device *spi)
 {
 	struct ad9834_state *st;
 	struct iio_dev *indio_dev;
-	struct regulator *reg;
 	int ret;
 
-
-	reg = devm_regulator_get(&spi->dev, "avdd");
-	if (IS_ERR(reg))
-		return PTR_ERR(reg);
-
-	ret = regulator_enable(reg);
-	if (ret) {
-		dev_err(&spi->dev, "Failed to enable specified AVDD supply\n");
-		return ret;
-	}
+	ret = devm_regulator_get_enable(&spi->dev, "avdd");
+	if (ret)
+		return dev_err_probe(&spi->dev, ret, "Failed to enable specified AVDD supply\n");
 
 	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
 	if (!indio_dev) {
 		ret = -ENOMEM;
-		goto error_disable_reg;
+		return ret;
 	}
-	spi_set_drvdata(spi, indio_dev);
 	st = iio_priv(indio_dev);
 	mutex_init(&st->lock);
-	st->mclk = devm_clk_get(&spi->dev, NULL);
-
-	ret = clk_prepare_enable(st->mclk);
-	if (ret) {
+	st->mclk = devm_clk_get_enabled(&spi->dev, NULL);
+	if (IS_ERR(st->mclk)) {
 		dev_err(&spi->dev, "Failed to enable master clock\n");
-		goto error_disable_reg;
+		return PTR_ERR(st->mclk);
 	}
 
 	st->spi = spi;
 	st->devid = spi_get_device_id(spi)->driver_data;
-	st->reg = reg;
-	indio_dev->dev.parent = &spi->dev;
 	indio_dev->name = spi_get_device_id(spi)->name;
 	switch (st->devid) {
 	case ID_AD9833:
@@ -469,48 +452,26 @@ static int ad9834_probe(struct spi_device *spi)
 	ret = spi_sync(st->spi, &st->msg);
 	if (ret) {
 		dev_err(&spi->dev, "device init failed\n");
-		goto error_clock_unprepare;
+		return ret;
 	}
 
 	ret = ad9834_write_frequency(st, AD9834_REG_FREQ0, 1000000);
 	if (ret)
-		goto error_clock_unprepare;
+		return ret;
 
 	ret = ad9834_write_frequency(st, AD9834_REG_FREQ1, 5000000);
 	if (ret)
-		goto error_clock_unprepare;
+		return ret;
 
 	ret = ad9834_write_phase(st, AD9834_REG_PHASE0, 512);
 	if (ret)
-		goto error_clock_unprepare;
+		return ret;
 
 	ret = ad9834_write_phase(st, AD9834_REG_PHASE1, 1024);
 	if (ret)
-		goto error_clock_unprepare;
+		return ret;
 
-	ret = iio_device_register(indio_dev);
-	if (ret)
-		goto error_clock_unprepare;
-
-	return 0;
-error_clock_unprepare:
-	clk_disable_unprepare(st->mclk);
-error_disable_reg:
-	regulator_disable(reg);
-
-	return ret;
-}
-
-static int ad9834_remove(struct spi_device *spi)
-{
-	struct iio_dev *indio_dev = spi_get_drvdata(spi);
-	struct ad9834_state *st = iio_priv(indio_dev);
-
-	iio_device_unregister(indio_dev);
-	clk_disable_unprepare(st->mclk);
-	regulator_disable(st->reg);
-
-	return 0;
+	return devm_iio_device_register(&spi->dev, indio_dev);
 }
 
 static const struct spi_device_id ad9834_id[] = {
@@ -518,20 +479,30 @@ static const struct spi_device_id ad9834_id[] = {
 	{"ad9834", ID_AD9834},
 	{"ad9837", ID_AD9837},
 	{"ad9838", ID_AD9838},
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad9834_id);
+
+static const struct of_device_id ad9834_of_match[] = {
+	{.compatible = "adi,ad9833"},
+	{.compatible = "adi,ad9834"},
+	{.compatible = "adi,ad9837"},
+	{.compatible = "adi,ad9838"},
+	{ }
+};
+
+MODULE_DEVICE_TABLE(of, ad9834_of_match);
 
 static struct spi_driver ad9834_driver = {
 	.driver = {
 		.name	= "ad9834",
+		.of_match_table = ad9834_of_match
 	},
 	.probe		= ad9834_probe,
-	.remove		= ad9834_remove,
 	.id_table	= ad9834_id,
 };
 module_spi_driver(ad9834_driver);
 
-MODULE_AUTHOR("Michael Hennerich <hennerich@blackfin.uclinux.org>");
+MODULE_AUTHOR("Michael Hennerich <michael.hennerich@analog.com>");
 MODULE_DESCRIPTION("Analog Devices AD9833/AD9834/AD9837/AD9838 DDS");
 MODULE_LICENSE("GPL v2");

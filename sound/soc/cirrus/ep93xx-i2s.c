@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/sound/soc/ep93xx-i2s.c
  * EP93xx I2S driver
@@ -7,11 +8,6 @@
  * Based on the original driver by:
  *   Copyright (C) 2007 Chase Douglas <chasedouglas@gmail>
  *   Copyright (C) 2006 Lennert Buytenhek <buytenh@wantstofly.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 
 #include <linux/module.h>
@@ -19,6 +15,7 @@
 #include <linux/slab.h>
 #include <linux/clk.h>
 #include <linux/io.h>
+#include <linux/of.h>
 
 #include <sound/core.h>
 #include <sound/dmaengine_pcm.h>
@@ -27,9 +24,7 @@
 #include <sound/initval.h>
 #include <sound/soc.h>
 
-#include <mach/hardware.h>
-#include <mach/ep93xx-regs.h>
-#include <linux/platform_data/dma-ep93xx.h>
+#include <linux/soc/cirrus/ep93xx.h>
 
 #include "ep93xx-pcm.h"
 
@@ -84,19 +79,6 @@ struct ep93xx_i2s_info {
 	struct snd_dmaengine_dai_dma_data dma_params_tx;
 };
 
-static struct ep93xx_dma_data ep93xx_i2s_dma_data[] = {
-	[SNDRV_PCM_STREAM_PLAYBACK] = {
-		.name		= "i2s-pcm-out",
-		.port		= EP93XX_DMA_I2S1,
-		.direction	= DMA_MEM_TO_DEV,
-	},
-	[SNDRV_PCM_STREAM_CAPTURE] = {
-		.name		= "i2s-pcm-in",
-		.port		= EP93XX_DMA_I2S1,
-		.direction	= DMA_DEV_TO_MEM,
-	},
-};
-
 static inline void ep93xx_i2s_write_reg(struct ep93xx_i2s_info *info,
 					unsigned reg, unsigned val)
 {
@@ -109,16 +91,28 @@ static inline unsigned ep93xx_i2s_read_reg(struct ep93xx_i2s_info *info,
 	return __raw_readl(info->regs + reg);
 }
 
-static void ep93xx_i2s_enable(struct ep93xx_i2s_info *info, int stream)
+static int ep93xx_i2s_enable(struct ep93xx_i2s_info *info, int stream)
 {
 	unsigned base_reg;
+	int err;
 
 	if ((ep93xx_i2s_read_reg(info, EP93XX_I2S_TX0EN) & 0x1) == 0 &&
 	    (ep93xx_i2s_read_reg(info, EP93XX_I2S_RX0EN) & 0x1) == 0) {
 		/* Enable clocks */
-		clk_enable(info->mclk);
-		clk_enable(info->sclk);
-		clk_enable(info->lrclk);
+		err = clk_prepare_enable(info->mclk);
+		if (err)
+			return err;
+		err = clk_prepare_enable(info->sclk);
+		if (err) {
+			clk_disable_unprepare(info->mclk);
+			return err;
+		}
+		err = clk_prepare_enable(info->lrclk);
+		if (err) {
+			clk_disable_unprepare(info->sclk);
+			clk_disable_unprepare(info->mclk);
+			return err;
+		}
 
 		/* Enable i2s */
 		ep93xx_i2s_write_reg(info, EP93XX_I2S_GLCTRL, 1);
@@ -137,6 +131,8 @@ static void ep93xx_i2s_enable(struct ep93xx_i2s_info *info, int stream)
 		ep93xx_i2s_write_reg(info, EP93XX_I2S_TXCTRL,
 				     EP93XX_I2S_TXCTRL_TXEMPTY_LVL |
 				     EP93XX_I2S_TXCTRL_TXUFIE);
+
+	return 0;
 }
 
 static void ep93xx_i2s_disable(struct ep93xx_i2s_info *info, int stream)
@@ -161,9 +157,9 @@ static void ep93xx_i2s_disable(struct ep93xx_i2s_info *info, int stream)
 		ep93xx_i2s_write_reg(info, EP93XX_I2S_GLCTRL, 0);
 
 		/* Disable clocks */
-		clk_disable(info->lrclk);
-		clk_disable(info->sclk);
-		clk_disable(info->mclk);
+		clk_disable_unprepare(info->lrclk);
+		clk_disable_unprepare(info->sclk);
+		clk_disable_unprepare(info->mclk);
 	}
 }
 
@@ -202,15 +198,18 @@ static int ep93xx_i2s_dai_probe(struct snd_soc_dai *dai)
 {
 	struct ep93xx_i2s_info *info = snd_soc_dai_get_drvdata(dai);
 
-	info->dma_params_tx.filter_data =
-		&ep93xx_i2s_dma_data[SNDRV_PCM_STREAM_PLAYBACK];
-	info->dma_params_rx.filter_data =
-		&ep93xx_i2s_dma_data[SNDRV_PCM_STREAM_CAPTURE];
-
-	dai->playback_dma_data = &info->dma_params_tx;
-	dai->capture_dma_data = &info->dma_params_rx;
+	snd_soc_dai_init_dma_data(dai,	&info->dma_params_tx,
+					&info->dma_params_rx);
 
 	return 0;
+}
+
+static int ep93xx_i2s_startup(struct snd_pcm_substream *substream,
+			      struct snd_soc_dai *dai)
+{
+	struct ep93xx_i2s_info *info = snd_soc_dai_get_drvdata(dai);
+
+	return ep93xx_i2s_enable(info, substream->stream);
 }
 
 static void ep93xx_i2s_shutdown(struct snd_pcm_substream *substream,
@@ -250,14 +249,14 @@ static int ep93xx_i2s_set_dai_fmt(struct snd_soc_dai *cpu_dai,
 		return -EINVAL;
 	}
 
-	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBS_CFS:
-		/* CPU is master */
+	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
+	case SND_SOC_DAIFMT_BP_FP:
+		/* CPU is provider */
 		clk_cfg |= EP93XX_I2S_CLKCFG_MASTER;
 		break;
 
-	case SND_SOC_DAIFMT_CBM_CFM:
-		/* Codec is master */
+	case SND_SOC_DAIFMT_BC_FC:
+		/* Codec is provider */
 		clk_cfg &= ~EP93XX_I2S_CLKCFG_MASTER;
 		break;
 
@@ -353,7 +352,6 @@ static int ep93xx_i2s_hw_params(struct snd_pcm_substream *substream,
 	if (err)
 		return err;
 
-	ep93xx_i2s_enable(info, substream->stream);
 	return 0;
 }
 
@@ -364,16 +362,18 @@ static int ep93xx_i2s_set_sysclk(struct snd_soc_dai *cpu_dai, int clk_id,
 
 	if (dir == SND_SOC_CLOCK_IN || clk_id != 0)
 		return -EINVAL;
+	if (!freq)
+		return 0;
 
 	return clk_set_rate(info->mclk, freq);
 }
 
 #ifdef CONFIG_PM
-static int ep93xx_i2s_suspend(struct snd_soc_dai *dai)
+static int ep93xx_i2s_suspend(struct snd_soc_component *component)
 {
-	struct ep93xx_i2s_info *info = snd_soc_dai_get_drvdata(dai);
+	struct ep93xx_i2s_info *info = snd_soc_component_get_drvdata(component);
 
-	if (!dai->active)
+	if (!snd_soc_component_active(component))
 		return 0;
 
 	ep93xx_i2s_disable(info, SNDRV_PCM_STREAM_PLAYBACK);
@@ -382,17 +382,19 @@ static int ep93xx_i2s_suspend(struct snd_soc_dai *dai)
 	return 0;
 }
 
-static int ep93xx_i2s_resume(struct snd_soc_dai *dai)
+static int ep93xx_i2s_resume(struct snd_soc_component *component)
 {
-	struct ep93xx_i2s_info *info = snd_soc_dai_get_drvdata(dai);
+	struct ep93xx_i2s_info *info = snd_soc_component_get_drvdata(component);
+	int err;
 
-	if (!dai->active)
+	if (!snd_soc_component_active(component))
 		return 0;
 
-	ep93xx_i2s_enable(info, SNDRV_PCM_STREAM_PLAYBACK);
-	ep93xx_i2s_enable(info, SNDRV_PCM_STREAM_CAPTURE);
+	err = ep93xx_i2s_enable(info, SNDRV_PCM_STREAM_PLAYBACK);
+	if (err)
+		return err;
 
-	return 0;
+	return ep93xx_i2s_enable(info, SNDRV_PCM_STREAM_CAPTURE);
 }
 #else
 #define ep93xx_i2s_suspend	NULL
@@ -400,6 +402,8 @@ static int ep93xx_i2s_resume(struct snd_soc_dai *dai)
 #endif
 
 static const struct snd_soc_dai_ops ep93xx_i2s_dai_ops = {
+	.probe		= ep93xx_i2s_dai_probe,
+	.startup	= ep93xx_i2s_startup,
 	.shutdown	= ep93xx_i2s_shutdown,
 	.hw_params	= ep93xx_i2s_hw_params,
 	.set_sysclk	= ep93xx_i2s_set_sysclk,
@@ -409,10 +413,7 @@ static const struct snd_soc_dai_ops ep93xx_i2s_dai_ops = {
 #define EP93XX_I2S_FORMATS (SNDRV_PCM_FMTBIT_S32_LE)
 
 static struct snd_soc_dai_driver ep93xx_i2s_dai = {
-	.symmetric_rates= 1,
-	.probe		= ep93xx_i2s_dai_probe,
-	.suspend	= ep93xx_i2s_suspend,
-	.resume		= ep93xx_i2s_resume,
+	.symmetric_rate	= 1,
 	.playback	= {
 		.channels_min	= 2,
 		.channels_max	= 2,
@@ -429,21 +430,22 @@ static struct snd_soc_dai_driver ep93xx_i2s_dai = {
 };
 
 static const struct snd_soc_component_driver ep93xx_i2s_component = {
-	.name		= "ep93xx-i2s",
+	.name			= "ep93xx-i2s",
+	.suspend		= ep93xx_i2s_suspend,
+	.resume			= ep93xx_i2s_resume,
+	.legacy_dai_naming	= 1,
 };
 
 static int ep93xx_i2s_probe(struct platform_device *pdev)
 {
 	struct ep93xx_i2s_info *info;
-	struct resource *res;
 	int err;
 
 	info = devm_kzalloc(&pdev->dev, sizeof(*info), GFP_KERNEL);
 	if (!info)
 		return -ENOMEM;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	info->regs = devm_ioremap_resource(&pdev->dev, res);
+	info->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(info->regs))
 		return PTR_ERR(info->regs);
 
@@ -478,19 +480,17 @@ static int ep93xx_i2s_probe(struct platform_device *pdev)
 
 	dev_set_drvdata(&pdev->dev, info);
 
-	err = snd_soc_register_component(&pdev->dev, &ep93xx_i2s_component,
+	err = devm_snd_soc_register_component(&pdev->dev, &ep93xx_i2s_component,
 					 &ep93xx_i2s_dai, 1);
 	if (err)
 		goto fail_put_lrclk;
 
 	err = devm_ep93xx_pcm_platform_register(&pdev->dev);
 	if (err)
-		goto fail_unregister;
+		goto fail_put_lrclk;
 
 	return 0;
 
-fail_unregister:
-	snd_soc_unregister_component(&pdev->dev);
 fail_put_lrclk:
 	clk_put(info->lrclk);
 fail_put_sclk:
@@ -501,22 +501,27 @@ fail:
 	return err;
 }
 
-static int ep93xx_i2s_remove(struct platform_device *pdev)
+static void ep93xx_i2s_remove(struct platform_device *pdev)
 {
 	struct ep93xx_i2s_info *info = dev_get_drvdata(&pdev->dev);
 
-	snd_soc_unregister_component(&pdev->dev);
 	clk_put(info->lrclk);
 	clk_put(info->sclk);
 	clk_put(info->mclk);
-	return 0;
 }
+
+static const struct of_device_id ep93xx_i2s_of_ids[] = {
+	{ .compatible = "cirrus,ep9301-i2s" },
+	{}
+};
+MODULE_DEVICE_TABLE(of, ep93xx_i2s_of_ids);
 
 static struct platform_driver ep93xx_i2s_driver = {
 	.probe	= ep93xx_i2s_probe,
-	.remove	= ep93xx_i2s_remove,
+	.remove = ep93xx_i2s_remove,
 	.driver	= {
 		.name	= "ep93xx-i2s",
+		.of_match_table = ep93xx_i2s_of_ids,
 	},
 };
 

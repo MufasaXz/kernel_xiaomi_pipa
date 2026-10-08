@@ -16,6 +16,9 @@
 #include <linux/export.h>
 #include <linux/acpi.h>
 #include <linux/dmi.h>
+#include <linux/of.h>
+#include <linux/iopoll.h>
+
 #include "pci-quirks.h"
 #include "xhci-ext-caps.h"
 
@@ -57,6 +60,23 @@
 #define EHCI_USBLEGCTLSTS	4		/* legacy control/status */
 #define EHCI_USBLEGCTLSTS_SOOE	(1 << 13)	/* SMI on ownership change */
 
+/* ASMEDIA quirk use */
+#define ASMT_DATA_WRITE0_REG	0xF8
+#define ASMT_DATA_WRITE1_REG	0xFC
+#define ASMT_CONTROL_REG	0xE0
+#define ASMT_CONTROL_WRITE_BIT	0x02
+#define ASMT_WRITEREG_CMD	0x10423
+#define ASMT_FLOWCTL_ADDR	0xFA30
+#define ASMT_FLOWCTL_DATA	0xBA
+#define ASMT_PSEUDO_DATA	0
+
+/* Intel quirk use */
+#define USB_INTEL_XUSB2PR      0xD0
+#define USB_INTEL_USB2PRM      0xD4
+#define USB_INTEL_USB3_PSSEN   0xD8
+#define USB_INTEL_USB3PRM      0xDC
+
+#ifdef CONFIG_USB_PCI_AMD
 /* AMD quirk use */
 #define	AB_REG_BAR_LOW		0xe0
 #define	AB_REG_BAR_HIGH		0xe1
@@ -90,21 +110,6 @@
 #define	NB_PIF0_PWRDOWN_0	0x01100012
 #define	NB_PIF0_PWRDOWN_1	0x01100013
 
-#define USB_INTEL_XUSB2PR      0xD0
-#define USB_INTEL_USB2PRM      0xD4
-#define USB_INTEL_USB3_PSSEN   0xD8
-#define USB_INTEL_USB3PRM      0xDC
-
-/* ASMEDIA quirk use */
-#define ASMT_DATA_WRITE0_REG	0xF8
-#define ASMT_DATA_WRITE1_REG	0xFC
-#define ASMT_CONTROL_REG	0xE0
-#define ASMT_CONTROL_WRITE_BIT	0x02
-#define ASMT_WRITEREG_CMD	0x10423
-#define ASMT_FLOWCTL_ADDR	0xFA30
-#define ASMT_FLOWCTL_DATA	0xBA
-#define ASMT_PSEUDO_DATA	0
-
 /*
  * amd_chipset_gen values represent AMD different chipset generations
  */
@@ -132,7 +137,7 @@ static struct amd_chipset_info {
 	struct amd_chipset_type sb_type;
 	int isoc_reqs;
 	int probe_count;
-	int probe_result;
+	bool need_pll_quirk;
 } amd_chipset;
 
 static DEFINE_SPINLOCK(amd_lock);
@@ -201,11 +206,10 @@ void sb800_prefetch(struct device *dev, int on)
 }
 EXPORT_SYMBOL_GPL(sb800_prefetch);
 
-int usb_amd_find_chipset_info(void)
+static void usb_amd_find_chipset_info(void)
 {
 	unsigned long flags;
-	struct amd_chipset_info info;
-	int need_pll_quirk = 0;
+	struct amd_chipset_info info = { };
 
 	spin_lock_irqsave(&amd_lock, flags);
 
@@ -213,9 +217,8 @@ int usb_amd_find_chipset_info(void)
 	if (amd_chipset.probe_count > 0) {
 		amd_chipset.probe_count++;
 		spin_unlock_irqrestore(&amd_lock, flags);
-		return amd_chipset.probe_result;
+		return;
 	}
-	memset(&info, 0, sizeof(info));
 	spin_unlock_irqrestore(&amd_lock, flags);
 
 	if (!amd_chipset_sb_type_init(&info)) {
@@ -224,19 +227,19 @@ int usb_amd_find_chipset_info(void)
 
 	switch (info.sb_type.gen) {
 	case AMD_CHIPSET_SB700:
-		need_pll_quirk = info.sb_type.rev <= 0x3B;
+		info.need_pll_quirk = info.sb_type.rev <= 0x3B;
 		break;
 	case AMD_CHIPSET_SB800:
 	case AMD_CHIPSET_HUDSON2:
 	case AMD_CHIPSET_BOLTON:
-		need_pll_quirk = 1;
+		info.need_pll_quirk = true;
 		break;
 	default:
-		need_pll_quirk = 0;
+		info.need_pll_quirk = false;
 		break;
 	}
 
-	if (!need_pll_quirk) {
+	if (!info.need_pll_quirk) {
 		if (info.smbus_dev) {
 			pci_dev_put(info.smbus_dev);
 			info.smbus_dev = NULL;
@@ -259,7 +262,6 @@ int usb_amd_find_chipset_info(void)
 		}
 	}
 
-	need_pll_quirk = info.probe_result = 1;
 	printk(KERN_DEBUG "QUIRK: Enable AMD PLL fix\n");
 
 commit:
@@ -270,7 +272,6 @@ commit:
 
 		/* Mark that we where here */
 		amd_chipset.probe_count++;
-		need_pll_quirk = amd_chipset.probe_result;
 
 		spin_unlock_irqrestore(&amd_lock, flags);
 
@@ -283,10 +284,7 @@ commit:
 		amd_chipset = info;
 		spin_unlock_irqrestore(&amd_lock, flags);
 	}
-
-	return need_pll_quirk;
 }
-EXPORT_SYMBOL_GPL(usb_amd_find_chipset_info);
 
 int usb_hcd_amd_remote_wakeup_quirk(struct pci_dev *pdev)
 {
@@ -321,6 +319,13 @@ bool usb_amd_prefetch_quirk(void)
 	return amd_chipset.sb_type.gen == AMD_CHIPSET_SB800;
 }
 EXPORT_SYMBOL_GPL(usb_amd_prefetch_quirk);
+
+bool usb_amd_quirk_pll_check(void)
+{
+	usb_amd_find_chipset_info();
+	return amd_chipset.need_pll_quirk;
+}
+EXPORT_SYMBOL_GPL(usb_amd_quirk_pll_check);
 
 /*
  * The hardware normally enables the A-link power management feature, which
@@ -455,50 +460,6 @@ void usb_amd_quirk_pll_disable(void)
 }
 EXPORT_SYMBOL_GPL(usb_amd_quirk_pll_disable);
 
-static int usb_asmedia_wait_write(struct pci_dev *pdev)
-{
-	unsigned long retry_count;
-	unsigned char value;
-
-	for (retry_count = 1000; retry_count > 0; --retry_count) {
-
-		pci_read_config_byte(pdev, ASMT_CONTROL_REG, &value);
-
-		if (value == 0xff) {
-			dev_err(&pdev->dev, "%s: check_ready ERROR", __func__);
-			return -EIO;
-		}
-
-		if ((value & ASMT_CONTROL_WRITE_BIT) == 0)
-			return 0;
-
-		udelay(50);
-	}
-
-	dev_warn(&pdev->dev, "%s: check_write_ready timeout", __func__);
-	return -ETIMEDOUT;
-}
-
-void usb_asmedia_modifyflowcontrol(struct pci_dev *pdev)
-{
-	if (usb_asmedia_wait_write(pdev) != 0)
-		return;
-
-	/* send command and address to device */
-	pci_write_config_dword(pdev, ASMT_DATA_WRITE0_REG, ASMT_WRITEREG_CMD);
-	pci_write_config_dword(pdev, ASMT_DATA_WRITE1_REG, ASMT_FLOWCTL_ADDR);
-	pci_write_config_byte(pdev, ASMT_CONTROL_REG, ASMT_CONTROL_WRITE_BIT);
-
-	if (usb_asmedia_wait_write(pdev) != 0)
-		return;
-
-	/* send data to device */
-	pci_write_config_dword(pdev, ASMT_DATA_WRITE0_REG, ASMT_FLOWCTL_DATA);
-	pci_write_config_dword(pdev, ASMT_DATA_WRITE1_REG, ASMT_PSEUDO_DATA);
-	pci_write_config_byte(pdev, ASMT_CONTROL_REG, ASMT_CONTROL_WRITE_BIT);
-}
-EXPORT_SYMBOL_GPL(usb_asmedia_modifyflowcontrol);
-
 void usb_amd_quirk_pll_enable(void)
 {
 	usb_amd_quirk_pll(0);
@@ -527,7 +488,7 @@ void usb_amd_dev_put(void)
 	amd_chipset.nb_type = 0;
 	memset(&amd_chipset.sb_type, 0, sizeof(amd_chipset.sb_type));
 	amd_chipset.isoc_reqs = 0;
-	amd_chipset.probe_result = 0;
+	amd_chipset.need_pll_quirk = false;
 
 	spin_unlock_irqrestore(&amd_lock, flags);
 
@@ -627,7 +588,62 @@ bool usb_amd_pt_check_port(struct device *device, int port)
 	return !(value & BIT(port_shift));
 }
 EXPORT_SYMBOL_GPL(usb_amd_pt_check_port);
+#endif /* CONFIG_USB_PCI_AMD */
 
+static int usb_asmedia_wait_write(struct pci_dev *pdev)
+{
+	unsigned long retry_count;
+	unsigned char value;
+
+	for (retry_count = 1000; retry_count > 0; --retry_count) {
+
+		pci_read_config_byte(pdev, ASMT_CONTROL_REG, &value);
+
+		if (value == 0xff) {
+			dev_err(&pdev->dev, "%s: check_ready ERROR", __func__);
+			return -EIO;
+		}
+
+		if ((value & ASMT_CONTROL_WRITE_BIT) == 0)
+			return 0;
+
+		udelay(50);
+	}
+
+	dev_warn(&pdev->dev, "%s: check_write_ready timeout", __func__);
+	return -ETIMEDOUT;
+}
+
+void usb_asmedia_modifyflowcontrol(struct pci_dev *pdev)
+{
+	if (usb_asmedia_wait_write(pdev) != 0)
+		return;
+
+	/* send command and address to device */
+	pci_write_config_dword(pdev, ASMT_DATA_WRITE0_REG, ASMT_WRITEREG_CMD);
+	pci_write_config_dword(pdev, ASMT_DATA_WRITE1_REG, ASMT_FLOWCTL_ADDR);
+	pci_write_config_byte(pdev, ASMT_CONTROL_REG, ASMT_CONTROL_WRITE_BIT);
+
+	if (usb_asmedia_wait_write(pdev) != 0)
+		return;
+
+	/* send data to device */
+	pci_write_config_dword(pdev, ASMT_DATA_WRITE0_REG, ASMT_FLOWCTL_DATA);
+	pci_write_config_dword(pdev, ASMT_DATA_WRITE1_REG, ASMT_PSEUDO_DATA);
+	pci_write_config_byte(pdev, ASMT_CONTROL_REG, ASMT_CONTROL_WRITE_BIT);
+}
+EXPORT_SYMBOL_GPL(usb_asmedia_modifyflowcontrol);
+
+static inline int io_type_enabled(struct pci_dev *pdev, unsigned int mask)
+{
+	u16 cmd;
+
+	return !pci_read_config_word(pdev, PCI_COMMAND, &cmd) && (cmd & mask);
+}
+
+#define mmio_enabled(dev) io_type_enabled(dev, PCI_COMMAND_MEMORY)
+
+#if defined(CONFIG_HAS_IOPORT) && IS_ENABLED(CONFIG_USB_UHCI_HCD)
 /*
  * Make sure the controller is completely inactive, unable to
  * generate interrupts or do DMA.
@@ -709,14 +725,7 @@ reset_needed:
 }
 EXPORT_SYMBOL_GPL(uhci_check_and_reset_hc);
 
-static inline int io_type_enabled(struct pci_dev *pdev, unsigned int mask)
-{
-	u16 cmd;
-	return !pci_read_config_word(pdev, PCI_COMMAND, &cmd) && (cmd & mask);
-}
-
 #define pio_enabled(dev) io_type_enabled(dev, PCI_COMMAND_IO)
-#define mmio_enabled(dev) io_type_enabled(dev, PCI_COMMAND_MEMORY)
 
 static void quirk_usb_handoff_uhci(struct pci_dev *pdev)
 {
@@ -726,7 +735,7 @@ static void quirk_usb_handoff_uhci(struct pci_dev *pdev)
 	if (!pio_enabled(pdev))
 		return;
 
-	for (i = 0; i < PCI_ROM_RESOURCE; i++)
+	for (i = 0; i < PCI_STD_NUM_BARS; i++)
 		if ((pci_resource_flags(pdev, i) & IORESOURCE_IO)) {
 			base = pci_resource_start(pdev, i);
 			break;
@@ -735,6 +744,12 @@ static void quirk_usb_handoff_uhci(struct pci_dev *pdev)
 	if (base)
 		uhci_check_and_reset_hc(pdev, base);
 }
+
+#else /* defined(CONFIG_HAS_IOPORT && IS_ENABLED(CONFIG_USB_UHCI_HCD) */
+
+static void quirk_usb_handoff_uhci(struct pci_dev *pdev) {}
+
+#endif /* defined(CONFIG_HAS_IOPORT && IS_ENABLED(CONFIG_USB_UHCI_HCD) */
 
 static int mmio_resource_enabled(struct pci_dev *pdev, int idx)
 {
@@ -790,15 +805,9 @@ static void quirk_usb_handoff_ohci(struct pci_dev *pdev)
 	/* disable interrupts */
 	writel((u32) ~0, base + OHCI_INTRDISABLE);
 
-	/* Reset the USB bus, if the controller isn't already in RESET */
-	if (control & OHCI_HCFS) {
-		/* Go into RESET, preserving RWC (and possibly IR) */
-		writel(control & OHCI_CTRL_MASK, base + OHCI_CONTROL);
-		readl(base + OHCI_CONTROL);
-
-		/* drive bus reset for at least 50 ms (7.1.7.5) */
-		msleep(50);
-	}
+	/* Go into the USB_RESET state, preserving RWC (and possibly IR) */
+	writel(control & OHCI_CTRL_MASK, base + OHCI_CONTROL);
+	readl(base + OHCI_CONTROL);
 
 	/* software reset of the controller, preserving HcFmInterval */
 	if (!no_fminterval)
@@ -967,7 +976,8 @@ static void quirk_usb_disable_ehci(struct pci_dev *pdev)
 			ehci_bios_handoff(pdev, op_reg_base, cap, offset);
 			break;
 		case 0: /* Illegal reserved cap, set cap=0 so we exit */
-			cap = 0; /* fall through */
+			cap = 0;
+			fallthrough;
 		default:
 			dev_warn(&pdev->dev,
 				 "EHCI: unrecognized capability %02x\n",
@@ -1022,15 +1032,9 @@ static int handshake(void __iomem *ptr, u32 mask, u32 done,
 {
 	u32	result;
 
-	do {
-		result = readl(ptr);
-		result &= mask;
-		if (result == done)
-			return 0;
-		udelay(delay_usec);
-		wait_usec -= delay_usec;
-	} while (wait_usec > 0);
-	return -ETIMEDOUT;
+	return readl_poll_timeout_atomic(ptr, result,
+					 ((result & mask) == done),
+					 delay_usec, wait_usec);
 }
 
 /*
@@ -1143,7 +1147,7 @@ void usb_disable_xhci_ports(struct pci_dev *xhci_pdev)
 }
 EXPORT_SYMBOL_GPL(usb_disable_xhci_ports);
 
-/**
+/*
  * PCI Quirks for xHCI.
  *
  * Takes care of the handoff between the Pre-OS (i.e. BIOS) and the OS.
@@ -1163,7 +1167,7 @@ static void quirk_usb_handoff_xhci(struct pci_dev *pdev)
 	if (!mmio_resource_enabled(pdev, 0))
 		return;
 
-	base = ioremap_nocache(pci_resource_start(pdev, 0), len);
+	base = ioremap(pci_resource_start(pdev, 0), len);
 	if (base == NULL)
 		return;
 
@@ -1256,11 +1260,27 @@ iounmap:
 
 static void quirk_usb_early_handoff(struct pci_dev *pdev)
 {
+	struct device_node *parent;
+	bool is_rpi;
+
 	/* Skip Netlogic mips SoC's internal PCI USB controller.
 	 * This device does not need/support EHCI/OHCI handoff
 	 */
 	if (pdev->vendor == 0x184e)	/* vendor Netlogic */
 		return;
+
+	/*
+	 * Bypass the Raspberry Pi 4 controller xHCI controller, things are
+	 * taken care of by the board's co-processor.
+	 */
+	if (pdev->vendor == PCI_VENDOR_ID_VIA && pdev->device == 0x3483) {
+		parent = of_get_parent(pdev->bus->dev.of_node);
+		is_rpi = of_device_is_compatible(parent, "brcm,bcm2711-pcie");
+		of_node_put(parent);
+		if (is_rpi)
+			return;
+	}
+
 	if (pdev->class != PCI_CLASS_SERIAL_USB_UHCI &&
 			pdev->class != PCI_CLASS_SERIAL_USB_OHCI &&
 			pdev->class != PCI_CLASS_SERIAL_USB_EHCI &&

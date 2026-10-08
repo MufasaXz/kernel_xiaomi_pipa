@@ -1,53 +1,75 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  Copyright (C) 2013-2014, Linaro Ltd.
  *	Author: Al Stone <al.stone@linaro.org>
  *	Author: Graeme Gregory <graeme.gregory@linaro.org>
  *	Author: Hanjun Guo <hanjun.guo@linaro.org>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2 as
- *  published by the Free Software Foundation;
  */
 
 #ifndef _ASM_ACPI_H
 #define _ASM_ACPI_H
 
+#include <linux/cpuidle.h>
 #include <linux/efi.h>
 #include <linux/memblock.h>
 #include <linux/psci.h>
+#include <linux/stddef.h>
 
 #include <asm/cputype.h>
 #include <asm/io.h>
+#include <asm/ptrace.h>
 #include <asm/smp_plat.h>
 #include <asm/tlbflush.h>
 
 /* Macros for consistency checks of the GICC subtable of MADT */
-#define ACPI_MADT_GICC_LENGTH	\
-	(acpi_gbl_FADT.header.revision < 6 ? 76 : 80)
+
+/*
+ * MADT GICC minimum length refers to the MADT GICC structure table length as
+ * defined in the earliest ACPI version supported on arm64, ie ACPI 5.1.
+ *
+ * The efficiency_class member was added to the
+ * struct acpi_madt_generic_interrupt to represent the MADT GICC structure
+ * "Processor Power Efficiency Class" field, added in ACPI 6.0 whose offset
+ * is therefore used to delimit the MADT GICC structure minimum length
+ * appropriately.
+ */
+#define ACPI_MADT_GICC_MIN_LENGTH   offsetof(  \
+	struct acpi_madt_generic_interrupt, efficiency_class)
 
 #define BAD_MADT_GICC_ENTRY(entry, end)					\
-	(!(entry) || (entry)->header.length != ACPI_MADT_GICC_LENGTH ||	\
-	(unsigned long)(entry) + ACPI_MADT_GICC_LENGTH > (end))
+	(!(entry) || (entry)->header.length < ACPI_MADT_GICC_MIN_LENGTH || \
+	(unsigned long)(entry) + (entry)->header.length > (end))
+
+#define ACPI_MADT_GICC_SPE  (offsetof(struct acpi_madt_generic_interrupt, \
+	spe_interrupt) + sizeof(u16))
+
+#define ACPI_MADT_GICC_TRBE  (offsetof(struct acpi_madt_generic_interrupt, \
+	trbe_interrupt) + sizeof(u16))
+/*
+ * Arm® Functional Fixed Hardware Specification Version 1.2.
+ * Table 2: Arm Architecture context loss flags
+ */
+#define CPUIDLE_CORE_CTXT		BIT(0) /* Core context Lost */
+
+static inline unsigned int arch_get_idle_state_flags(u32 arch_flags)
+{
+	if (arch_flags & CPUIDLE_CORE_CTXT)
+		return CPUIDLE_FLAG_TIMER_STOP;
+
+	return 0;
+}
+#define arch_get_idle_state_flags arch_get_idle_state_flags
+
+#define CPUIDLE_TRACE_CTXT		BIT(1) /* Trace context loss */
+#define CPUIDLE_GICR_CTXT		BIT(2) /* GICR */
+#define CPUIDLE_GICD_CTXT		BIT(3) /* GICD */
 
 /* Basic configuration for ACPI */
 #ifdef	CONFIG_ACPI
 pgprot_t __acpi_get_mem_attribute(phys_addr_t addr);
 
 /* ACPI table mapping after acpi_permanent_mmap is set */
-static inline void __iomem *acpi_os_ioremap(acpi_physical_address phys,
-					    acpi_size size)
-{
-	/* For normal memory we already have a cacheable mapping. */
-	if (memblock_is_map_memory(phys))
-		return (void __iomem *)__phys_to_virt(phys);
-
-	/*
-	 * We should still honor the memory's attribute here because
-	 * crash dump kernel possibly excludes some ACPI (reclaim)
-	 * regions from memblock list.
-	 */
-	return __ioremap(phys, size, __acpi_get_mem_attribute(phys));
-}
+void __iomem *acpi_os_ioremap(acpi_physical_address phys, acpi_size size);
 #define acpi_os_ioremap acpi_os_ioremap
 
 typedef u64 phys_cpuid_t;
@@ -97,11 +119,24 @@ static inline u32 get_acpi_id_for_cpu(unsigned int cpu)
 	return	acpi_cpu_get_madt_gicc(cpu)->uid;
 }
 
+static inline int get_cpu_for_acpi_id(u32 uid)
+{
+	int cpu;
+
+	for (cpu = 0; cpu < nr_cpu_ids; cpu++)
+		if (acpi_cpu_get_madt_gicc(cpu) &&
+		    uid == get_acpi_id_for_cpu(cpu))
+			return cpu;
+
+	return -EINVAL;
+}
+
 static inline void arch_fix_phys_package_id(int num, u32 slot) { }
 void __init acpi_init_cpus(void);
-
+int apei_claim_sea(struct pt_regs *regs);
 #else
 static inline void acpi_init_cpus(void) { }
+static inline int apei_claim_sea(struct pt_regs *regs) { return -ENOENT; }
 #endif /* CONFIG_ACPI */
 
 #ifdef CONFIG_ARM64_ACPI_PARKING_PROTOCOL

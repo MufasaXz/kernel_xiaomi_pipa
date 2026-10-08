@@ -1,10 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * QLogic iSCSI Offload Driver
  * Copyright (c) 2016 Cavium Inc.
- *
- * This software is available under the terms of the GNU General Public License
- * (GPL) Version 2, available from the file COPYING in the main directory of
- * this source tree.
  */
 
 #include "qedi_dbg.h"
@@ -105,26 +102,4 @@ qedi_dbg_info(struct qedi_dbg_ctx *qedi, const char *func, u32 line,
 
 ret:
 	va_end(va);
-}
-
-int
-qedi_create_sysfs_attr(struct Scsi_Host *shost, struct sysfs_bin_attrs *iter)
-{
-	int ret = 0;
-
-	for (; iter->name; iter++) {
-		ret = sysfs_create_bin_file(&shost->shost_gendev.kobj,
-					    iter->attr);
-		if (ret)
-			pr_err("Unable to create sysfs %s attr, err(%d).\n",
-			       iter->name, ret);
-	}
-	return ret;
-}
-
-void
-qedi_remove_sysfs_attr(struct Scsi_Host *shost, struct sysfs_bin_attrs *iter)
-{
-	for (; iter->name; iter++)
-		sysfs_remove_bin_file(&shost->shost_gendev.kobj, iter->attr);
 }

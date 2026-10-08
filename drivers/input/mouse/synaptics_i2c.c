@@ -219,7 +219,6 @@ struct synaptics_i2c {
 	struct i2c_client	*client;
 	struct input_dev	*input;
 	struct delayed_work	dwork;
-	spinlock_t		lock;
 	int			no_data_count;
 	int			no_decel_param;
 	int			reduce_report_param;
@@ -369,23 +368,11 @@ static bool synaptics_i2c_get_input(struct synaptics_i2c *touch)
 	return xy_delta || gesture;
 }
 
-static void synaptics_i2c_reschedule_work(struct synaptics_i2c *touch,
-					  unsigned long delay)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&touch->lock, flags);
-
-	mod_delayed_work(system_wq, &touch->dwork, delay);
-
-	spin_unlock_irqrestore(&touch->lock, flags);
-}
-
 static irqreturn_t synaptics_i2c_irq(int irq, void *dev_id)
 {
 	struct synaptics_i2c *touch = dev_id;
 
-	synaptics_i2c_reschedule_work(touch, 0);
+	mod_delayed_work(system_dfl_wq, &touch->dwork, 0);
 
 	return IRQ_HANDLED;
 }
@@ -461,7 +448,7 @@ static void synaptics_i2c_work_handler(struct work_struct *work)
 	 * We poll the device once in THREAD_IRQ_SLEEP_SECS and
 	 * if error is detected, we try to reset and reconfigure the touchpad.
 	 */
-	synaptics_i2c_reschedule_work(touch, delay);
+	mod_delayed_work(system_dfl_wq, &touch->dwork, delay);
 }
 
 static int synaptics_i2c_open(struct input_dev *input)
@@ -474,7 +461,7 @@ static int synaptics_i2c_open(struct input_dev *input)
 		return ret;
 
 	if (polling_req)
-		synaptics_i2c_reschedule_work(touch,
+		mod_delayed_work(system_dfl_wq, &touch->dwork,
 				msecs_to_jiffies(NO_DATA_SLEEP_MSECS));
 
 	return 0;
@@ -521,7 +508,7 @@ static struct synaptics_i2c *synaptics_i2c_touch_create(struct i2c_client *clien
 {
 	struct synaptics_i2c *touch;
 
-	touch = kzalloc(sizeof(struct synaptics_i2c), GFP_KERNEL);
+	touch = kzalloc(sizeof(*touch), GFP_KERNEL);
 	if (!touch)
 		return NULL;
 
@@ -530,13 +517,11 @@ static struct synaptics_i2c *synaptics_i2c_touch_create(struct i2c_client *clien
 	touch->scan_rate_param = scan_rate;
 	set_scan_rate(touch, scan_rate);
 	INIT_DELAYED_WORK(&touch->dwork, synaptics_i2c_work_handler);
-	spin_lock_init(&touch->lock);
 
 	return touch;
 }
 
-static int synaptics_i2c_probe(struct i2c_client *client,
-			       const struct i2c_device_id *dev_id)
+static int synaptics_i2c_probe(struct i2c_client *client)
 {
 	int ret;
 	struct synaptics_i2c *touch;
@@ -601,7 +586,7 @@ err_mem_free:
 	return ret;
 }
 
-static int synaptics_i2c_remove(struct i2c_client *client)
+static void synaptics_i2c_remove(struct i2c_client *client)
 {
 	struct synaptics_i2c *touch = i2c_get_clientdata(client);
 
@@ -610,11 +595,9 @@ static int synaptics_i2c_remove(struct i2c_client *client)
 
 	input_unregister_device(touch->input);
 	kfree(touch);
-
-	return 0;
 }
 
-static int __maybe_unused synaptics_i2c_suspend(struct device *dev)
+static int synaptics_i2c_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct synaptics_i2c *touch = i2c_get_clientdata(client);
@@ -627,28 +610,31 @@ static int __maybe_unused synaptics_i2c_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused synaptics_i2c_resume(struct device *dev)
+static int synaptics_i2c_resume(struct device *dev)
 {
 	int ret;
 	struct i2c_client *client = to_i2c_client(dev);
 	struct synaptics_i2c *touch = i2c_get_clientdata(client);
+	struct input_dev *input = touch->input;
 
 	ret = synaptics_i2c_reset_config(client);
 	if (ret)
 		return ret;
 
-	synaptics_i2c_reschedule_work(touch,
-				msecs_to_jiffies(NO_DATA_SLEEP_MSECS));
+	guard(mutex)(&input->mutex);
+	if (input_device_enabled(input))
+		mod_delayed_work(system_dfl_wq, &touch->dwork,
+				 msecs_to_jiffies(NO_DATA_SLEEP_MSECS));
 
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(synaptics_i2c_pm, synaptics_i2c_suspend,
-			 synaptics_i2c_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(synaptics_i2c_pm, synaptics_i2c_suspend,
+				synaptics_i2c_resume);
 
 static const struct i2c_device_id synaptics_i2c_id_table[] = {
-	{ "synaptics_i2c", 0 },
-	{ },
+	{ "synaptics_i2c" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, synaptics_i2c_id_table);
 
@@ -664,7 +650,7 @@ static struct i2c_driver synaptics_i2c_driver = {
 	.driver = {
 		.name	= DRIVER_NAME,
 		.of_match_table = of_match_ptr(synaptics_i2c_of_match),
-		.pm	= &synaptics_i2c_pm,
+		.pm	= pm_sleep_ptr(&synaptics_i2c_pm),
 	},
 
 	.probe		= synaptics_i2c_probe,

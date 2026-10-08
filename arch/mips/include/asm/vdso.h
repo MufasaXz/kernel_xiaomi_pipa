@@ -1,11 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Copyright (C) 2015 Imagination Technologies
  * Author: Alex Smith <alex.smith@imgtec.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #ifndef __ASM_VDSO_H
@@ -53,10 +49,5 @@ extern struct mips_vdso_image vdso_image_o32;
 #ifdef CONFIG_MIPS32_N32
 extern struct mips_vdso_image vdso_image_n32;
 #endif
-
-union mips_vdso_data {
-	struct vdso_data data[CS_BASES];
-	u8 page[PAGE_SIZE];
-};
 
 #endif /* __ASM_VDSO_H */

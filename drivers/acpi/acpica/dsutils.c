@@ -57,7 +57,6 @@ void acpi_ds_clear_implicit_return(struct acpi_walk_state *walk_state)
 	}
 }
 
-#ifndef ACPI_NO_METHOD_EXECUTION
 /*******************************************************************************
  *
  * FUNCTION:    acpi_ds_do_implicit_return
@@ -401,7 +400,6 @@ void acpi_ds_clear_operands(struct acpi_walk_state *walk_state)
 	walk_state->num_operands = 0;
 	return_VOID;
 }
-#endif
 
 /*******************************************************************************
  *
@@ -725,11 +723,11 @@ cleanup:
 	 * pop everything off of the operand stack and delete those
 	 * objects
 	 */
-	walk_state->num_operands = i;
+	walk_state->num_operands = (u8)(i);
 	acpi_ds_obj_stack_pop_and_delete(new_num_operands, walk_state);
 
 	/* Restore operand count */
-	walk_state->num_operands = prev_num_operands;
+	walk_state->num_operands = (u8)(prev_num_operands);
 
 	ACPI_EXCEPTION((AE_INFO, status, "While creating Arg %u", index));
 	return_ACPI_STATUS(status);

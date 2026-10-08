@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Kernel module to match various things tied to sockets associated with
  * locally generated outgoing packets.
@@ -5,10 +6,6 @@
  * (C) 2000 Marc Boucher <marc@mbsi.ca>
  *
  * Copyright © CC Computer Consultants GmbH, 2007 - 2008
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/module.h>
 #include <linux/skbuff.h>
@@ -24,6 +21,9 @@ static int owner_check(const struct xt_mtchk_param *par)
 {
 	struct xt_owner_match_info *info = par->matchinfo;
 	struct net *net = par->net;
+
+	if (info->match & ~XT_OWNER_MASK)
+		return -EINVAL;
 
 	/* Only allow the common case where the userns of the writer
 	 * matches the userns of the network namespace.

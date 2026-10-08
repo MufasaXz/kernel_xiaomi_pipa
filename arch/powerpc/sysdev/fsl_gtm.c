@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Freescale General-purpose Timers Module
  *
@@ -6,11 +7,6 @@
  *               Jerry Huang <Chang-Ming.Huang@freescale.com>
  * Copyright (c) MontaVista Software, Inc. 2008.
  *               Anton Vorontsov <avorontsov@ru.mvista.com>
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #include <linux/kernel.h>
@@ -81,7 +77,7 @@ struct gtm {
 static LIST_HEAD(gtms);
 
 /**
- * gtm_get_timer - request GTM timer to use it with the rest of GTM API
+ * gtm_get_timer16 - request GTM timer to use it with the rest of GTM API
  * Context:	non-IRQ
  *
  * This function reserves GTM timer for later use. It returns gtm_timer
@@ -114,7 +110,7 @@ struct gtm_timer *gtm_get_timer16(void)
 EXPORT_SYMBOL(gtm_get_timer16);
 
 /**
- * gtm_get_specific_timer - request specific GTM timer
+ * gtm_get_specific_timer16 - request specific GTM timer
  * @gtm:	specific GTM, pass here GTM's device_node->data
  * @timer:	specific timer number, Timer1 is 0.
  * Context:	non-IRQ
@@ -264,7 +260,7 @@ int gtm_set_timer16(struct gtm_timer *tmr, unsigned long usec, bool reload)
 EXPORT_SYMBOL(gtm_set_timer16);
 
 /**
- * gtm_set_exact_utimer16 - (re)set 16 bits timer
+ * gtm_set_exact_timer16 - (re)set 16 bits timer
  * @tmr:	pointer to the gtm_timer structure obtained from gtm_get_timer
  * @usec:	timer interval in microseconds
  * @reload:	if set, the timer will reset upon expiry rather than

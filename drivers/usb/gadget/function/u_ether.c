@@ -70,7 +70,6 @@ struct eth_dev {
 	unsigned		qmult;
 
 	unsigned		header_len;
-	unsigned int		ul_max_pkts_per_xfer;
 	struct sk_buff		*(*wrap)(struct gether *, struct sk_buff *skb);
 	int			(*unwrap)(struct gether *,
 						struct sk_buff *skb,
@@ -94,11 +93,10 @@ struct eth_dev {
 
 #define DEFAULT_QLEN	2	/* double buffering by default */
 
-/* for dual-speed hardware, use deeper queues at high/super speed */
+/* use deeper queues at high/super speed */
 static inline int qlen(struct usb_gadget *gadget, unsigned qmult)
 {
-	if (gadget_is_dualspeed(gadget) && (gadget->speed == USB_SPEED_HIGH ||
-					    gadget->speed >= USB_SPEED_SUPER))
+	if (gadget->speed == USB_SPEED_HIGH || gadget->speed >= USB_SPEED_SUPER)
 		return qmult * DEFAULT_QLEN;
 	else
 		return DEFAULT_QLEN;
@@ -112,10 +110,12 @@ static void eth_get_drvinfo(struct net_device *net, struct ethtool_drvinfo *p)
 {
 	struct eth_dev *dev = netdev_priv(net);
 
-	strlcpy(p->driver, "g_ether", sizeof(p->driver));
-	strlcpy(p->version, UETH__VERSION, sizeof(p->version));
-	strlcpy(p->fw_version, dev->gadget->name, sizeof(p->fw_version));
-	strlcpy(p->bus_info, dev_name(&dev->gadget->dev), sizeof(p->bus_info));
+	strscpy(p->driver, "g_ether", sizeof(p->driver));
+	strscpy(p->version, UETH__VERSION, sizeof(p->version));
+	if (dev->gadget) {
+		strscpy(p->fw_version, dev->gadget->name, sizeof(p->fw_version));
+		strscpy(p->bus_info, dev_name(&dev->gadget->dev), sizeof(p->bus_info));
+	}
 }
 
 /* REVISIT can also support:
@@ -183,14 +183,10 @@ rx_submit(struct eth_dev *dev, struct usb_request *req, gfp_t gfp_flags)
 		size -= size % out->maxpacket;
 	}
 
-	if (dev->ul_max_pkts_per_xfer)
-		size *= dev->ul_max_pkts_per_xfer;
-
 	if (dev->port_usb->is_fixed)
 		size = max_t(size_t, size, dev->port_usb->fixed_out_len);
 	spin_unlock_irqrestore(&dev->lock, flags);
 
-	DBG(dev, "%s: size: %zd\n", __func__, size);
 	skb = __netdev_alloc_skb(dev->net, size + NET_IP_ALIGN, gfp_flags);
 	if (skb == NULL) {
 		DBG(dev, "no rx skb\n");
@@ -295,7 +291,7 @@ quiesce:
 	/* data overrun */
 	case -EOVERFLOW:
 		dev->net->stats.rx_over_errors++;
-		/* FALLTHROUGH */
+		fallthrough;
 
 	default:
 		dev->net->stats.rx_errors++;
@@ -418,7 +414,7 @@ static void tx_complete(struct usb_ep *ep, struct usb_request *req)
 	default:
 		dev->net->stats.tx_errors++;
 		VDBG(dev, "tx err %d\n", req->status);
-		/* FALLTHROUGH */
+		fallthrough;
 	case -ECONNRESET:		/* unlink */
 	case -ESHUTDOWN:		/* disconnect etc */
 		dev_kfree_skb_any(skb);
@@ -443,6 +439,20 @@ static inline int is_promisc(u16 cdc_filter)
 	return cdc_filter & USB_CDC_PACKET_TYPE_PROMISCUOUS;
 }
 
+static int ether_wakeup_host(struct gether *port)
+{
+	int			ret;
+	struct usb_function	*func = &port->func;
+	struct usb_gadget	*gadget = func->config->cdev->gadget;
+
+	if (func->func_suspended)
+		ret = usb_func_wakeup(func);
+	else
+		ret = usb_gadget_wakeup(gadget);
+
+	return ret;
+}
+
 static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 					struct net_device *net)
 {
@@ -462,6 +472,15 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 		in = NULL;
 		cdc_filter = 0;
 	}
+
+	if (dev->port_usb && dev->port_usb->is_suspend) {
+		DBG(dev, "Port suspended. Triggering wakeup\n");
+		netif_stop_queue(net);
+		spin_unlock_irqrestore(&dev->lock, flags);
+		ether_wakeup_host(dev->port_usb);
+		return NETDEV_TX_BUSY;
+	}
+
 	spin_unlock_irqrestore(&dev->lock, flags);
 
 	if (!in) {
@@ -522,15 +541,15 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 		if (dev->port_usb)
 			skb = dev->wrap(dev->port_usb, skb);
 		spin_unlock_irqrestore(&dev->lock, flags);
-	}
-	if (!skb) {
-		/* Multi frame CDC protocols may store the frame for
-		 * later which is not a dropped frame.
-		 */
-		if (dev->port_usb &&
-				dev->port_usb->supports_multi_frame)
-			goto multiframe;
-		goto drop;
+		if (!skb) {
+			/* Multi frame CDC protocols may store the frame for
+			 * later which is not a dropped frame.
+			 */
+			if (dev->port_usb &&
+					dev->port_usb->supports_multi_frame)
+				goto multiframe;
+			goto drop;
+		}
 	}
 
 	length = skb->len;
@@ -701,11 +720,11 @@ static const struct net_device_ops eth_netdev_ops = {
 	.ndo_validate_addr	= eth_validate_addr,
 };
 
-static struct device_type gadget_type = {
+static const struct device_type gadget_type = {
 	.name	= "gadget",
 };
 
-/**
+/*
  * gether_setup_name - initialize one ethernet-over-usb link
  * @g: gadget to associated with these links
  * @ethaddr: NULL, or a buffer in which the ethernet address of the
@@ -726,6 +745,7 @@ struct eth_dev *gether_setup_name(struct usb_gadget *g,
 	struct eth_dev		*dev;
 	struct net_device	*net;
 	int			status;
+	u8			addr[ETH_ALEN];
 
 	net = alloc_etherdev(sizeof *dev);
 	if (!net)
@@ -745,13 +765,14 @@ struct eth_dev *gether_setup_name(struct usb_gadget *g,
 	dev->qmult = qmult;
 	snprintf(net->name, sizeof(net->name), "%s%%d", netname);
 
-	if (get_ether_addr(dev_addr, net->dev_addr)) {
+	if (get_ether_addr(dev_addr, addr)) {
 		net->addr_assign_type = NET_ADDR_RANDOM;
 		dev_warn(&g->dev,
 			"using random %s ethernet address\n", "self");
 	} else {
 		net->addr_assign_type = NET_ADDR_SET;
 	}
+	eth_hw_addr_set(net, addr);
 	if (get_ether_addr(host_addr, dev->host_mac))
 		dev_warn(&g->dev,
 			"using random %s ethernet address\n", "host");
@@ -808,9 +829,6 @@ struct net_device *gether_setup_name_default(const char *netname)
 	INIT_LIST_HEAD(&dev->tx_reqs);
 	INIT_LIST_HEAD(&dev->rx_reqs);
 
-	/* by default we always have a random MAC address */
-	net->addr_assign_type = NET_ADDR_RANDOM;
-
 	skb_queue_head_init(&dev->rx_frames);
 
 	/* network device setup */
@@ -819,9 +837,11 @@ struct net_device *gether_setup_name_default(const char *netname)
 	snprintf(net->name, sizeof(net->name), "%s%%d", netname);
 
 	eth_random_addr(dev->dev_mac);
-	pr_warn("using random %s ethernet address\n", "self");
+
+	/* by default we always have a random MAC address */
+	net->addr_assign_type = NET_ADDR_RANDOM;
+
 	eth_random_addr(dev->host_mac);
-	pr_warn("using random %s ethernet address\n", "host");
 
 	net->netdev_ops = &eth_netdev_ops;
 
@@ -847,7 +867,7 @@ int gether_register_netdev(struct net_device *net)
 	dev = netdev_priv(net);
 	g = dev->gadget;
 
-	memcpy(net->dev_addr, dev->dev_mac, ETH_ALEN);
+	eth_hw_addr_set(net, dev->dev_mac);
 
 	status = register_netdev(net);
 	if (status < 0) {
@@ -877,6 +897,28 @@ void gether_set_gadget(struct net_device *net, struct usb_gadget *g)
 	SET_NETDEV_DEV(net, &g->dev);
 }
 EXPORT_SYMBOL_GPL(gether_set_gadget);
+
+int gether_attach_gadget(struct net_device *net, struct usb_gadget *g)
+{
+	int ret;
+
+	ret = device_move(&net->dev, &g->dev, DPM_ORDER_DEV_AFTER_PARENT);
+	if (ret)
+		return ret;
+
+	gether_set_gadget(net, g);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(gether_attach_gadget);
+
+void gether_detach_gadget(struct net_device *net)
+{
+	struct eth_dev *dev = netdev_priv(net);
+
+	device_move(&net->dev, NULL, DPM_ORDER_NONE);
+	dev->gadget = NULL;
+}
+EXPORT_SYMBOL_GPL(gether_detach_gadget);
 
 int gether_set_dev_addr(struct net_device *net, const char *dev_addr)
 {
@@ -1014,34 +1056,53 @@ int gether_set_ifname(struct net_device *net, const char *name, int len)
 	if (!p || p[1] != 'd' || strchr(p + 2, '%'))
 		return -EINVAL;
 
-	strncpy(net->name, tmp, sizeof(net->name));
+	strscpy(net->name, tmp);
 	dev->ifname_set = true;
 
 	return 0;
 }
 EXPORT_SYMBOL_GPL(gether_set_ifname);
 
-unsigned int gether_get_ul_max_pkts_per_xfer(struct net_device *net)
+void gether_suspend(struct gether *link)
 {
-	struct eth_dev *dev;
+	struct eth_dev *dev = link->ioport;
+	unsigned long flags;
 
-	dev = netdev_priv(net);
-	return dev->ul_max_pkts_per_xfer;
+	if (!dev)
+		return;
+
+	if (atomic_read(&dev->tx_qlen)) {
+		/*
+		 * There is a transfer in progress. So we trigger a remote
+		 * wakeup to inform the host.
+		 */
+		if (!ether_wakeup_host(dev->port_usb))
+			return;
+	}
+	spin_lock_irqsave(&dev->lock, flags);
+	link->is_suspend = true;
+	spin_unlock_irqrestore(&dev->lock, flags);
 }
-EXPORT_SYMBOL(gether_get_ul_max_pkts_per_xfer);
+EXPORT_SYMBOL_GPL(gether_suspend);
 
-int gether_set_ul_max_pkts_per_xfer(struct net_device *net, unsigned int max)
+void gether_resume(struct gether *link)
 {
-	struct eth_dev *dev;
+	struct eth_dev *dev = link->ioport;
+	unsigned long flags;
 
-	dev = netdev_priv(net);
-	dev->ul_max_pkts_per_xfer = max;
+	if (!dev)
+		return;
 
-	return 0;
+	if (netif_queue_stopped(dev->net))
+		netif_start_queue(dev->net);
+
+	spin_lock_irqsave(&dev->lock, flags);
+	link->is_suspend = false;
+	spin_unlock_irqrestore(&dev->lock, flags);
 }
-EXPORT_SYMBOL(gether_set_ul_max_pkts_per_xfer);
+EXPORT_SYMBOL_GPL(gether_resume);
 
-/**
+/*
  * gether_cleanup - remove Ethernet-over-USB device
  * Context: may sleep
  *
@@ -1110,8 +1171,6 @@ struct net_device *gether_connect(struct gether *link)
 		dev->header_len = link->header_len;
 		dev->unwrap = link->unwrap;
 		dev->wrap = link->wrap;
-		if (!dev->ul_max_pkts_per_xfer)
-			dev->ul_max_pkts_per_xfer = link->ul_max_pkts_per_xfer;
 
 		spin_lock(&dev->lock);
 		dev->port_usb = link;
@@ -1165,6 +1224,11 @@ void gether_disconnect(struct gether *link)
 
 	DBG(dev, "%s\n", __func__);
 
+	spin_lock(&dev->lock);
+	dev->port_usb = NULL;
+	link->is_suspend = false;
+	spin_unlock(&dev->lock);
+
 	netif_stop_queue(dev->net);
 	netif_carrier_off(dev->net);
 
@@ -1202,12 +1266,9 @@ void gether_disconnect(struct gether *link)
 	dev->header_len = 0;
 	dev->unwrap = NULL;
 	dev->wrap = NULL;
-
-	spin_lock(&dev->lock);
-	dev->port_usb = NULL;
-	spin_unlock(&dev->lock);
 }
 EXPORT_SYMBOL_GPL(gether_disconnect);
 
+MODULE_DESCRIPTION("Ethernet-over-USB link layer utilities for Gadget stack");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("David Brownell");

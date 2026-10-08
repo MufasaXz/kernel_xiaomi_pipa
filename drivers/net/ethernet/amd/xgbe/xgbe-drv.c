@@ -1,117 +1,8 @@
+// SPDX-License-Identifier: (GPL-2.0-or-later OR BSD-3-Clause)
 /*
- * AMD 10Gb Ethernet driver
- *
- * This file is available to you under your choice of the following two
- * licenses:
- *
- * License 1: GPLv2
- *
- * Copyright (c) 2014-2016 Advanced Micro Devices, Inc.
- *
- * This file is free software; you may copy, redistribute and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 2 of the License, or (at
- * your option) any later version.
- *
- * This file is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * This file incorporates work covered by the following copyright and
- * permission notice:
- *     The Synopsys DWC ETHER XGMAC Software Driver and documentation
- *     (hereinafter "Software") is an unsupported proprietary work of Synopsys,
- *     Inc. unless otherwise expressly agreed to in writing between Synopsys
- *     and you.
- *
- *     The Software IS NOT an item of Licensed Software or Licensed Product
- *     under any End User Software License Agreement or Agreement for Licensed
- *     Product with Synopsys or any supplement thereto.  Permission is hereby
- *     granted, free of charge, to any person obtaining a copy of this software
- *     annotated with this license and the Software, to deal in the Software
- *     without restriction, including without limitation the rights to use,
- *     copy, modify, merge, publish, distribute, sublicense, and/or sell copies
- *     of the Software, and to permit persons to whom the Software is furnished
- *     to do so, subject to the following conditions:
- *
- *     The above copyright notice and this permission notice shall be included
- *     in all copies or substantial portions of the Software.
- *
- *     THIS SOFTWARE IS BEING DISTRIBUTED BY SYNOPSYS SOLELY ON AN "AS IS"
- *     BASIS AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
- *     TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
- *     PARTICULAR PURPOSE ARE HEREBY DISCLAIMED. IN NO EVENT SHALL SYNOPSYS
- *     BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- *     CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- *     SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- *     INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- *     CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- *     ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
- *     THE POSSIBILITY OF SUCH DAMAGE.
- *
- *
- * License 2: Modified BSD
- *
- * Copyright (c) 2014-2016 Advanced Micro Devices, Inc.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
- *     * Neither the name of Advanced Micro Devices, Inc. nor the
- *       names of its contributors may be used to endorse or promote products
- *       derived from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * This file incorporates work covered by the following copyright and
- * permission notice:
- *     The Synopsys DWC ETHER XGMAC Software Driver and documentation
- *     (hereinafter "Software") is an unsupported proprietary work of Synopsys,
- *     Inc. unless otherwise expressly agreed to in writing between Synopsys
- *     and you.
- *
- *     The Software IS NOT an item of Licensed Software or Licensed Product
- *     under any End User Software License Agreement or Agreement for Licensed
- *     Product with Synopsys or any supplement thereto.  Permission is hereby
- *     granted, free of charge, to any person obtaining a copy of this software
- *     annotated with this license and the Software, to deal in the Software
- *     without restriction, including without limitation the rights to use,
- *     copy, modify, merge, publish, distribute, sublicense, and/or sell copies
- *     of the Software, and to permit persons to whom the Software is furnished
- *     to do so, subject to the following conditions:
- *
- *     The above copyright notice and this permission notice shall be included
- *     in all copies or substantial portions of the Software.
- *
- *     THIS SOFTWARE IS BEING DISTRIBUTED BY SYNOPSYS SOLELY ON AN "AS IS"
- *     BASIS AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
- *     TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
- *     PARTICULAR PURPOSE ARE HEREBY DISCLAIMED. IN NO EVENT SHALL SYNOPSYS
- *     BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- *     CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- *     SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- *     INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- *     CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- *     ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
- *     THE POSSIBILITY OF SUCH DAMAGE.
+ * Copyright (c) 2014-2025, Advanced Micro Devices, Inc.
+ * Copyright (c) 2014, Synopsys, Inc.
+ * All rights reserved
  */
 
 #include <linux/module.h>
@@ -119,7 +10,6 @@
 #include <linux/tcp.h>
 #include <linux/if_vlan.h>
 #include <linux/interrupt.h>
-#include <net/busy_poll.h>
 #include <linux/clk.h>
 #include <linux/if_ether.h>
 #include <linux/net_tstamp.h>
@@ -404,9 +294,9 @@ static bool xgbe_ecc_ded(struct xgbe_prv_data *pdata, unsigned long *period,
 	return false;
 }
 
-static void xgbe_ecc_isr_task(unsigned long data)
+static void xgbe_ecc_isr_bh_work(struct work_struct *work)
 {
-	struct xgbe_prv_data *pdata = (struct xgbe_prv_data *)data;
+	struct xgbe_prv_data *pdata = from_work(pdata, work, ecc_bh_work);
 	unsigned int ecc_isr;
 	bool stop = false;
 
@@ -466,17 +356,17 @@ static irqreturn_t xgbe_ecc_isr(int irq, void *data)
 {
 	struct xgbe_prv_data *pdata = data;
 
-	if (pdata->isr_as_tasklet)
-		tasklet_schedule(&pdata->tasklet_ecc);
+	if (pdata->isr_as_bh_work)
+		queue_work(system_bh_wq, &pdata->ecc_bh_work);
 	else
-		xgbe_ecc_isr_task((unsigned long)pdata);
+		xgbe_ecc_isr_bh_work(&pdata->ecc_bh_work);
 
 	return IRQ_HANDLED;
 }
 
-static void xgbe_isr_task(unsigned long data)
+static void xgbe_isr_bh_work(struct work_struct *work)
 {
-	struct xgbe_prv_data *pdata = (struct xgbe_prv_data *)data;
+	struct xgbe_prv_data *pdata = from_work(pdata, work, dev_bh_work);
 	struct xgbe_hw_if *hw_if = &pdata->hw_if;
 	struct xgbe_channel *channel;
 	unsigned int dma_isr, dma_ch_isr;
@@ -558,7 +448,7 @@ static void xgbe_isr_task(unsigned long data)
 			if (XGMAC_GET_BITS(mac_tssr, MAC_TSSR, TXTSC)) {
 				/* Read Tx Timestamp to clear interrupt */
 				pdata->tx_tstamp =
-					hw_if->get_tx_tstamp(pdata);
+					xgbe_get_tx_tstamp(pdata);
 				queue_work(pdata->dev_workqueue,
 					   &pdata->tx_tstamp_work);
 			}
@@ -583,7 +473,7 @@ isr_done:
 
 	/* If there is not a separate ECC irq, handle it here */
 	if (pdata->vdata->ecc_support && (pdata->dev_irq == pdata->ecc_irq))
-		xgbe_ecc_isr_task((unsigned long)pdata);
+		xgbe_ecc_isr_bh_work(&pdata->ecc_bh_work);
 
 	/* If there is not a separate I2C irq, handle it here */
 	if (pdata->vdata->i2c_support && (pdata->dev_irq == pdata->i2c_irq))
@@ -605,10 +495,10 @@ static irqreturn_t xgbe_isr(int irq, void *data)
 {
 	struct xgbe_prv_data *pdata = data;
 
-	if (pdata->isr_as_tasklet)
-		tasklet_schedule(&pdata->tasklet_dev);
+	if (pdata->isr_as_bh_work)
+		queue_work(system_bh_wq, &pdata->dev_bh_work);
 	else
-		xgbe_isr_task((unsigned long)pdata);
+		xgbe_isr_bh_work(&pdata->dev_bh_work);
 
 	return IRQ_HANDLED;
 }
@@ -644,7 +534,8 @@ static irqreturn_t xgbe_dma_isr(int irq, void *data)
 
 static void xgbe_tx_timer(struct timer_list *t)
 {
-	struct xgbe_channel *channel = from_timer(channel, t, tx_timer);
+	struct xgbe_channel *channel = timer_container_of(channel, t,
+							  tx_timer);
 	struct xgbe_prv_data *pdata = channel->pdata;
 	struct napi_struct *napi;
 
@@ -682,7 +573,8 @@ static void xgbe_service(struct work_struct *work)
 
 static void xgbe_service_timer(struct timer_list *t)
 {
-	struct xgbe_prv_data *pdata = from_timer(pdata, t, service_timer);
+	struct xgbe_prv_data *pdata = timer_container_of(pdata, t,
+							 service_timer);
 	struct xgbe_channel *channel;
 	unsigned int i;
 
@@ -729,7 +621,7 @@ static void xgbe_stop_timers(struct xgbe_prv_data *pdata)
 	struct xgbe_channel *channel;
 	unsigned int i;
 
-	del_timer_sync(&pdata->service_timer);
+	timer_delete_sync(&pdata->service_timer);
 
 	for (i = 0; i < pdata->channel_count; i++) {
 		channel = pdata->channel[i];
@@ -737,7 +629,7 @@ static void xgbe_stop_timers(struct xgbe_prv_data *pdata)
 			break;
 
 		/* Deactivate the Tx timer */
-		del_timer_sync(&channel->tx_timer);
+		timer_delete_sync(&channel->tx_timer);
 		channel->tx_timer_active = 0;
 	}
 }
@@ -798,6 +690,21 @@ void xgbe_get_all_hw_features(struct xgbe_prv_data *pdata)
 	hw_feat->tx_ch_cnt    = XGMAC_GET_BITS(mac_hfr2, MAC_HWF2R, TXCHCNT);
 	hw_feat->pps_out_num  = XGMAC_GET_BITS(mac_hfr2, MAC_HWF2R, PPSOUTNUM);
 	hw_feat->aux_snap_num = XGMAC_GET_BITS(mac_hfr2, MAC_HWF2R, AUXSNAPNUM);
+
+	/* Sanity check and warn if hardware reports more than supported */
+	if (hw_feat->pps_out_num > XGBE_MAX_PPS_OUT) {
+		dev_warn(pdata->dev,
+			 "Hardware reports %u PPS outputs, limiting to %u\n",
+			 hw_feat->pps_out_num, XGBE_MAX_PPS_OUT);
+		hw_feat->pps_out_num = XGBE_MAX_PPS_OUT;
+	}
+
+	if (hw_feat->aux_snap_num > XGBE_MAX_AUX_SNAP) {
+		dev_warn(pdata->dev,
+			 "Hardware reports %u aux snapshot inputs, limiting to %u\n",
+			 hw_feat->aux_snap_num, XGBE_MAX_AUX_SNAP);
+		hw_feat->aux_snap_num = XGBE_MAX_AUX_SNAP;
+	}
 
 	/* Translate the Hash Table size into actual number */
 	switch (hw_feat->hash_table_size) {
@@ -921,114 +828,40 @@ void xgbe_get_all_hw_features(struct xgbe_prv_data *pdata)
 	}
 }
 
-static void xgbe_disable_vxlan_offloads(struct xgbe_prv_data *pdata)
+static int xgbe_vxlan_set_port(struct net_device *netdev, unsigned int table,
+			       unsigned int entry, struct udp_tunnel_info *ti)
 {
-	struct net_device *netdev = pdata->netdev;
+	struct xgbe_prv_data *pdata = netdev_priv(netdev);
 
-	if (!pdata->vxlan_offloads_set)
-		return;
+	pdata->vxlan_port = be16_to_cpu(ti->port);
+	pdata->hw_if.enable_vxlan(pdata);
 
-	netdev_info(netdev, "disabling VXLAN offloads\n");
-
-	netdev->hw_enc_features &= ~(NETIF_F_SG |
-				     NETIF_F_IP_CSUM |
-				     NETIF_F_IPV6_CSUM |
-				     NETIF_F_RXCSUM |
-				     NETIF_F_TSO |
-				     NETIF_F_TSO6 |
-				     NETIF_F_GRO |
-				     NETIF_F_GSO_UDP_TUNNEL |
-				     NETIF_F_GSO_UDP_TUNNEL_CSUM);
-
-	netdev->features &= ~(NETIF_F_GSO_UDP_TUNNEL |
-			      NETIF_F_GSO_UDP_TUNNEL_CSUM);
-
-	pdata->vxlan_offloads_set = 0;
+	return 0;
 }
 
-static void xgbe_disable_vxlan_hw(struct xgbe_prv_data *pdata)
+static int xgbe_vxlan_unset_port(struct net_device *netdev, unsigned int table,
+				 unsigned int entry, struct udp_tunnel_info *ti)
 {
-	if (!pdata->vxlan_port_set)
-		return;
+	struct xgbe_prv_data *pdata = netdev_priv(netdev);
 
 	pdata->hw_if.disable_vxlan(pdata);
-
-	pdata->vxlan_port_set = 0;
 	pdata->vxlan_port = 0;
+
+	return 0;
 }
 
-static void xgbe_disable_vxlan_accel(struct xgbe_prv_data *pdata)
+static const struct udp_tunnel_nic_info xgbe_udp_tunnels = {
+	.set_port	= xgbe_vxlan_set_port,
+	.unset_port	= xgbe_vxlan_unset_port,
+	.flags		= UDP_TUNNEL_NIC_INFO_OPEN_ONLY,
+	.tables		= {
+		{ .n_entries = 1, .tunnel_types = UDP_TUNNEL_TYPE_VXLAN, },
+	},
+};
+
+const struct udp_tunnel_nic_info *xgbe_get_udp_tunnel_info(void)
 {
-	xgbe_disable_vxlan_offloads(pdata);
-
-	xgbe_disable_vxlan_hw(pdata);
-}
-
-static void xgbe_enable_vxlan_offloads(struct xgbe_prv_data *pdata)
-{
-	struct net_device *netdev = pdata->netdev;
-
-	if (pdata->vxlan_offloads_set)
-		return;
-
-	netdev_info(netdev, "enabling VXLAN offloads\n");
-
-	netdev->hw_enc_features |= NETIF_F_SG |
-				   NETIF_F_IP_CSUM |
-				   NETIF_F_IPV6_CSUM |
-				   NETIF_F_RXCSUM |
-				   NETIF_F_TSO |
-				   NETIF_F_TSO6 |
-				   NETIF_F_GRO |
-				   pdata->vxlan_features;
-
-	netdev->features |= pdata->vxlan_features;
-
-	pdata->vxlan_offloads_set = 1;
-}
-
-static void xgbe_enable_vxlan_hw(struct xgbe_prv_data *pdata)
-{
-	struct xgbe_vxlan_data *vdata;
-
-	if (pdata->vxlan_port_set)
-		return;
-
-	if (list_empty(&pdata->vxlan_ports))
-		return;
-
-	vdata = list_first_entry(&pdata->vxlan_ports,
-				 struct xgbe_vxlan_data, list);
-
-	pdata->vxlan_port_set = 1;
-	pdata->vxlan_port = be16_to_cpu(vdata->port);
-
-	pdata->hw_if.enable_vxlan(pdata);
-}
-
-static void xgbe_enable_vxlan_accel(struct xgbe_prv_data *pdata)
-{
-	/* VXLAN acceleration desired? */
-	if (!pdata->vxlan_features)
-		return;
-
-	/* VXLAN acceleration possible? */
-	if (pdata->vxlan_force_disable)
-		return;
-
-	xgbe_enable_vxlan_hw(pdata);
-
-	xgbe_enable_vxlan_offloads(pdata);
-}
-
-static void xgbe_reset_vxlan_accel(struct xgbe_prv_data *pdata)
-{
-	xgbe_disable_vxlan_hw(pdata);
-
-	if (pdata->vxlan_features)
-		xgbe_enable_vxlan_offloads(pdata);
-
-	pdata->vxlan_force_disable = 0;
+	return &xgbe_udp_tunnels;
 }
 
 static void xgbe_napi_enable(struct xgbe_prv_data *pdata, unsigned int add)
@@ -1041,14 +874,14 @@ static void xgbe_napi_enable(struct xgbe_prv_data *pdata, unsigned int add)
 			channel = pdata->channel[i];
 			if (add)
 				netif_napi_add(pdata->netdev, &channel->napi,
-					       xgbe_one_poll, NAPI_POLL_WEIGHT);
+					       xgbe_one_poll);
 
 			napi_enable(&channel->napi);
 		}
 	} else {
 		if (add)
 			netif_napi_add(pdata->netdev, &pdata->napi,
-				       xgbe_all_poll, NAPI_POLL_WEIGHT);
+				       xgbe_all_poll);
 
 		napi_enable(&pdata->napi);
 	}
@@ -1082,9 +915,8 @@ static int xgbe_request_irqs(struct xgbe_prv_data *pdata)
 	unsigned int i;
 	int ret;
 
-	tasklet_init(&pdata->tasklet_dev, xgbe_isr_task, (unsigned long)pdata);
-	tasklet_init(&pdata->tasklet_ecc, xgbe_ecc_isr_task,
-		     (unsigned long)pdata);
+	INIT_WORK(&pdata->dev_bh_work, xgbe_isr_bh_work);
+	INIT_WORK(&pdata->ecc_bh_work, xgbe_ecc_isr_bh_work);
 
 	ret = devm_request_irq(pdata->dev, pdata->dev_irq, xgbe_isr, 0,
 			       netdev_name(netdev), pdata);
@@ -1154,8 +986,8 @@ static void xgbe_free_irqs(struct xgbe_prv_data *pdata)
 
 	devm_free_irq(pdata->dev, pdata->dev_irq, pdata);
 
-	tasklet_kill(&pdata->tasklet_dev);
-	tasklet_kill(&pdata->tasklet_ecc);
+	cancel_work_sync(&pdata->dev_bh_work);
+	cancel_work_sync(&pdata->ecc_bh_work);
 
 	if (pdata->vdata->ecc_support && (pdata->dev_irq != pdata->ecc_irq))
 		devm_free_irq(pdata->dev, pdata->ecc_irq, pdata);
@@ -1257,7 +1089,6 @@ int xgbe_powerdown(struct net_device *netdev, unsigned int caller)
 {
 	struct xgbe_prv_data *pdata = netdev_priv(netdev);
 	struct xgbe_hw_if *hw_if = &pdata->hw_if;
-	unsigned long flags;
 
 	DBGPR("-->xgbe_powerdown\n");
 
@@ -1267,8 +1098,6 @@ int xgbe_powerdown(struct net_device *netdev, unsigned int caller)
 		DBGPR("<--xgbe_powerdown\n");
 		return -EINVAL;
 	}
-
-	spin_lock_irqsave(&pdata->lock, flags);
 
 	if (caller == XGMAC_DRIVER_CONTEXT)
 		netif_device_detach(netdev);
@@ -1285,8 +1114,6 @@ int xgbe_powerdown(struct net_device *netdev, unsigned int caller)
 
 	pdata->power_down = 1;
 
-	spin_unlock_irqrestore(&pdata->lock, flags);
-
 	DBGPR("<--xgbe_powerdown\n");
 
 	return 0;
@@ -1296,7 +1123,6 @@ int xgbe_powerup(struct net_device *netdev, unsigned int caller)
 {
 	struct xgbe_prv_data *pdata = netdev_priv(netdev);
 	struct xgbe_hw_if *hw_if = &pdata->hw_if;
-	unsigned long flags;
 
 	DBGPR("-->xgbe_powerup\n");
 
@@ -1306,8 +1132,6 @@ int xgbe_powerup(struct net_device *netdev, unsigned int caller)
 		DBGPR("<--xgbe_powerup\n");
 		return -EINVAL;
 	}
-
-	spin_lock_irqsave(&pdata->lock, flags);
 
 	pdata->power_down = 0;
 
@@ -1322,8 +1146,6 @@ int xgbe_powerup(struct net_device *netdev, unsigned int caller)
 	netif_tx_start_all_queues(netdev);
 
 	xgbe_start_timers(pdata);
-
-	spin_unlock_irqrestore(&pdata->lock, flags);
 
 	DBGPR("<--xgbe_powerup\n");
 
@@ -1424,8 +1246,12 @@ static int xgbe_start(struct xgbe_prv_data *pdata)
 
 	hw_if->enable_tx(pdata);
 	hw_if->enable_rx(pdata);
+	/* Synchronize flag with hardware state after enabling TX/RX.
+	 * This prevents stale state after device restart cycles.
+	 */
+	pdata->data_path_stopped = false;
 
-	udp_tunnel_get_rx_info(netdev);
+	udp_tunnel_nic_reset_ntf(netdev);
 
 	netif_tx_start_all_queues(netdev);
 
@@ -1467,7 +1293,7 @@ static void xgbe_stop(struct xgbe_prv_data *pdata)
 	xgbe_stop_timers(pdata);
 	flush_workqueue(pdata->dev_workqueue);
 
-	xgbe_reset_vxlan_accel(pdata);
+	xgbe_vxlan_unset_port(netdev, 0, 0, NULL);
 
 	hw_if->disable_tx(pdata);
 	hw_if->disable_rx(pdata);
@@ -1553,202 +1379,6 @@ static void xgbe_restart(struct work_struct *work)
 	rtnl_unlock();
 }
 
-static void xgbe_tx_tstamp(struct work_struct *work)
-{
-	struct xgbe_prv_data *pdata = container_of(work,
-						   struct xgbe_prv_data,
-						   tx_tstamp_work);
-	struct skb_shared_hwtstamps hwtstamps;
-	u64 nsec;
-	unsigned long flags;
-
-	spin_lock_irqsave(&pdata->tstamp_lock, flags);
-	if (!pdata->tx_tstamp_skb)
-		goto unlock;
-
-	if (pdata->tx_tstamp) {
-		nsec = timecounter_cyc2time(&pdata->tstamp_tc,
-					    pdata->tx_tstamp);
-
-		memset(&hwtstamps, 0, sizeof(hwtstamps));
-		hwtstamps.hwtstamp = ns_to_ktime(nsec);
-		skb_tstamp_tx(pdata->tx_tstamp_skb, &hwtstamps);
-	}
-
-	dev_kfree_skb_any(pdata->tx_tstamp_skb);
-
-	pdata->tx_tstamp_skb = NULL;
-
-unlock:
-	spin_unlock_irqrestore(&pdata->tstamp_lock, flags);
-}
-
-static int xgbe_get_hwtstamp_settings(struct xgbe_prv_data *pdata,
-				      struct ifreq *ifreq)
-{
-	if (copy_to_user(ifreq->ifr_data, &pdata->tstamp_config,
-			 sizeof(pdata->tstamp_config)))
-		return -EFAULT;
-
-	return 0;
-}
-
-static int xgbe_set_hwtstamp_settings(struct xgbe_prv_data *pdata,
-				      struct ifreq *ifreq)
-{
-	struct hwtstamp_config config;
-	unsigned int mac_tscr;
-
-	if (copy_from_user(&config, ifreq->ifr_data, sizeof(config)))
-		return -EFAULT;
-
-	if (config.flags)
-		return -EINVAL;
-
-	mac_tscr = 0;
-
-	switch (config.tx_type) {
-	case HWTSTAMP_TX_OFF:
-		break;
-
-	case HWTSTAMP_TX_ON:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	default:
-		return -ERANGE;
-	}
-
-	switch (config.rx_filter) {
-	case HWTSTAMP_FILTER_NONE:
-		break;
-
-	case HWTSTAMP_FILTER_NTP_ALL:
-	case HWTSTAMP_FILTER_ALL:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENALL, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* PTP v2, UDP, any kind of event packet */
-	case HWTSTAMP_FILTER_PTP_V2_L4_EVENT:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSVER2ENA, 1);
-	/* PTP v1, UDP, any kind of event packet */
-	case HWTSTAMP_FILTER_PTP_V1_L4_EVENT:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV4ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV6ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, SNAPTYPSEL, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* PTP v2, UDP, Sync packet */
-	case HWTSTAMP_FILTER_PTP_V2_L4_SYNC:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSVER2ENA, 1);
-	/* PTP v1, UDP, Sync packet */
-	case HWTSTAMP_FILTER_PTP_V1_L4_SYNC:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV4ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV6ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSEVNTENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* PTP v2, UDP, Delay_req packet */
-	case HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSVER2ENA, 1);
-	/* PTP v1, UDP, Delay_req packet */
-	case HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV4ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV6ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSEVNTENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSMSTRENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* 802.AS1, Ethernet, any kind of event packet */
-	case HWTSTAMP_FILTER_PTP_V2_L2_EVENT:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, AV8021ASMEN, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, SNAPTYPSEL, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* 802.AS1, Ethernet, Sync packet */
-	case HWTSTAMP_FILTER_PTP_V2_L2_SYNC:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, AV8021ASMEN, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSEVNTENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* 802.AS1, Ethernet, Delay_req packet */
-	case HWTSTAMP_FILTER_PTP_V2_L2_DELAY_REQ:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, AV8021ASMEN, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSMSTRENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSEVNTENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* PTP v2/802.AS1, any layer, any kind of event packet */
-	case HWTSTAMP_FILTER_PTP_V2_EVENT:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSVER2ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV4ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV6ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, SNAPTYPSEL, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* PTP v2/802.AS1, any layer, Sync packet */
-	case HWTSTAMP_FILTER_PTP_V2_SYNC:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSVER2ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV4ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV6ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSEVNTENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	/* PTP v2/802.AS1, any layer, Delay_req packet */
-	case HWTSTAMP_FILTER_PTP_V2_DELAY_REQ:
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSVER2ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV4ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPV6ENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSMSTRENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSEVNTENA, 1);
-		XGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
-		break;
-
-	default:
-		return -ERANGE;
-	}
-
-	pdata->hw_if.config_tstamp(pdata, mac_tscr);
-
-	memcpy(&pdata->tstamp_config, &config, sizeof(config));
-
-	return 0;
-}
-
-static void xgbe_prep_tx_tstamp(struct xgbe_prv_data *pdata,
-				struct sk_buff *skb,
-				struct xgbe_packet_data *packet)
-{
-	unsigned long flags;
-
-	if (XGMAC_GET_BITS(packet->attributes, TX_PACKET_ATTRIBUTES, PTP)) {
-		spin_lock_irqsave(&pdata->tstamp_lock, flags);
-		if (pdata->tx_tstamp_skb) {
-			/* Another timestamp in progress, ignore this one */
-			XGMAC_SET_BITS(packet->attributes,
-				       TX_PACKET_ATTRIBUTES, PTP, 0);
-		} else {
-			pdata->tx_tstamp_skb = skb_get(skb);
-			skb_shinfo(skb)->tx_flags |= SKBTX_IN_PROGRESS;
-		}
-		spin_unlock_irqrestore(&pdata->tstamp_lock, flags);
-	}
-
-	skb_tx_timestamp(skb);
-}
-
 static void xgbe_prep_vlan(struct sk_buff *skb, struct xgbe_packet_data *packet)
 {
 	if (skb_vlan_tag_present(skb))
@@ -1768,12 +1398,10 @@ static int xgbe_prep_tso(struct sk_buff *skb, struct xgbe_packet_data *packet)
 		return ret;
 
 	if (XGMAC_GET_BITS(packet->attributes, TX_PACKET_ATTRIBUTES, VXLAN)) {
-		packet->header_len = skb_inner_transport_offset(skb) +
-				     inner_tcp_hdrlen(skb);
+		packet->header_len = skb_inner_tcp_all_headers(skb);
 		packet->tcp_header_len = inner_tcp_hdrlen(skb);
 	} else {
-		packet->header_len = skb_transport_offset(skb) +
-				     tcp_hdrlen(skb);
+		packet->header_len = skb_tcp_all_headers(skb);
 		packet->tcp_header_len = tcp_hdrlen(skb);
 	}
 	packet->tcp_payload_len = skb->len - packet->header_len;
@@ -1793,13 +1421,8 @@ static int xgbe_prep_tso(struct sk_buff *skb, struct xgbe_packet_data *packet)
 	return 0;
 }
 
-static bool xgbe_is_vxlan(struct xgbe_prv_data *pdata, struct sk_buff *skb)
+static bool xgbe_is_vxlan(struct sk_buff *skb)
 {
-	struct xgbe_vxlan_data *vdata;
-
-	if (pdata->vxlan_force_disable)
-		return false;
-
 	if (!skb->encapsulation)
 		return false;
 
@@ -1821,19 +1444,13 @@ static bool xgbe_is_vxlan(struct xgbe_prv_data *pdata, struct sk_buff *skb)
 		return false;
 	}
 
-	/* See if we have the UDP port in our list */
-	list_for_each_entry(vdata, &pdata->vxlan_ports, list) {
-		if ((skb->protocol == htons(ETH_P_IP)) &&
-		    (vdata->sa_family == AF_INET) &&
-		    (vdata->port == udp_hdr(skb)->dest))
-			return true;
-		else if ((skb->protocol == htons(ETH_P_IPV6)) &&
-			 (vdata->sa_family == AF_INET6) &&
-			 (vdata->port == udp_hdr(skb)->dest))
-			return true;
-	}
+	if (skb->inner_protocol_type != ENCAP_TYPE_ETHER ||
+	    skb->inner_protocol != htons(ETH_P_TEB) ||
+	    (skb_inner_mac_header(skb) - skb_transport_header(skb) !=
+	     sizeof(struct udphdr) + sizeof(struct vxlanhdr)))
+		return false;
 
-	return false;
+	return true;
 }
 
 static int xgbe_is_tso(struct sk_buff *skb)
@@ -1853,7 +1470,7 @@ static void xgbe_packet_info(struct xgbe_prv_data *pdata,
 			     struct xgbe_ring *ring, struct sk_buff *skb,
 			     struct xgbe_packet_data *packet)
 {
-	struct skb_frag_struct *frag;
+	skb_frag_t *frag;
 	unsigned int context_desc;
 	unsigned int len;
 	unsigned int i;
@@ -1884,7 +1501,7 @@ static void xgbe_packet_info(struct xgbe_prv_data *pdata,
 		XGMAC_SET_BITS(packet->attributes, TX_PACKET_ATTRIBUTES,
 			       CSUM_ENABLE, 1);
 
-	if (xgbe_is_vxlan(pdata, skb))
+	if (xgbe_is_vxlan(skb))
 		XGMAC_SET_BITS(packet->attributes, TX_PACKET_ATTRIBUTES,
 			       VXLAN, 1);
 
@@ -1974,6 +1591,9 @@ static int xgbe_open(struct net_device *netdev)
 	INIT_WORK(&pdata->stopdev_work, xgbe_stopdev);
 	INIT_WORK(&pdata->tx_tstamp_work, xgbe_tx_tstamp);
 
+	/* Initialize PTP timestamping and clock. */
+	xgbe_init_ptp(pdata);
+
 	ret = xgbe_alloc_memory(pdata);
 	if (ret)
 		goto err_ptpclk;
@@ -2017,10 +1637,8 @@ static int xgbe_close(struct net_device *netdev)
 	clk_disable_unprepare(pdata->ptpclk);
 	clk_disable_unprepare(pdata->sysclk);
 
-	flush_workqueue(pdata->an_workqueue);
 	destroy_workqueue(pdata->an_workqueue);
 
-	flush_workqueue(pdata->dev_workqueue);
 	destroy_workqueue(pdata->dev_workqueue);
 
 	set_bit(XGBE_DOWN, &pdata->dev_state);
@@ -2121,7 +1739,7 @@ static int xgbe_set_mac_address(struct net_device *netdev, void *addr)
 	if (!is_valid_ether_addr(saddr->sa_data))
 		return -EADDRNOTAVAIL;
 
-	memcpy(netdev->dev_addr, saddr->sa_data, netdev->addr_len);
+	eth_hw_addr_set(netdev, saddr->sa_data);
 
 	hw_if->set_mac_address(pdata, netdev->dev_addr);
 
@@ -2163,7 +1781,7 @@ static int xgbe_change_mtu(struct net_device *netdev, int mtu)
 		return ret;
 
 	pdata->rx_buf_size = ret;
-	netdev->mtu = mtu;
+	WRITE_ONCE(netdev->mtu, mtu);
 
 	xgbe_restart_dev(pdata);
 
@@ -2172,7 +1790,7 @@ static int xgbe_change_mtu(struct net_device *netdev, int mtu)
 	return 0;
 }
 
-static void xgbe_tx_timeout(struct net_device *netdev)
+static void xgbe_tx_timeout(struct net_device *netdev, unsigned int txqueue)
 {
 	struct xgbe_prv_data *pdata = netdev_priv(netdev);
 
@@ -2199,7 +1817,7 @@ static void xgbe_get_stats64(struct net_device *netdev,
 	s->multicast = pstats->rxmulticastframes_g;
 	s->rx_length_errors = pstats->rxlengtherror;
 	s->rx_crc_errors = pstats->rxcrcerror;
-	s->rx_fifo_errors = pstats->rxfifooverflow;
+	s->rx_over_errors = pstats->rxfifooverflow;
 
 	s->tx_packets = pstats->txframecount_gb;
 	s->tx_bytes = pstats->txoctetcount_gb;
@@ -2291,23 +1909,12 @@ static netdev_features_t xgbe_fix_features(struct net_device *netdev,
 					   netdev_features_t features)
 {
 	struct xgbe_prv_data *pdata = netdev_priv(netdev);
-	netdev_features_t vxlan_base, vxlan_mask;
+	netdev_features_t vxlan_base;
 
 	vxlan_base = NETIF_F_GSO_UDP_TUNNEL | NETIF_F_RX_UDP_TUNNEL_PORT;
-	vxlan_mask = vxlan_base | NETIF_F_GSO_UDP_TUNNEL_CSUM;
 
-	pdata->vxlan_features = features & vxlan_mask;
-
-	/* Only fix VXLAN-related features */
-	if (!pdata->vxlan_features)
-		return features;
-
-	/* If VXLAN isn't supported then clear any features:
-	 *   This is needed because NETIF_F_RX_UDP_TUNNEL_PORT gets
-	 *   automatically set if ndo_udp_tunnel_add is set.
-	 */
 	if (!pdata->hw_feat.vxn)
-		return features & ~vxlan_mask;
+		return features;
 
 	/* VXLAN CSUM requires VXLAN base */
 	if ((features & NETIF_F_GSO_UDP_TUNNEL_CSUM) &&
@@ -2338,15 +1945,6 @@ static netdev_features_t xgbe_fix_features(struct net_device *netdev,
 		}
 	}
 
-	pdata->vxlan_features = features & vxlan_mask;
-
-	/* Adjust UDP Tunnel based on current state */
-	if (pdata->vxlan_force_disable) {
-		netdev_notice(netdev,
-			      "VXLAN acceleration disabled, turning off udp tunnel features\n");
-		features &= ~vxlan_mask;
-	}
-
 	return features;
 }
 
@@ -2356,14 +1954,12 @@ static int xgbe_set_features(struct net_device *netdev,
 	struct xgbe_prv_data *pdata = netdev_priv(netdev);
 	struct xgbe_hw_if *hw_if = &pdata->hw_if;
 	netdev_features_t rxhash, rxcsum, rxvlan, rxvlan_filter;
-	netdev_features_t udp_tunnel;
 	int ret = 0;
 
 	rxhash = pdata->netdev_features & NETIF_F_RXHASH;
 	rxcsum = pdata->netdev_features & NETIF_F_RXCSUM;
 	rxvlan = pdata->netdev_features & NETIF_F_HW_VLAN_CTAG_RX;
 	rxvlan_filter = pdata->netdev_features & NETIF_F_HW_VLAN_CTAG_FILTER;
-	udp_tunnel = pdata->netdev_features & NETIF_F_GSO_UDP_TUNNEL;
 
 	if ((features & NETIF_F_RXHASH) && !rxhash)
 		ret = hw_if->enable_rss(pdata);
@@ -2394,111 +1990,11 @@ static int xgbe_set_features(struct net_device *netdev,
 	else if (!(features & NETIF_F_HW_VLAN_CTAG_FILTER) && rxvlan_filter)
 		hw_if->disable_rx_vlan_filtering(pdata);
 
-	if ((features & NETIF_F_GSO_UDP_TUNNEL) && !udp_tunnel)
-		xgbe_enable_vxlan_accel(pdata);
-	else if (!(features & NETIF_F_GSO_UDP_TUNNEL) && udp_tunnel)
-		xgbe_disable_vxlan_accel(pdata);
-
 	pdata->netdev_features = features;
 
 	DBGPR("<--xgbe_set_features\n");
 
 	return 0;
-}
-
-static void xgbe_udp_tunnel_add(struct net_device *netdev,
-				struct udp_tunnel_info *ti)
-{
-	struct xgbe_prv_data *pdata = netdev_priv(netdev);
-	struct xgbe_vxlan_data *vdata;
-
-	if (!pdata->hw_feat.vxn)
-		return;
-
-	if (ti->type != UDP_TUNNEL_TYPE_VXLAN)
-		return;
-
-	pdata->vxlan_port_count++;
-
-	netif_dbg(pdata, drv, netdev,
-		  "adding VXLAN tunnel, family=%hx/port=%hx\n",
-		  ti->sa_family, be16_to_cpu(ti->port));
-
-	if (pdata->vxlan_force_disable)
-		return;
-
-	vdata = kzalloc(sizeof(*vdata), GFP_ATOMIC);
-	if (!vdata) {
-		/* Can no longer properly track VXLAN ports */
-		pdata->vxlan_force_disable = 1;
-		netif_dbg(pdata, drv, netdev,
-			  "internal error, disabling VXLAN accelerations\n");
-
-		xgbe_disable_vxlan_accel(pdata);
-
-		return;
-	}
-	vdata->sa_family = ti->sa_family;
-	vdata->port = ti->port;
-
-	list_add_tail(&vdata->list, &pdata->vxlan_ports);
-
-	/* First port added? */
-	if (pdata->vxlan_port_count == 1) {
-		xgbe_enable_vxlan_accel(pdata);
-
-		return;
-	}
-}
-
-static void xgbe_udp_tunnel_del(struct net_device *netdev,
-				struct udp_tunnel_info *ti)
-{
-	struct xgbe_prv_data *pdata = netdev_priv(netdev);
-	struct xgbe_vxlan_data *vdata;
-
-	if (!pdata->hw_feat.vxn)
-		return;
-
-	if (ti->type != UDP_TUNNEL_TYPE_VXLAN)
-		return;
-
-	netif_dbg(pdata, drv, netdev,
-		  "deleting VXLAN tunnel, family=%hx/port=%hx\n",
-		  ti->sa_family, be16_to_cpu(ti->port));
-
-	/* Don't need safe version since loop terminates with deletion */
-	list_for_each_entry(vdata, &pdata->vxlan_ports, list) {
-		if (vdata->sa_family != ti->sa_family)
-			continue;
-
-		if (vdata->port != ti->port)
-			continue;
-
-		list_del(&vdata->list);
-		kfree(vdata);
-
-		break;
-	}
-
-	pdata->vxlan_port_count--;
-	if (!pdata->vxlan_port_count) {
-		xgbe_reset_vxlan_accel(pdata);
-
-		return;
-	}
-
-	if (pdata->vxlan_force_disable)
-		return;
-
-	/* See if VXLAN tunnel id needs to be changed */
-	vdata = list_first_entry(&pdata->vxlan_ports,
-				 struct xgbe_vxlan_data, list);
-	if (pdata->vxlan_port == be16_to_cpu(vdata->port))
-		return;
-
-	pdata->vxlan_port = be16_to_cpu(vdata->port);
-	pdata->hw_if.set_vxlan_id(pdata);
 }
 
 static netdev_features_t xgbe_features_check(struct sk_buff *skb,
@@ -2518,7 +2014,7 @@ static const struct net_device_ops xgbe_netdev_ops = {
 	.ndo_set_rx_mode	= xgbe_set_rx_mode,
 	.ndo_set_mac_address	= xgbe_set_mac_address,
 	.ndo_validate_addr	= eth_validate_addr,
-	.ndo_do_ioctl		= xgbe_ioctl,
+	.ndo_eth_ioctl		= xgbe_ioctl,
 	.ndo_change_mtu		= xgbe_change_mtu,
 	.ndo_tx_timeout		= xgbe_tx_timeout,
 	.ndo_get_stats64	= xgbe_get_stats64,
@@ -2530,8 +2026,6 @@ static const struct net_device_ops xgbe_netdev_ops = {
 	.ndo_setup_tc		= xgbe_setup_tc,
 	.ndo_fix_features	= xgbe_fix_features,
 	.ndo_set_features	= xgbe_set_features,
-	.ndo_udp_tunnel_add	= xgbe_udp_tunnel_add,
-	.ndo_udp_tunnel_del	= xgbe_udp_tunnel_del,
 	.ndo_features_check	= xgbe_features_check,
 };
 
@@ -2777,9 +2271,6 @@ read_again:
 			goto read_again;
 
 		if (error || packet->errors) {
-			if (packet->errors)
-				netif_err(pdata, rx_err, netdev,
-					  "error in received packet\n");
 			dev_kfree_skb(skb);
 			goto next_packet;
 		}
@@ -2870,12 +2361,8 @@ skip_data:
 
 		if (XGMAC_GET_BITS(packet->attributes,
 				   RX_PACKET_ATTRIBUTES, RX_TSTAMP)) {
-			u64 nsec;
-
-			nsec = timecounter_cyc2time(&pdata->tstamp_tc,
-						    packet->rx_tstamp);
 			hwtstamps = skb_hwtstamps(skb);
-			hwtstamps->hwtstamp = ns_to_ktime(nsec);
+			hwtstamps->hwtstamp = ns_to_ktime(packet->rx_tstamp);
 		}
 
 		if (XGMAC_GET_BITS(packet->attributes,
@@ -3023,7 +2510,7 @@ void xgbe_print_pkt(struct net_device *netdev, struct sk_buff *skb, bool tx_rx)
 
 	netdev_dbg(netdev, "Dst MAC addr: %pM\n", eth->h_dest);
 	netdev_dbg(netdev, "Src MAC addr: %pM\n", eth->h_source);
-	netdev_dbg(netdev, "Protocol: %#06hx\n", ntohs(eth->h_proto));
+	netdev_dbg(netdev, "Protocol: %#06x\n", ntohs(eth->h_proto));
 
 	for (i = 0; i < skb->len; i += 32) {
 		unsigned int len = min(skb->len - i, 32U);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*******************************************************************************
  * This file contains iSCSI Target Portal Group related functions.
  *
@@ -5,15 +6,6 @@
  *
  * Author: Nicholas A. Bellinger <nab@linux-iscsi.org>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  ******************************************************************************/
 
 #include <linux/slab.h>
@@ -208,18 +200,12 @@ static void iscsit_clear_tpg_np_login_threads(
 	spin_unlock(&tpg->tpg_np_lock);
 }
 
-void iscsit_tpg_dump_params(struct iscsi_portal_group *tpg)
-{
-	iscsi_print_params(tpg->param_list);
-}
-
 static void iscsit_set_default_tpg_attribs(struct iscsi_portal_group *tpg)
 {
 	struct iscsi_tpg_attrib *a = &tpg->tpg_attrib;
 
 	a->authentication = TA_AUTHENTICATION;
 	a->login_timeout = TA_LOGIN_TIMEOUT;
-	a->netif_timeout = TA_NETIF_TIMEOUT;
 	a->default_cmdsn_depth = TA_DEFAULT_CMDSN_DEPTH;
 	a->generate_node_acls = TA_GENERATE_NODE_ACLS;
 	a->cache_dynamic_acls = TA_CACHE_DYNAMIC_ACLS;
@@ -398,12 +384,11 @@ int iscsit_tpg_disable_portal_group(struct iscsi_portal_group *tpg, int force)
 }
 
 struct iscsi_node_attrib *iscsit_tpg_get_node_attrib(
-	struct iscsi_session *sess)
+	struct iscsit_session *sess)
 {
 	struct se_session *se_sess = sess->se_sess;
 	struct se_node_acl *se_nacl = se_sess->se_node_acl;
-	struct iscsi_node_acl *acl = container_of(se_nacl, struct iscsi_node_acl,
-					se_node_acl);
+	struct iscsi_node_acl *acl = to_iscsi_nacl(se_nacl);
 
 	return &acl->node_attrib;
 }
@@ -671,31 +656,6 @@ int iscsit_ta_login_timeout(
 	a->login_timeout = login_timeout;
 	pr_debug("Set Logout Timeout to %u for Target Portal Group"
 		" %hu\n", a->login_timeout, tpg->tpgt);
-
-	return 0;
-}
-
-int iscsit_ta_netif_timeout(
-	struct iscsi_portal_group *tpg,
-	u32 netif_timeout)
-{
-	struct iscsi_tpg_attrib *a = &tpg->tpg_attrib;
-
-	if (netif_timeout > TA_NETIF_TIMEOUT_MAX) {
-		pr_err("Requested Network Interface Timeout %u larger"
-			" than maximum %u\n", netif_timeout,
-				TA_NETIF_TIMEOUT_MAX);
-		return -EINVAL;
-	} else if (netif_timeout < TA_NETIF_TIMEOUT_MIN) {
-		pr_err("Requested Network Interface Timeout %u smaller"
-			" than minimum %u\n", netif_timeout,
-				TA_NETIF_TIMEOUT_MIN);
-		return -EINVAL;
-	}
-
-	a->netif_timeout = netif_timeout;
-	pr_debug("Set Network Interface Timeout to %u for"
-		" Target Portal Group %hu\n", a->netif_timeout, tpg->tpgt);
 
 	return 0;
 }

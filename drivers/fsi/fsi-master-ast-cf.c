@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0+
 // Copyright 2018 IBM Corp
 /*
- * A FSI master controller, using a simple GPIO bit-banging interface
+ * A FSI master based on Aspeed ColdFire coprocessor
  */
 
 #include <linux/crc4.h>
@@ -13,13 +13,13 @@
 #include <linux/irqflags.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/regmap.h>
 #include <linux/firmware.h>
 #include <linux/gpio/aspeed.h>
 #include <linux/mfd/syscon.h>
-#include <linux/of_address.h>
 #include <linux/genalloc.h>
 
 #include "fsi-master.h"
@@ -838,7 +838,7 @@ static int load_copro_firmware(struct fsi_master_acf *master)
 	rc = request_firmware(&fw, FW_FILE_NAME, master->dev);
 	if (rc) {
 		dev_err(
-			master->dev, "Error %d to load firwmare '%s' !\n",
+			master->dev, "Error %d to load firmware '%s' !\n",
 			rc, FW_FILE_NAME);
 		return rc;
 	}
@@ -1039,7 +1039,8 @@ static void fsi_master_acf_setup_external(struct fsi_master_acf *master)
 	gpiod_direction_input(master->gpio_data);
 }
 
-static int fsi_master_acf_link_enable(struct fsi_master *_master, int link)
+static int fsi_master_acf_link_enable(struct fsi_master *_master, int link,
+				      bool enable)
 {
 	struct fsi_master_acf *master = to_fsi_master_acf(_master);
 	int rc = -EBUSY;
@@ -1049,7 +1050,7 @@ static int fsi_master_acf_link_enable(struct fsi_master *_master, int link)
 
 	mutex_lock(&master->lock);
 	if (!master->external_mode) {
-		gpiod_set_value(master->gpio_enable, 1);
+		gpiod_set_value(master->gpio_enable, enable ? 1 : 0);
 		rc = 0;
 	}
 	mutex_unlock(&master->lock);
@@ -1132,7 +1133,7 @@ static int fsi_master_acf_gpio_request(void *data)
 
 	/* Note: This doesn't require holding out mutex */
 
-	/* Write reqest */
+	/* Write request */
 	iowrite8(ARB_ARM_REQ, master->sram + ARB_REG);
 
 	/*
@@ -1189,7 +1190,7 @@ static int fsi_master_acf_gpio_release(void *data)
 
 static void fsi_master_acf_release(struct device *dev)
 {
-	struct fsi_master_acf *master = to_fsi_master_acf(dev_to_fsi_master(dev));
+	struct fsi_master_acf *master = to_fsi_master_acf(to_fsi_master(dev));
 
 	/* Cleanup, stop coprocessor */
 	mutex_lock(&master->lock);
@@ -1284,14 +1285,7 @@ static int fsi_master_acf_probe(struct platform_device *pdev)
 	master->gpio_mux = gpio;
 
 	/* Grab the reserved memory region (use DMA API instead ?) */
-	np = of_parse_phandle(mnode, "memory-region", 0);
-	if (!np) {
-		dev_err(&pdev->dev, "Didn't find reserved memory\n");
-		rc = -EINVAL;
-		goto err_free;
-	}
-	rc = of_address_to_resource(np, 0, &res);
-	of_node_put(np);
+	rc = of_reserved_mem_region_to_resource(mnode, 0, &res);
 	if (rc) {
 		dev_err(&pdev->dev, "Couldn't address to resource for reserved memory\n");
 		rc = -ENOMEM;
@@ -1308,7 +1302,6 @@ static int fsi_master_acf_probe(struct platform_device *pdev)
 	master->cf_mem = devm_ioremap_resource(&pdev->dev, &res);
  	if (IS_ERR(master->cf_mem)) {
 		rc = PTR_ERR(master->cf_mem);
-		dev_err(&pdev->dev, "Error %d mapping coldfire memory\n", rc);
  		goto err_free;
 	}
 	dev_dbg(&pdev->dev, "DRAM allocation @%x\n", master->cf_mem_addr);
@@ -1324,12 +1317,14 @@ static int fsi_master_acf_probe(struct platform_device *pdev)
 		}
 		master->cvic = devm_of_iomap(&pdev->dev, np, 0, NULL);
 		if (IS_ERR(master->cvic)) {
+			of_node_put(np);
 			rc = PTR_ERR(master->cvic);
 			dev_err(&pdev->dev, "Error %d mapping CVIC\n", rc);
 			goto err_free;
 		}
 		rc = of_property_read_u32(np, "copro-sw-interrupts",
 					  &master->cvic_sw_irq);
+		of_node_put(np);
 		if (rc) {
 			dev_err(&pdev->dev, "Can't find coprocessor SW interrupt\n");
 			goto err_free;
@@ -1410,15 +1405,13 @@ static int fsi_master_acf_probe(struct platform_device *pdev)
 }
 
 
-static int fsi_master_acf_remove(struct platform_device *pdev)
+static void fsi_master_acf_remove(struct platform_device *pdev)
 {
 	struct fsi_master_acf *master = platform_get_drvdata(pdev);
 
 	device_remove_file(master->dev, &dev_attr_external_mode);
 
 	fsi_master_unregister(&master->master);
-
-	return 0;
 }
 
 static const struct of_device_id fsi_master_acf_match[] = {
@@ -1426,6 +1419,7 @@ static const struct of_device_id fsi_master_acf_match[] = {
 	{ .compatible = "aspeed,ast2500-cf-fsi-master" },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, fsi_master_acf_match);
 
 static struct platform_driver fsi_master_acf = {
 	.driver = {
@@ -1437,5 +1431,6 @@ static struct platform_driver fsi_master_acf = {
 };
 
 module_platform_driver(fsi_master_acf);
+MODULE_DESCRIPTION("A FSI master based on Aspeed ColdFire coprocessor");
 MODULE_LICENSE("GPL");
 MODULE_FIRMWARE(FW_FILE_NAME);

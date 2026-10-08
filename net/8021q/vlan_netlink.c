@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *	VLAN netlink control interface
  *
  * 	Copyright (c) 2007 Patrick McHardy <kaber@trash.net>
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	version 2 as published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
@@ -35,8 +32,8 @@ static inline int vlan_validate_qos_map(struct nlattr *attr)
 {
 	if (!attr)
 		return 0;
-	return nla_validate_nested(attr, IFLA_VLAN_QOS_MAX, vlan_map_policy,
-				   NULL);
+	return nla_validate_nested_deprecated(attr, IFLA_VLAN_QOS_MAX,
+					      vlan_map_policy, NULL);
 }
 
 static int vlan_validate(struct nlattr *tb[], struct nlattr *data[],
@@ -84,7 +81,8 @@ static int vlan_validate(struct nlattr *tb[], struct nlattr *data[],
 		flags = nla_data(data[IFLA_VLAN_FLAGS]);
 		if ((flags->flags & flags->mask) &
 		    ~(VLAN_FLAG_REORDER_HDR | VLAN_FLAG_GVRP |
-		      VLAN_FLAG_LOOSE_BINDING | VLAN_FLAG_MVRP)) {
+		      VLAN_FLAG_LOOSE_BINDING | VLAN_FLAG_MVRP |
+		      VLAN_FLAG_BRIDGE_BINDING)) {
 			NL_SET_ERR_MSG_MOD(extack, "Invalid VLAN flags");
 			return -EINVAL;
 		}
@@ -119,17 +117,15 @@ static int vlan_changelink(struct net_device *dev, struct nlattr *tb[],
 			return err;
 	}
 	if (data[IFLA_VLAN_INGRESS_QOS]) {
-		nla_for_each_nested(attr, data[IFLA_VLAN_INGRESS_QOS], rem) {
-			if (nla_type(attr) != IFLA_VLAN_QOS_MAPPING)
-				continue;
+		nla_for_each_nested_type(attr, IFLA_VLAN_QOS_MAPPING,
+					 data[IFLA_VLAN_INGRESS_QOS], rem) {
 			m = nla_data(attr);
 			vlan_dev_set_ingress_priority(dev, m->to, m->from);
 		}
 	}
 	if (data[IFLA_VLAN_EGRESS_QOS]) {
-		nla_for_each_nested(attr, data[IFLA_VLAN_EGRESS_QOS], rem) {
-			if (nla_type(attr) != IFLA_VLAN_QOS_MAPPING)
-				continue;
+		nla_for_each_nested_type(attr, IFLA_VLAN_QOS_MAPPING,
+					 data[IFLA_VLAN_EGRESS_QOS], rem) {
 			m = nla_data(attr);
 			err = vlan_dev_set_egress_priority(dev, m->from, m->to);
 			if (err)
@@ -139,11 +135,14 @@ static int vlan_changelink(struct net_device *dev, struct nlattr *tb[],
 	return 0;
 }
 
-static int vlan_newlink(struct net *src_net, struct net_device *dev,
-			struct nlattr *tb[], struct nlattr *data[],
+static int vlan_newlink(struct net_device *dev,
+			struct rtnl_newlink_params *params,
 			struct netlink_ext_ack *extack)
 {
+	struct net *link_net = rtnl_newlink_link_net(params);
 	struct vlan_dev_priv *vlan = vlan_dev_priv(dev);
+	struct nlattr **data = params->data;
+	struct nlattr **tb = params->tb;
 	struct net_device *real_dev;
 	unsigned int max_mtu;
 	__be16 proto;
@@ -159,16 +158,14 @@ static int vlan_newlink(struct net *src_net, struct net_device *dev,
 		return -EINVAL;
 	}
 
-	real_dev = __dev_get_by_index(src_net, nla_get_u32(tb[IFLA_LINK]));
+	real_dev = __dev_get_by_index(link_net, nla_get_u32(tb[IFLA_LINK]));
 	if (!real_dev) {
 		NL_SET_ERR_MSG_MOD(extack, "link does not exist");
 		return -ENODEV;
 	}
 
-	if (data[IFLA_VLAN_PROTOCOL])
-		proto = nla_get_be16(data[IFLA_VLAN_PROTOCOL]);
-	else
-		proto = htons(ETH_P_8021Q);
+	proto = nla_get_be16_default(data[IFLA_VLAN_PROTOCOL],
+				     htons(ETH_P_8021Q));
 
 	vlan->vlan_proto = proto;
 	vlan->vlan_id	 = nla_get_u16(data[IFLA_VLAN_ID]);
@@ -240,7 +237,7 @@ static int vlan_fill_info(struct sk_buff *skb, const struct net_device *dev)
 			goto nla_put_failure;
 	}
 	if (vlan->nr_ingress_mappings) {
-		nest = nla_nest_start(skb, IFLA_VLAN_INGRESS_QOS);
+		nest = nla_nest_start_noflag(skb, IFLA_VLAN_INGRESS_QOS);
 		if (nest == NULL)
 			goto nla_put_failure;
 
@@ -258,7 +255,7 @@ static int vlan_fill_info(struct sk_buff *skb, const struct net_device *dev)
 	}
 
 	if (vlan->nr_egress_mappings) {
-		nest = nla_nest_start(skb, IFLA_VLAN_EGRESS_QOS);
+		nest = nla_nest_start_noflag(skb, IFLA_VLAN_EGRESS_QOS);
 		if (nest == NULL)
 			goto nla_put_failure;
 

@@ -1,20 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *   Copyright (C) International Business Machines  Corp., 2000-2004
  *   Copyright (C) Christoph Hellwig, 2002
- *
- *   This program is free software;  you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY;  without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
- *   the GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program;  if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 #include <linux/capability.h>
@@ -669,7 +656,7 @@ static int ea_put(tid_t tid, struct inode *inode, struct ea_buffer *ea_buf,
 	if (old_blocks)
 		dquot_free_block(inode, old_blocks);
 
-	inode->i_ctime = current_time(inode);
+	inode_set_ctime_current(inode);
 
 	return 0;
 }
@@ -969,6 +956,7 @@ static int jfs_xattr_get(const struct xattr_handler *handler,
 }
 
 static int jfs_xattr_set(const struct xattr_handler *handler,
+			 struct mnt_idmap *idmap,
 			 struct dentry *unused, struct inode *inode,
 			 const char *name, const void *value,
 			 size_t size, int flags)
@@ -987,6 +975,7 @@ static int jfs_xattr_get_os2(const struct xattr_handler *handler,
 }
 
 static int jfs_xattr_set_os2(const struct xattr_handler *handler,
+			     struct mnt_idmap *idmap,
 			     struct dentry *unused, struct inode *inode,
 			     const char *name, const void *value,
 			     size_t size, int flags)
@@ -1020,11 +1009,7 @@ static const struct xattr_handler jfs_trusted_xattr_handler = {
 	.set = jfs_xattr_set,
 };
 
-const struct xattr_handler *jfs_xattr_handlers[] = {
-#ifdef CONFIG_JFS_POSIX_ACL
-	&posix_acl_access_xattr_handler,
-	&posix_acl_default_xattr_handler,
-#endif
+const struct xattr_handler * const jfs_xattr_handlers[] = {
 	&jfs_os2_xattr_handler,
 	&jfs_user_xattr_handler,
 	&jfs_security_xattr_handler,

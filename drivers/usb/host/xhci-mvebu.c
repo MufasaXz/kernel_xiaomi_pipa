@@ -13,6 +13,7 @@
 #include <linux/usb/hcd.h>
 
 #include "xhci-mvebu.h"
+#include "xhci.h"
 
 #define USB3_MAX_WINDOWS	4
 #define USB3_WIN_CTRL(w)	(0x0 + ((w) * 8))

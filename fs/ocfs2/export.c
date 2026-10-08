@@ -1,26 +1,10 @@
-/* -*- mode: c; c-basic-offset: 8; -*-
- * vim: noexpandtab sw=8 ts=8 sts=0:
- *
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
  * export.c
  *
  * Functions to facilitate NFS exporting
  *
  * Copyright (C) 2002, 2005 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
  */
 
 #include <linux/fs.h>
@@ -271,9 +255,9 @@ static struct dentry *ocfs2_fh_to_dentry(struct super_block *sb,
 	if (fh_len < 3 || fh_type > 2)
 		return NULL;
 
-	handle.ih_blkno = (u64)le32_to_cpu(fid->raw[0]) << 32;
-	handle.ih_blkno |= (u64)le32_to_cpu(fid->raw[1]);
-	handle.ih_generation = le32_to_cpu(fid->raw[2]);
+	handle.ih_blkno = (u64)le32_to_cpu((__force __le32)fid->raw[0]) << 32;
+	handle.ih_blkno |= (u64)le32_to_cpu((__force __le32)fid->raw[1]);
+	handle.ih_generation = le32_to_cpu((__force __le32)fid->raw[2]);
 	return ocfs2_get_dentry(sb, &handle);
 }
 
@@ -285,9 +269,9 @@ static struct dentry *ocfs2_fh_to_parent(struct super_block *sb,
 	if (fh_type != 2 || fh_len < 6)
 		return NULL;
 
-	parent.ih_blkno = (u64)le32_to_cpu(fid->raw[3]) << 32;
-	parent.ih_blkno |= (u64)le32_to_cpu(fid->raw[4]);
-	parent.ih_generation = le32_to_cpu(fid->raw[5]);
+	parent.ih_blkno = (u64)le32_to_cpu((__force __le32)fid->raw[3]) << 32;
+	parent.ih_blkno |= (u64)le32_to_cpu((__force __le32)fid->raw[4]);
+	parent.ih_generation = le32_to_cpu((__force __le32)fid->raw[5]);
 	return ocfs2_get_dentry(sb, &parent);
 }
 

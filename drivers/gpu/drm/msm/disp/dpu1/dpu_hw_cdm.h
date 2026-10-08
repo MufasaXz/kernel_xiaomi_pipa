@@ -1,13 +1,6 @@
-/* Copyright (c) 2015-2018, The Linux Foundation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * Copyright (c) 2023, The Linux Foundation. All rights reserved.
  */
 
 #ifndef _DPU_HW_CDM_H
@@ -15,21 +8,38 @@
 
 #include "dpu_hw_mdss.h"
 #include "dpu_hw_top.h"
-#include "dpu_hw_blk.h"
 
 struct dpu_hw_cdm;
 
+/**
+ * struct dpu_hw_cdm_cfg : current configuration of CDM block
+ *
+ *  @output_width:         output ROI width of CDM block
+ *  @output_height:        output ROI height of CDM block
+ *  @output_bit_depth:     output bit-depth of CDM block
+ *  @h_cdwn_type:          downsample type used for horizontal pixels
+ *  @v_cdwn_type:          downsample type used for vertical pixels
+ *  @output_fmt:           handle to msm_format of CDM block
+ *  @csc_cfg:              handle to CSC matrix programmed for CDM block
+ *  @output_type:          interface to which CDM is paired (HDMI/WB)
+ *  @pp_id:                ping-pong block to which CDM is bound to
+ */
 struct dpu_hw_cdm_cfg {
 	u32 output_width;
 	u32 output_height;
 	u32 output_bit_depth;
 	u32 h_cdwn_type;
 	u32 v_cdwn_type;
-	const struct dpu_format *output_fmt;
+	const struct msm_format *output_fmt;
+	const struct dpu_csc_cfg *csc_cfg;
 	u32 output_type;
-	int flags;
+	int pp_id;
 };
 
+/*
+ * These values are used indicate which type of downsample is used
+ * in the horizontal/vertical direction for the CDM block.
+ */
 enum dpu_hw_cdwn_type {
 	CDM_CDWN_DISABLE,
 	CDM_CDWN_PIXEL_DROP,
@@ -38,60 +48,68 @@ enum dpu_hw_cdwn_type {
 	CDM_CDWN_OFFSITE,
 };
 
+/*
+ * CDM block can be paired with WB or HDMI block. These values match
+ * the input with which the CDM block is paired.
+ */
 enum dpu_hw_cdwn_output_type {
 	CDM_CDWN_OUTPUT_HDMI,
 	CDM_CDWN_OUTPUT_WB,
 };
 
+/*
+ * CDM block can give an 8-bit or 10-bit output. These values
+ * are used to indicate the output bit depth of CDM block
+ */
 enum dpu_hw_cdwn_output_bit_depth {
 	CDM_CDWN_OUTPUT_8BIT,
 	CDM_CDWN_OUTPUT_10BIT,
+};
+
+/*
+ * CDM block can downsample using different methods. These values
+ * are used to indicate the downsample method which can be used
+ * either in the horizontal or vertical direction.
+ */
+enum dpu_hw_cdwn_op_mode_method_h_v {
+	CDM_CDWN2_METHOD_PIXEL_DROP,
+	CDM_CDWN2_METHOD_AVG,
+	CDM_CDWN2_METHOD_COSITE,
+	CDM_CDWN2_METHOD_OFFSITE
 };
 
 /**
  * struct dpu_hw_cdm_ops : Interface to the chroma down Hw driver functions
  *                         Assumption is these functions will be called after
  *                         clocks are enabled
- *  @setup_csc:            Programs the csc matrix
- *  @setup_cdwn:           Sets up the chroma down sub module
  *  @enable:               Enables the output to interface and programs the
  *                         output packer
- *  @disable:              Puts the cdm in bypass mode
+ *  @bind_pingpong_blk:    enable/disable the connection with pingpong which
+ *                         will feed pixels to this cdm
  */
 struct dpu_hw_cdm_ops {
-	/**
-	 * Programs the CSC matrix for conversion from RGB space to YUV space,
-	 * it is optional to call this function as this matrix is automatically
-	 * set during initialization, user should call this if it wants
-	 * to program a different matrix than default matrix.
-	 * @cdm:          Pointer to the chroma down context structure
-	 * @data          Pointer to CSC configuration data
-	 * return:        0 if success; error code otherwise
-	 */
-	int (*setup_csc_data)(struct dpu_hw_cdm *cdm,
-			struct dpu_csc_cfg *data);
-
-	/**
-	 * Programs the Chroma downsample part.
-	 * @cdm         Pointer to chroma down context
-	 */
-	int (*setup_cdwn)(struct dpu_hw_cdm *cdm,
-	struct dpu_hw_cdm_cfg *cfg);
-
 	/**
 	 * Enable the CDM module
 	 * @cdm         Pointer to chroma down context
 	 */
-	int (*enable)(struct dpu_hw_cdm *cdm,
-	struct dpu_hw_cdm_cfg *cfg);
+	int (*enable)(struct dpu_hw_cdm *cdm, struct dpu_hw_cdm_cfg *cfg);
 
 	/**
-	 * Disable the CDM module
+	 * Enable/disable the connection with pingpong
 	 * @cdm         Pointer to chroma down context
+	 * @pp          pingpong block id.
 	 */
-	void (*disable)(struct dpu_hw_cdm *cdm);
+	void (*bind_pingpong_blk)(struct dpu_hw_cdm *cdm, const enum dpu_pingpong pp);
 };
 
+/**
+ * struct dpu_hw_cdm - cdm description
+ * @base: Hardware block base structure
+ * @hw: Block hardware details
+ * @idx: CDM index
+ * @caps: Pointer to cdm_cfg
+ * @ops: handle to operations possible for this CDM
+ */
 struct dpu_hw_cdm {
 	struct dpu_hw_blk base;
 	struct dpu_hw_blk_reg_map hw;
@@ -100,40 +118,17 @@ struct dpu_hw_cdm {
 	const struct dpu_cdm_cfg *caps;
 	enum  dpu_cdm  idx;
 
-	/* mdp top hw driver */
-	struct dpu_hw_mdp *hw_mdp;
-
 	/* ops */
 	struct dpu_hw_cdm_ops ops;
 };
 
-/**
- * dpu_hw_cdm - convert base object dpu_hw_base to container
- * @hw: Pointer to base hardware block
- * return: Pointer to hardware block container
- */
+struct dpu_hw_cdm *dpu_hw_cdm_init(struct drm_device *dev,
+				   const struct dpu_cdm_cfg *cdm, void __iomem *addr,
+				   const struct dpu_mdss_version *mdss_rev);
+
 static inline struct dpu_hw_cdm *to_dpu_hw_cdm(struct dpu_hw_blk *hw)
 {
 	return container_of(hw, struct dpu_hw_cdm, base);
 }
-
-/**
- * dpu_hw_cdm_init - initializes the cdm hw driver object.
- * should be called once before accessing every cdm.
- * @idx:  cdm index for which driver object is required
- * @addr: mapped register io address of MDP
- * @m :   pointer to mdss catalog data
- * @hw_mdp:  pointer to mdp top hw driver object
- */
-struct dpu_hw_cdm *dpu_hw_cdm_init(enum dpu_cdm idx,
-		void __iomem *addr,
-		struct dpu_mdss_cfg *m,
-		struct dpu_hw_mdp *hw_mdp);
-
-/**
- * dpu_hw_cdm_destroy - destroys CDM driver context
- * @cdm:   pointer to CDM driver context
- */
-void dpu_hw_cdm_destroy(struct dpu_hw_cdm *cdm);
 
 #endif /*_DPU_HW_CDM_H */

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * Copyright 2018 Advanced Micro Devices, Inc.
  *
@@ -29,6 +30,8 @@
 #include "amdgpu.h"
 #include "amdgpu_dm.h"
 
-int connector_debugfs_init(struct amdgpu_dm_connector *connector);
+void connector_debugfs_init(struct amdgpu_dm_connector *connector);
+void dtn_debugfs_init(struct amdgpu_device *adev);
+void crtc_debugfs_init(struct drm_crtc *crtc);
 
 #endif

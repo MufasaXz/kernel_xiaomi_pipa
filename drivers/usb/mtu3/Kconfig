@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0
+#
 # For MTK USB3.0 IP
 
 config USB_MTU3
@@ -19,7 +21,7 @@ config USB_MTU3
 
 if USB_MTU3
 choice
-	bool "MTU3 Mode Selection"
+	prompt "MTU3 Mode Selection"
 	default USB_MTU3_DUAL_ROLE if (USB && USB_GADGET)
 	default USB_MTU3_HOST if (USB && !USB_GADGET)
 	default USB_MTU3_GADGET if (!USB && USB_GADGET)
@@ -42,6 +44,7 @@ config USB_MTU3_DUAL_ROLE
 	bool "Dual Role mode"
 	depends on ((USB=y || USB=USB_MTU3) && (USB_GADGET=y || USB_GADGET=USB_MTU3))
 	depends on (EXTCON=y || EXTCON=USB_MTU3)
+	select USB_ROLE_SWITCH
 	help
 	  This is the default mode of working of MTU3 controller where
 	  both host and gadget features are enabled.

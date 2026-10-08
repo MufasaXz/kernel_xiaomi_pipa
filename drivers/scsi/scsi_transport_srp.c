@@ -1,22 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * SCSI RDMA (SRP) transport class
  *
  * Copyright (C) 2007 FUJITA Tomonori <tomof@acm.org>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
  */
 #include <linux/init.h>
 #include <linux/module.h>
@@ -402,13 +388,17 @@ static void srp_reconnect_work(struct work_struct *work)
 			     "reconnect attempt %d failed (%d)\n",
 			     ++rport->failed_reconnects, res);
 		delay = rport->reconnect_delay *
-			min(100, max(1, rport->failed_reconnects - 10));
+			clamp(rport->failed_reconnects - 10, 1, 100);
 		if (delay > 0)
 			queue_delayed_work(system_long_wq,
 					   &rport->reconnect_work, delay * HZ);
 	}
 }
 
+/*
+ * scsi_block_targets() must have been called before this function is
+ * called to guarantee that no .queuecommand() calls are in progress.
+ */
 static void __rport_fail_io_fast(struct srp_rport *rport)
 {
 	struct Scsi_Host *shost = rport_to_shost(rport);
@@ -418,11 +408,7 @@ static void __rport_fail_io_fast(struct srp_rport *rport)
 
 	if (srp_rport_set_state(rport, SRP_RPORT_FAIL_FAST))
 		return;
-	/*
-	 * Call scsi_target_block() to wait for ongoing shost->queuecommand()
-	 * calls before invoking i->f->terminate_rport_io().
-	 */
-	scsi_target_block(rport->dev.parent);
+
 	scsi_target_unblock(rport->dev.parent, SDEV_TRANSPORT_OFFLINE);
 
 	/* Involve the LLD if possible to terminate all I/O on the rport. */
@@ -494,7 +480,7 @@ static void __srp_start_tl_fail_timers(struct srp_rport *rport)
 	    srp_rport_set_state(rport, SRP_RPORT_BLOCKED) == 0) {
 		pr_debug("%s new state: %d\n", dev_name(&shost->shost_gendev),
 			 rport->state);
-		scsi_target_block(&shost->shost_gendev);
+		scsi_block_targets(shost, &shost->shost_gendev);
 		if (fast_io_fail_tmo >= 0)
 			queue_delayed_work(system_long_wq,
 					   &rport->fast_io_fail_work,
@@ -562,7 +548,7 @@ int srp_reconnect_rport(struct srp_rport *rport)
 		 * later is ok though, scsi_internal_device_unblock_nowait()
 		 * treats SDEV_TRANSPORT_OFFLINE like SDEV_BLOCK.
 		 */
-		scsi_target_block(&shost->shost_gendev);
+		scsi_block_targets(shost, &shost->shost_gendev);
 	res = rport->state != SRP_RPORT_LOST ? i->f->reconnect(rport) : -ENODEV;
 	pr_debug("%s (state %d): transport.reconnect() returned %d\n",
 		 dev_name(&shost->shost_gendev), rport->state, res);
@@ -591,8 +577,6 @@ int srp_reconnect_rport(struct srp_rport *rport)
 		 * failure timers if these had not yet been started.
 		 */
 		__rport_fail_io_fast(rport);
-		scsi_target_unblock(&shost->shost_gendev,
-				    SDEV_TRANSPORT_OFFLINE);
 		__srp_start_tl_fail_timers(rport);
 	} else if (rport->state != SRP_RPORT_BLOCKED) {
 		scsi_target_unblock(&shost->shost_gendev,
@@ -610,13 +594,13 @@ EXPORT_SYMBOL(srp_reconnect_rport);
  * @scmd: SCSI command.
  *
  * If a timeout occurs while an rport is in the blocked state, ask the SCSI
- * EH to continue waiting (BLK_EH_RESET_TIMER). Otherwise let the SCSI core
- * handle the timeout (BLK_EH_DONE).
+ * EH to continue waiting (SCSI_EH_RESET_TIMER). Otherwise let the SCSI core
+ * handle the timeout (SCSI_EH_NOT_HANDLED).
  *
  * Note: This function is called from soft-IRQ context and with the request
  * queue lock held.
  */
-enum blk_eh_timer_return srp_timed_out(struct scsi_cmnd *scmd)
+enum scsi_timeout_action srp_timed_out(struct scsi_cmnd *scmd)
 {
 	struct scsi_device *sdev = scmd->device;
 	struct Scsi_Host *shost = sdev->host;
@@ -627,7 +611,7 @@ enum blk_eh_timer_return srp_timed_out(struct scsi_cmnd *scmd)
 	return rport && rport->fast_io_fail_tmo < 0 &&
 		rport->dev_loss_tmo < 0 &&
 		i->f->reset_timer_if_blocked && scsi_device_blocked(sdev) ?
-		BLK_EH_RESET_TIMER : BLK_EH_DONE;
+		SCSI_EH_RESET_TIMER : SCSI_EH_NOT_HANDLED;
 }
 EXPORT_SYMBOL(srp_timed_out);
 

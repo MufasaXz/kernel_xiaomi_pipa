@@ -1,22 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Real Time Clock driver for Marvell 88PM80x PMIC
  *
  * Copyright (c) 2012 Marvell International Ltd.
  *  Wenzeng Chen<wzch@marvell.com>
  *  Qiao Zhou <zhouqiao@marvell.com>
- *
- * This file is subject to the terms and conditions of the GNU General
- * Public License. See the file "COPYING" in the main directory of this
- * archive for more details.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <linux/kernel.h>
@@ -276,7 +264,6 @@ static int pm80x_rtc_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	info->irq = platform_get_irq(pdev, 0);
 	if (info->irq < 0) {
-		dev_err(&pdev->dev, "No IRQ resource!\n");
 		ret = -EINVAL;
 		goto out;
 	}
@@ -307,11 +294,10 @@ static int pm80x_rtc_probe(struct platform_device *pdev)
 	info->rtc_dev->ops = &pm80x_rtc_ops;
 	info->rtc_dev->range_max = U32_MAX;
 
-	ret = rtc_register_device(info->rtc_dev);
-	if (ret) {
-		dev_err(&pdev->dev, "Failed to register RTC device: %d\n", ret);
+	ret = devm_rtc_register_device(info->rtc_dev);
+	if (ret)
 		goto out_rtc;
-	}
+
 	/*
 	 * enable internal XO instead of internal 3.25MHz clock since it can
 	 * free running in PMIC power-down state.
@@ -322,7 +308,7 @@ static int pm80x_rtc_probe(struct platform_device *pdev)
 	/* remember whether this power up is caused by PMIC RTC or not */
 	info->rtc_dev->dev.platform_data = &pdata->rtc_wakeup;
 
-	device_init_wakeup(&pdev->dev, 1);
+	device_init_wakeup(&pdev->dev, true);
 
 	return 0;
 out_rtc:
@@ -331,11 +317,10 @@ out:
 	return ret;
 }
 
-static int pm80x_rtc_remove(struct platform_device *pdev)
+static void pm80x_rtc_remove(struct platform_device *pdev)
 {
 	struct pm80x_rtc_info *info = platform_get_drvdata(pdev);
 	pm80x_free_irq(info->chip, info->irq, info);
-	return 0;
 }
 
 static struct platform_driver pm80x_rtc_driver = {

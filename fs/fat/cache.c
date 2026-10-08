@@ -47,7 +47,7 @@ int __init fat_cache_init(void)
 {
 	fat_cache_cachep = kmem_cache_create("fat_cache",
 				sizeof(struct fat_cache),
-				0, SLAB_RECLAIM_ACCOUNT|SLAB_MEM_SPREAD,
+				0, SLAB_RECLAIM_ACCOUNT,
 				init_once);
 	if (fat_cache_cachep == NULL)
 		return -ENOMEM;
@@ -363,7 +363,7 @@ int fat_bmap(struct inode *inode, sector_t sector, sector_t *phys,
 
 	*phys = 0;
 	*mapped_blocks = 0;
-	if ((sbi->fat_bits != 32) && (inode->i_ino == MSDOS_ROOT_INO)) {
+	if (!is_fat32(sbi) && (inode->i_ino == MSDOS_ROOT_INO)) {
 		if (sector < (sbi->dir_entries >> sbi->dir_per_block_bits)) {
 			*phys = sector + sbi->dir_start;
 			*mapped_blocks = 1;

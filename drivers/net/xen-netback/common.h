@@ -62,7 +62,7 @@ struct pending_tx_info {
 	 * ubuf_to_vif is a helper which finds the struct xenvif from a pointer
 	 * to this field.
 	 */
-	struct ubuf_info callback_struct;
+	struct ubuf_info_msgzc callback_struct;
 };
 
 #define XEN_NETIF_TX_RING_SIZE __CONST_RING_SIZE(xen_netif_tx, XEN_PAGE_SIZE)
@@ -260,6 +260,22 @@ struct xenvif_hash {
 	struct xenvif_hash_cache cache;
 };
 
+struct backend_info {
+	struct xenbus_device *dev;
+	struct xenvif *vif;
+
+	/* This is the state that will be reflected in xenstore when any
+	 * active hotplug script completes.
+	 */
+	enum xenbus_state state;
+
+	enum xenbus_state frontend_state;
+	struct xenbus_watch hotplug_status_watch;
+	u8 have_hotplug_status_watch:1;
+
+	const char *hotplug_script;
+};
+
 struct xenvif {
 	/* Unique identifier for this interface. */
 	domid_t          domid;
@@ -276,6 +292,9 @@ struct xenvif {
 	u8 ip_csum:1;
 	u8 ipv6_csum:1;
 	u8 multicast_control:1;
+
+	/* headroom requested by xen-netfront */
+	u16 xdp_headroom;
 
 	/* Is this interface disabled? True when backend discovers
 	 * frontend is rogue.
@@ -294,6 +313,8 @@ struct xenvif {
 
 	struct xenbus_watch credit_watch;
 	struct xenbus_watch mcast_ctrl_watch;
+
+	struct backend_info *be;
 
 	spinlock_t lock;
 
@@ -369,8 +390,8 @@ bool xenvif_rx_queue_tail(struct xenvif_queue *queue, struct sk_buff *skb);
 
 void xenvif_carrier_on(struct xenvif *vif);
 
-/* Callback from stack when TX packet can be released */
-void xenvif_zerocopy_callback(struct ubuf_info *ubuf, bool zerocopy_success);
+/* Callbacks from stack when TX packet can be released */
+extern const struct ubuf_info_ops xenvif_ubuf_ops;
 
 static inline pending_ring_idx_t nr_pending_reqs(struct xenvif_queue *queue)
 {
@@ -381,6 +402,7 @@ static inline pending_ring_idx_t nr_pending_reqs(struct xenvif_queue *queue)
 irqreturn_t xenvif_interrupt(int irq, void *dev_id);
 
 extern bool separate_tx_rx_irq;
+extern bool provides_xdp_headroom;
 
 extern unsigned int rx_drain_timeout_msecs;
 extern unsigned int rx_stall_timeout_msecs;

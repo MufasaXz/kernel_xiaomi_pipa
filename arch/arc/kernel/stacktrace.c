@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *	stacktrace.c : stacktracing APIs needed by rest of kernel
  *			(wrappers over ARC dwarf based unwinder)
  *
  * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  *  vineetg: aug 2009
  *  -Implemented CONFIG_STACKTRACE APIs, primarily save_stack_trace_tsk( )
@@ -18,7 +15,7 @@
  *      = specifics of data structs where trace is saved(CONFIG_STACKTRACE etc)
  *
  *  vineetg: March 2009
- *  -Implemented correct versions of thread_saved_pc() and get_wchan()
+ *  -Implemented correct versions of thread_saved_pc() and __get_wchan()
  *
  *  rajeshwarr: 2008
  *  -Initial implementation
@@ -32,6 +29,7 @@
 
 #include <asm/arcregs.h>
 #include <asm/unwind.h>
+#include <asm/stacktrace.h>
 #include <asm/switch_to.h>
 
 /*-------------------------------------------------------------------------
@@ -45,11 +43,23 @@ static int
 seed_unwind_frame_info(struct task_struct *tsk, struct pt_regs *regs,
 		       struct unwind_frame_info *frame_info)
 {
-	/*
-	 * synchronous unwinding (e.g. dump_stack)
-	 *  - uses current values of SP and friends
-	 */
-	if (regs == NULL && (tsk == NULL || tsk == current)) {
+	if (regs) {
+		/*
+		 * Asynchronous unwinding of intr/exception
+		 *  - Just uses the pt_regs passed
+		 */
+		frame_info->task = tsk;
+
+		frame_info->regs.r27 = regs->fp;
+		frame_info->regs.r28 = regs->sp;
+		frame_info->regs.r31 = regs->blink;
+		frame_info->regs.r63 = regs->ret;
+		frame_info->call_frame = 0;
+	} else if (tsk == NULL || tsk == current) {
+		/*
+		 * synchronous unwinding (e.g. dump_stack)
+		 *  - uses current values of SP and friends
+		 */
 		unsigned long fp, sp, blink, ret;
 		frame_info->task = current;
 
@@ -66,7 +76,7 @@ seed_unwind_frame_info(struct task_struct *tsk, struct pt_regs *regs,
 		frame_info->regs.r31 = blink;
 		frame_info->regs.r63 = ret;
 		frame_info->call_frame = 0;
-	} else if (regs == NULL) {
+	} else {
 		/*
 		 * Asynchronous unwinding of a likely sleeping task
 		 *  - first ensure it is actually sleeping
@@ -74,7 +84,7 @@ seed_unwind_frame_info(struct task_struct *tsk, struct pt_regs *regs,
 		 *    is safe-kept and BLINK at a well known location in there
 		 */
 
-		if (tsk->state == TASK_RUNNING)
+		if (task_is_running(tsk))
 			return -1;
 
 		frame_info->task = tsk;
@@ -97,20 +107,7 @@ seed_unwind_frame_info(struct task_struct *tsk, struct pt_regs *regs,
 		frame_info->regs.r28 += 60;
 		frame_info->call_frame = 0;
 
-	} else {
-		/*
-		 * Asynchronous unwinding of intr/exception
-		 *  - Just uses the pt_regs passed
-		 */
-		frame_info->task = tsk;
-
-		frame_info->regs.r27 = regs->fp;
-		frame_info->regs.r28 = regs->sp;
-		frame_info->regs.r31 = regs->blink;
-		frame_info->regs.r63 = regs->ret;
-		frame_info->call_frame = 0;
 	}
-
 	return 0;
 }
 
@@ -153,7 +150,7 @@ arc_unwind_core(struct task_struct *tsk, struct pt_regs *regs,
 #else
 	/* On ARC, only Dward based unwinder works. fp based backtracing is
 	 * not possible (-fno-omit-frame-pointer) because of the way function
-	 * prelogue is setup (callee regs saved and then fp set and not other
+	 * prologue is setup (callee regs saved and then fp set and not other
 	 * way around
 	 */
 	pr_warn_once("CONFIG_ARC_DW2_UNWIND needs to be enabled\n");
@@ -173,9 +170,11 @@ arc_unwind_core(struct task_struct *tsk, struct pt_regs *regs,
 /* Call-back which plugs into unwinding core to dump the stack in
  * case of panic/OOPs/BUG etc
  */
-static int __print_sym(unsigned int address, void *unused)
+static int __print_sym(unsigned int address, void *arg)
 {
-	printk("  %pS\n", (void *)address);
+	const char *loglvl = arg;
+
+	printk("%s  %pS\n", loglvl, (void *)address);
 	return 0;
 }
 
@@ -232,24 +231,25 @@ static int __get_first_nonsched(unsigned int address, void *unused)
  *-------------------------------------------------------------------------
  */
 
-noinline void show_stacktrace(struct task_struct *tsk, struct pt_regs *regs)
+noinline void show_stacktrace(struct task_struct *tsk, struct pt_regs *regs,
+			      const char *loglvl)
 {
-	pr_info("\nStack Trace:\n");
-	arc_unwind_core(tsk, regs, __print_sym, NULL);
+	printk("%s\nStack Trace:\n", loglvl);
+	arc_unwind_core(tsk, regs, __print_sym, (void *)loglvl);
 }
 EXPORT_SYMBOL(show_stacktrace);
 
 /* Expected by sched Code */
-void show_stack(struct task_struct *tsk, unsigned long *sp)
+void show_stack(struct task_struct *tsk, unsigned long *sp, const char *loglvl)
 {
-	show_stacktrace(tsk, NULL);
+	show_stacktrace(tsk, NULL, loglvl);
 }
 
 /* Another API expected by schedular, shows up in "ps" as Wait Channel
  * Of course just returning schedule( ) would be pointless so unwind until
  * the function is not in schedular code
  */
-unsigned int get_wchan(struct task_struct *tsk)
+unsigned int __get_wchan(struct task_struct *tsk)
 {
 	return arc_unwind_core(tsk, NULL, __get_first_nonsched, NULL);
 }

@@ -1,26 +1,10 @@
-/* -*- mode: c; c-basic-offset: 8; -*-
- * vim: noexpandtab sw=8 ts=8 sts=0:
- *
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/*
  * ocfs2.h
  *
  * Defines macros and structures used in OCFS2
  *
  * Copyright (C) 2002, 2004 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
  */
 
 #ifndef OCFS2_H
@@ -164,12 +148,13 @@ struct ocfs2_lock_stats {
 
 	/* Storing max wait in usecs saves 24 bytes per inode */
 	u32		ls_max;		/* Max wait in USEC */
+	u64		ls_last;	/* Last unlock time in USEC */
 };
 #endif
 
 struct ocfs2_lock_res {
 	void                    *l_priv;
-	struct ocfs2_lock_res_ops *l_ops;
+	const struct ocfs2_lock_res_ops *l_ops;
 
 
 	struct list_head         l_blocked_list;
@@ -205,6 +190,7 @@ struct ocfs2_lock_res {
 #ifdef CONFIG_OCFS2_FS_STATS
 	struct ocfs2_lock_stats  l_lock_prmode;		/* PR mode stats */
 	u32                      l_lock_refresh;	/* Disk refreshes */
+	u64                      l_lock_wait;	/* First lock wait time */
 	struct ocfs2_lock_stats  l_lock_exmode;		/* EX mode stats */
 #endif
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
@@ -235,7 +221,7 @@ struct ocfs2_orphan_scan {
 
 struct ocfs2_dlm_debug {
 	struct kref d_refcnt;
-	struct dentry *d_locking_state;
+	u32 d_filter_secs;
 	struct list_head d_lockres_tracking;
 };
 
@@ -297,6 +283,30 @@ enum ocfs2_mount_options
 #define OCFS2_OSB_HARD_RO	0x0002
 #define OCFS2_OSB_ERROR_FS	0x0004
 #define OCFS2_DEFAULT_ATIME_QUANTUM	60
+
+struct ocfs2_triggers {
+	struct jbd2_buffer_trigger_type	ot_triggers;
+	int				ot_offset;
+	struct super_block		*sb;
+};
+
+enum ocfs2_journal_trigger_type {
+	OCFS2_JTR_DI,
+	OCFS2_JTR_EB,
+	OCFS2_JTR_RB,
+	OCFS2_JTR_GD,
+	OCFS2_JTR_DB,
+	OCFS2_JTR_XB,
+	OCFS2_JTR_DQ,
+	OCFS2_JTR_DR,
+	OCFS2_JTR_DL,
+	OCFS2_JTR_NONE  /* This must be the last entry */
+};
+
+#define OCFS2_JOURNAL_TRIGGER_COUNT OCFS2_JTR_NONE
+
+void ocfs2_initialize_journal_triggers(struct super_block *sb,
+				       struct ocfs2_triggers triggers[]);
 
 enum ocfs2_recovery_state {
 	OCFS2_REC_ENABLED = 0,
@@ -380,10 +390,13 @@ struct ocfs2_super
 	struct ocfs2_journal *journal;
 	unsigned long osb_commit_interval;
 
+	/* Journal triggers for checksum */
+	struct ocfs2_triggers s_journal_triggers[OCFS2_JOURNAL_TRIGGER_COUNT];
+
 	struct delayed_work		la_enable_wq;
 
 	/*
-	 * Must hold local alloc i_mutex and osb->osb_lock to change
+	 * Must hold local alloc i_rwsem and osb->osb_lock to change
 	 * local_alloc_bits. Reads can be done under either lock.
 	 */
 	unsigned int local_alloc_bits;
@@ -423,10 +436,10 @@ struct ocfs2_super
 	struct ocfs2_lock_res osb_nfs_sync_lockres;
 	struct rw_semaphore nfs_sync_rwlock;
 	struct ocfs2_lock_res osb_trim_fs_lockres;
+	struct mutex obs_trim_fs_mutex;
 	struct ocfs2_dlm_debug *osb_dlm_debug;
 
 	struct dentry *osb_debug_root;
-	struct dentry *osb_ctxt;
 
 	wait_queue_head_t recovery_event;
 
@@ -458,7 +471,7 @@ struct ocfs2_super
 	atomic_t			osb_tl_disable;
 	/*
 	 * How many clusters in our truncate log.
-	 * It must be protected by osb_tl_inode->i_mutex.
+	 * It must be protected by osb_tl_inode->i_rwsem.
 	 */
 	unsigned int truncated_clusters;
 
@@ -589,8 +602,7 @@ static inline unsigned int ocfs2_read_links_count(struct ocfs2_dinode *di)
 	u32 nlink = le16_to_cpu(di->i_links_count);
 	u32 hi = le16_to_cpu(di->i_links_count_hi);
 
-	if (di->i_dyn_features & cpu_to_le16(OCFS2_INDEXED_DIR_FL))
-		nlink |= (hi << OCFS2_LINKS_HI_SHIFT);
+	nlink |= (hi << OCFS2_LINKS_HI_SHIFT);
 
 	return nlink;
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  hdac_hdmi.c - ASoc HDA-HDMI codec driver for Intel platforms
  *
@@ -6,23 +7,16 @@
  *	    Subhransu S. Prusty <subhransu.s.prusty@intel.com>
  *  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; version 2 of the License.
- *
- *  This program is distributed in the hope that it will be useful, but
- *  WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  General Public License for more details.
- *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
+
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
 #include <linux/hdmi.h>
 #include <drm/drm_edid.h>
+#include <drm/drm_eld.h>
 #include <sound/pcm_params.h>
 #include <sound/jack.h>
 #include <sound/soc.h>
@@ -30,8 +24,6 @@
 #include <sound/hda_i915.h>
 #include <sound/pcm_drm_eld.h>
 #include <sound/hda_chmap.h>
-#include "../../hda/local.h"
-#include "hdac_hdmi.h"
 
 #define NAME_SIZE	32
 
@@ -96,8 +88,10 @@ struct hdac_hdmi_port {
 	hda_nid_t mux_nids[HDA_MAX_CONNECTIONS];
 	struct hdac_hdmi_eld eld;
 	const char *jack_pin;
+	bool is_connect;
 	struct snd_soc_dapm_context *dapm;
 	const char *output_pin;
+	struct work_struct dapm_work;
 };
 
 struct hdac_hdmi_pcm {
@@ -113,6 +107,7 @@ struct hdac_hdmi_pcm {
 	unsigned char chmap[8]; /* ALSA API channel-map */
 	struct mutex lock;
 	int jack_event;
+	struct snd_kcontrol *eld_ctl;
 };
 
 struct hdac_hdmi_dai_port_map {
@@ -163,11 +158,7 @@ static void hdac_hdmi_jack_report(struct hdac_hdmi_pcm *pcm,
 {
 	struct hdac_device *hdev = port->pin->hdev;
 
-	if (is_connect)
-		snd_soc_dapm_enable_pin(port->dapm, port->jack_pin);
-	else
-		snd_soc_dapm_disable_pin(port->dapm, port->jack_pin);
-
+	port->is_connect = is_connect;
 	if (is_connect) {
 		/*
 		 * Report Jack connect event when a device is connected
@@ -193,8 +184,30 @@ static void hdac_hdmi_jack_report(struct hdac_hdmi_pcm *pcm,
 		if (pcm->jack_event > 0)
 			pcm->jack_event--;
 	}
+}
 
+static void hdac_hdmi_port_dapm_update(struct hdac_hdmi_port *port)
+{
+	if (port->is_connect)
+		snd_soc_dapm_enable_pin(port->dapm, port->jack_pin);
+	else
+		snd_soc_dapm_disable_pin(port->dapm, port->jack_pin);
 	snd_soc_dapm_sync(port->dapm);
+}
+
+static void hdac_hdmi_jack_dapm_work(struct work_struct *work)
+{
+	struct hdac_hdmi_port *port;
+
+	port = container_of(work, struct hdac_hdmi_port, dapm_work);
+	hdac_hdmi_port_dapm_update(port);
+}
+
+static void hdac_hdmi_jack_report_sync(struct hdac_hdmi_pcm *pcm,
+		struct hdac_hdmi_port *port, bool is_connect)
+{
+	hdac_hdmi_jack_report(pcm, port, is_connect);
+	hdac_hdmi_port_dapm_update(port);
 }
 
 /* MST supported verbs */
@@ -206,8 +219,8 @@ static int hdac_hdmi_get_port_len(struct hdac_device *hdev, hda_nid_t nid)
 	unsigned int caps;
 	unsigned int type, param;
 
-	caps = get_wcaps(hdev, nid);
-	type = get_wcaps_type(caps);
+	caps = snd_hdac_get_wcaps(hdev, nid);
+	type = snd_hdac_get_wcaps_type(caps);
 
 	if (!(caps & AC_WCAP_DIGITAL) || (type != AC_WID_PIN))
 		return 0;
@@ -422,23 +435,28 @@ static int hdac_hdmi_setup_audio_infoframe(struct hdac_device *hdev,
 	return 0;
 }
 
-static int hdac_hdmi_set_tdm_slot(struct snd_soc_dai *dai,
-		unsigned int tx_mask, unsigned int rx_mask,
-		int slots, int slot_width)
+static int hdac_hdmi_set_stream(struct snd_soc_dai *dai,
+				void *stream, int direction)
 {
 	struct hdac_hdmi_priv *hdmi = snd_soc_dai_get_drvdata(dai);
 	struct hdac_device *hdev = hdmi->hdev;
 	struct hdac_hdmi_dai_port_map *dai_map;
 	struct hdac_hdmi_pcm *pcm;
+	struct hdac_stream *hstream;
 
-	dev_dbg(&hdev->dev, "%s: strm_tag: %d\n", __func__, tx_mask);
+	if (!stream)
+		return -EINVAL;
+
+	hstream = (struct hdac_stream *)stream;
+
+	dev_dbg(&hdev->dev, "%s: strm_tag: %d\n", __func__, hstream->stream_tag);
 
 	dai_map = &hdmi->dai_map[dai->id];
 
 	pcm = hdac_hdmi_get_pcm_from_cvt(hdmi, dai_map->cvt);
 
 	if (pcm)
-		pcm->stream_tag = (tx_mask << 4);
+		pcm->stream_tag = (hstream->stream_tag << 4);
 
 	return 0;
 }
@@ -447,28 +465,16 @@ static int hdac_hdmi_set_hw_params(struct snd_pcm_substream *substream,
 	struct snd_pcm_hw_params *hparams, struct snd_soc_dai *dai)
 {
 	struct hdac_hdmi_priv *hdmi = snd_soc_dai_get_drvdata(dai);
-	struct hdac_device *hdev = hdmi->hdev;
 	struct hdac_hdmi_dai_port_map *dai_map;
-	struct hdac_hdmi_port *port;
 	struct hdac_hdmi_pcm *pcm;
+	unsigned int bits;
 	int format;
 
 	dai_map = &hdmi->dai_map[dai->id];
-	port = dai_map->port;
 
-	if (!port)
-		return -ENODEV;
-
-	if ((!port->eld.monitor_present) || (!port->eld.eld_valid)) {
-		dev_err(&hdev->dev,
-			"device is not configured for this pin:port%d:%d\n",
-					port->pin->nid, port->id);
-		return -ENODEV;
-	}
-
-	format = snd_hdac_calc_stream_format(params_rate(hparams),
-			params_channels(hparams), params_format(hparams),
-			dai->driver->playback.sig_bits, 0);
+	bits = snd_hdac_stream_format_bits(params_format(hparams), SNDRV_PCM_SUBFORMAT_STD,
+					   dai->driver->playback.sig_bits);
+	format = snd_hdac_stream_format(params_channels(hparams), bits, params_rate(hparams));
 
 	pcm = hdac_hdmi_get_pcm_from_cvt(hdmi, dai_map->cvt);
 	if (!pcm)
@@ -484,10 +490,10 @@ static int hdac_hdmi_query_port_connlist(struct hdac_device *hdev,
 					struct hdac_hdmi_pin *pin,
 					struct hdac_hdmi_port *port)
 {
-	if (!(get_wcaps(hdev, pin->nid) & AC_WCAP_CONN_LIST)) {
+	if (!(snd_hdac_get_wcaps(hdev, pin->nid) & AC_WCAP_CONN_LIST)) {
 		dev_warn(&hdev->dev,
 			"HDMI: pin %d wcaps %#x does not support connection list\n",
-			pin->nid, get_wcaps(hdev, pin->nid));
+			pin->nid, snd_hdac_get_wcaps(hdev, pin->nid));
 		return -EINVAL;
 	}
 
@@ -522,7 +528,7 @@ static struct hdac_hdmi_port *hdac_hdmi_get_port_from_cvt(
 			struct hdac_hdmi_cvt *cvt)
 {
 	struct hdac_hdmi_pcm *pcm;
-	struct hdac_hdmi_port *port = NULL;
+	struct hdac_hdmi_port *port;
 	int ret, i;
 
 	list_for_each_entry(pcm, &hdmi->pcm_list, head) {
@@ -549,6 +555,29 @@ static struct hdac_hdmi_port *hdac_hdmi_get_port_from_cvt(
 	}
 
 	return NULL;
+}
+
+/*
+ * Go through all converters and ensure connection is set to
+ * the correct pin as set via kcontrols.
+ */
+static void hdac_hdmi_verify_connect_sel_all_pins(struct hdac_device *hdev)
+{
+	struct hdac_hdmi_priv *hdmi = hdev_to_hdmi_priv(hdev);
+	struct hdac_hdmi_port *port;
+	struct hdac_hdmi_cvt *cvt;
+	int cvt_idx = 0;
+
+	list_for_each_entry(cvt, &hdmi->cvt_list, head) {
+		port = hdac_hdmi_get_port_from_cvt(hdev, hdmi, cvt);
+		if (port && port->pin) {
+			snd_hdac_codec_write(hdev, port->pin->nid, 0,
+					     AC_VERB_SET_CONNECT_SEL, cvt_idx);
+			dev_dbg(&hdev->dev, "%s: %s set connect %d -> %d\n",
+				__func__, cvt->name, port->pin->nid, cvt_idx);
+		}
+		++cvt_idx;
+	}
 }
 
 /*
@@ -629,8 +658,8 @@ hdac_hdmi_query_cvt_params(struct hdac_device *hdev, struct hdac_hdmi_cvt *cvt)
 	struct hdac_hdmi_priv *hdmi = hdev_to_hdmi_priv(hdev);
 	int err;
 
-	chans = get_wcaps(hdev, cvt->nid);
-	chans = get_wcaps_channels(chans);
+	chans = snd_hdac_get_wcaps(hdev, cvt->nid);
+	chans = snd_hdac_get_wcaps_channels(chans);
 
 	cvt->params.channels_min = 2;
 
@@ -641,6 +670,7 @@ hdac_hdmi_query_cvt_params(struct hdac_device *hdev, struct hdac_hdmi_cvt *cvt)
 	err = snd_hdac_query_supported_pcm(hdev, cvt->nid,
 			&cvt->params.rates,
 			&cvt->params.formats,
+			NULL,
 			&cvt->params.maxbps);
 	if (err < 0)
 		dev_err(&hdev->dev,
@@ -689,7 +719,7 @@ static struct hdac_hdmi_pcm *hdac_hdmi_get_pcm(struct hdac_device *hdev,
 					struct hdac_hdmi_port *port)
 {
 	struct hdac_hdmi_priv *hdmi = hdev_to_hdmi_priv(hdev);
-	struct hdac_hdmi_pcm *pcm = NULL;
+	struct hdac_hdmi_pcm *pcm;
 	struct hdac_hdmi_port *p;
 
 	list_for_each_entry(pcm, &hdmi->pcm_list, head) {
@@ -711,7 +741,7 @@ static void hdac_hdmi_set_power_state(struct hdac_device *hdev,
 	int count;
 	unsigned int state;
 
-	if (get_wcaps(hdev, nid) & AC_WCAP_POWER) {
+	if (snd_hdac_get_wcaps(hdev, nid) & AC_WCAP_POWER) {
 		if (!snd_hdac_check_power_state(hdev, nid, pwr_state)) {
 			for (count = 0; count < 10; count++) {
 				snd_hdac_codec_read(hdev, nid, 0,
@@ -729,7 +759,7 @@ static void hdac_hdmi_set_power_state(struct hdac_device *hdev,
 static void hdac_hdmi_set_amp(struct hdac_device *hdev,
 				   hda_nid_t nid, int val)
 {
-	if (get_wcaps(hdev, nid) & AC_WCAP_OUT_AMP)
+	if (snd_hdac_get_wcaps(hdev, nid) & AC_WCAP_OUT_AMP)
 		snd_hdac_codec_write(hdev, nid, 0,
 					AC_VERB_SET_AMP_GAIN_MUTE, val);
 }
@@ -811,6 +841,14 @@ static int hdac_hdmi_cvt_output_widget_event(struct snd_soc_dapm_widget *w,
 				AC_VERB_SET_CHANNEL_STREAMID, pcm->stream_tag);
 		snd_hdac_codec_write(hdev, cvt->nid, 0,
 				AC_VERB_SET_STREAM_FORMAT, pcm->format);
+
+		/*
+		 * The connection indices are shared by all converters and
+		 * may interfere with each other. Ensure correct
+		 * routing for all converters at stream start.
+		 */
+		hdac_hdmi_verify_connect_sel_all_pins(hdev);
+
 		break;
 
 	case SND_SOC_DAPM_POST_PMD:
@@ -868,7 +906,7 @@ static int hdac_hdmi_set_pin_port_mux(struct snd_kcontrol *kcontrol,
 	struct hdac_hdmi_port *port = w->priv;
 	struct hdac_device *hdev = dev_to_hdac_dev(dapm->dev);
 	struct hdac_hdmi_priv *hdmi = hdev_to_hdmi_priv(hdev);
-	struct hdac_hdmi_pcm *pcm = NULL;
+	struct hdac_hdmi_pcm *pcm;
 	const char *cvt_name =  e->texts[ucontrol->value.enumerated.item[0]];
 
 	ret = snd_soc_dapm_put_enum_double(kcontrol, ucontrol);
@@ -886,7 +924,7 @@ static int hdac_hdmi_set_pin_port_mux(struct snd_kcontrol *kcontrol,
 		list_for_each_entry_safe(p, p_next, &pcm->port_list, head) {
 			if (p == port && p->id == port->id &&
 					p->pin == port->pin) {
-				hdac_hdmi_jack_report(pcm, port, false);
+				hdac_hdmi_jack_report_sync(pcm, port, false);
 				list_del(&p->head);
 			}
 		}
@@ -900,7 +938,7 @@ static int hdac_hdmi_set_pin_port_mux(struct snd_kcontrol *kcontrol,
 		if (!strcmp(cvt_name, pcm->cvt->name)) {
 			list_add_tail(&port->head, &pcm->port_list);
 			if (port->eld.monitor_present && port->eld.eld_valid) {
-				hdac_hdmi_jack_report(pcm, port, true);
+				hdac_hdmi_jack_report_sync(pcm, port, true);
 				mutex_unlock(&hdmi->pin_mutex);
 				return ret;
 			}
@@ -977,8 +1015,7 @@ static int hdac_hdmi_create_pin_port_muxs(struct hdac_device *hdev,
 			return -ENOMEM;
 	}
 
-	se->texts = devm_kmemdup(&hdev->dev, items,
-			(num_items  * sizeof(char *)), GFP_KERNEL);
+	se->texts = devm_kmemdup_array(&hdev->dev, items, num_items, sizeof(items[0]), GFP_KERNEL);
 	if (!se->texts)
 		return -ENOMEM;
 
@@ -1168,13 +1205,15 @@ static int hdac_hdmi_add_cvt(struct hdac_device *hdev, hda_nid_t nid)
 	struct hdac_hdmi_cvt *cvt;
 	char name[NAME_SIZE];
 
-	cvt = kzalloc(sizeof(*cvt), GFP_KERNEL);
+	cvt = devm_kzalloc(&hdev->dev, sizeof(*cvt), GFP_KERNEL);
 	if (!cvt)
 		return -ENOMEM;
 
 	cvt->nid = nid;
 	sprintf(name, "cvt %d", cvt->nid);
-	cvt->name = kstrdup(name, GFP_KERNEL);
+	cvt->name = devm_kstrdup(&hdev->dev, name, GFP_KERNEL);
+	if (!cvt->name)
+		return -ENOMEM;
 
 	list_add_tail(&cvt->head, &hdmi->cvt_list);
 	hdmi->num_cvt++;
@@ -1218,6 +1257,7 @@ static void hdac_hdmi_present_sense(struct hdac_hdmi_pin *pin,
 	struct hdac_hdmi_pcm *pcm;
 	int size = 0;
 	int port_id = -1;
+	bool eld_valid, eld_changed;
 
 	if (!hdmi)
 		return;
@@ -1243,6 +1283,8 @@ static void hdac_hdmi_present_sense(struct hdac_hdmi_pin *pin,
 			size = -EINVAL;
 	}
 
+	eld_valid = port->eld.eld_valid;
+
 	if (size > 0) {
 		port->eld.eld_valid = true;
 		port->eld.eld_size = size;
@@ -1250,6 +1292,8 @@ static void hdac_hdmi_present_sense(struct hdac_hdmi_pin *pin,
 		port->eld.eld_valid = false;
 		port->eld.eld_size = 0;
 	}
+
+	eld_changed = (eld_valid != port->eld.eld_valid);
 
 	pcm = hdac_hdmi_get_pcm(hdev, port);
 
@@ -1263,26 +1307,36 @@ static void hdac_hdmi_present_sense(struct hdac_hdmi_pin *pin,
 		 * report jack here. It will be done in usermode mux
 		 * control select.
 		 */
-		if (pcm)
+		if (pcm) {
 			hdac_hdmi_jack_report(pcm, port, false);
+			schedule_work(&port->dapm_work);
+		}
 
 		mutex_unlock(&hdmi->pin_mutex);
 		return;
 	}
 
 	if (port->eld.monitor_present && port->eld.eld_valid) {
-		if (pcm)
+		if (pcm) {
 			hdac_hdmi_jack_report(pcm, port, true);
+			schedule_work(&port->dapm_work);
+		}
 
 		print_hex_dump_debug("ELD: ", DUMP_PREFIX_OFFSET, 16, 1,
 			  port->eld.eld_buffer, port->eld.eld_size, false);
 
 	}
 	mutex_unlock(&hdmi->pin_mutex);
+
+	if (eld_changed && pcm)
+		snd_ctl_notify(hdmi->card,
+			       SNDRV_CTL_EVENT_MASK_VALUE |
+			       SNDRV_CTL_EVENT_MASK_INFO,
+			       &pcm->eld_ctl->id);
 }
 
-static int hdac_hdmi_add_ports(struct hdac_hdmi_priv *hdmi,
-				struct hdac_hdmi_pin *pin)
+static int hdac_hdmi_add_ports(struct hdac_device *hdev,
+			       struct hdac_hdmi_pin *pin)
 {
 	struct hdac_hdmi_port *ports;
 	int max_ports = HDA_MAX_PORTS;
@@ -1294,13 +1348,14 @@ static int hdac_hdmi_add_ports(struct hdac_hdmi_priv *hdmi,
 	 * implemented.
 	 */
 
-	ports = kcalloc(max_ports, sizeof(*ports), GFP_KERNEL);
+	ports = devm_kcalloc(&hdev->dev, max_ports, sizeof(*ports), GFP_KERNEL);
 	if (!ports)
 		return -ENOMEM;
 
 	for (i = 0; i < max_ports; i++) {
 		ports[i].id = i;
 		ports[i].pin = pin;
+		INIT_WORK(&ports[i].dapm_work, hdac_hdmi_jack_dapm_work);
 	}
 	pin->ports = ports;
 	pin->num_ports = max_ports;
@@ -1313,14 +1368,14 @@ static int hdac_hdmi_add_pin(struct hdac_device *hdev, hda_nid_t nid)
 	struct hdac_hdmi_pin *pin;
 	int ret;
 
-	pin = kzalloc(sizeof(*pin), GFP_KERNEL);
+	pin = devm_kzalloc(&hdev->dev, sizeof(*pin), GFP_KERNEL);
 	if (!pin)
 		return -ENOMEM;
 
 	pin->nid = nid;
 	pin->mst_capable = false;
 	pin->hdev = hdev;
-	ret = hdac_hdmi_add_ports(hdmi, pin);
+	ret = hdac_hdmi_add_ports(hdev, pin);
 	if (ret < 0)
 		return ret;
 
@@ -1380,7 +1435,7 @@ static const struct snd_soc_dai_ops hdmi_dai_ops = {
 	.startup = hdac_hdmi_pcm_open,
 	.shutdown = hdac_hdmi_pcm_close,
 	.hw_params = hdac_hdmi_set_hw_params,
-	.set_tdm_slot = hdac_hdmi_set_tdm_slot,
+	.set_stream = hdac_hdmi_set_stream,
 };
 
 /*
@@ -1408,7 +1463,7 @@ static int hdac_hdmi_create_dais(struct hdac_device *hdev,
 
 	list_for_each_entry(cvt, &hdmi->cvt_list, head) {
 		ret = snd_hdac_query_supported_pcm(hdev, cvt->nid,
-					&rates,	&formats, &bps);
+					&rates,	&formats, NULL, &bps);
 		if (ret)
 			return ret;
 
@@ -1461,8 +1516,6 @@ static int hdac_hdmi_parse_and_map_nid(struct hdac_device *hdev,
 {
 	hda_nid_t nid;
 	int i, num_nodes;
-	struct hdac_hdmi_cvt *temp_cvt, *cvt_next;
-	struct hdac_hdmi_pin *temp_pin, *pin_next;
 	struct hdac_hdmi_priv *hdmi = hdev_to_hdmi_priv(hdev);
 	int ret;
 
@@ -1479,8 +1532,8 @@ static int hdac_hdmi_parse_and_map_nid(struct hdac_device *hdev,
 		unsigned int caps;
 		unsigned int type;
 
-		caps = get_wcaps(hdev, nid);
-		type = get_wcaps_type(caps);
+		caps = snd_hdac_get_wcaps(hdev, nid);
+		type = snd_hdac_get_wcaps_type(caps);
 
 		if (!(caps & AC_WCAP_DIGITAL))
 			continue;
@@ -1490,51 +1543,35 @@ static int hdac_hdmi_parse_and_map_nid(struct hdac_device *hdev,
 		case AC_WID_AUD_OUT:
 			ret = hdac_hdmi_add_cvt(hdev, nid);
 			if (ret < 0)
-				goto free_widgets;
+				return ret;
 			break;
 
 		case AC_WID_PIN:
 			ret = hdac_hdmi_add_pin(hdev, nid);
 			if (ret < 0)
-				goto free_widgets;
+				return ret;
 			break;
 		}
 	}
 
 	if (!hdmi->num_pin || !hdmi->num_cvt) {
 		ret = -EIO;
-		goto free_widgets;
+		dev_err(&hdev->dev, "Bad pin/cvt setup in %s\n", __func__);
+		return ret;
 	}
 
 	ret = hdac_hdmi_create_dais(hdev, dais, hdmi, hdmi->num_cvt);
 	if (ret) {
 		dev_err(&hdev->dev, "Failed to create dais with err: %d\n",
-							ret);
-		goto free_widgets;
+			ret);
+		return ret;
 	}
 
 	*num_dais = hdmi->num_cvt;
 	ret = hdac_hdmi_init_dai_map(hdev);
 	if (ret < 0)
-		goto free_widgets;
-
-	return ret;
-
-free_widgets:
-	list_for_each_entry_safe(temp_cvt, cvt_next, &hdmi->cvt_list, head) {
-		list_del(&temp_cvt->head);
-		kfree(temp_cvt->name);
-		kfree(temp_cvt);
-	}
-
-	list_for_each_entry_safe(temp_pin, pin_next, &hdmi->pin_list, head) {
-		for (i = 0; i < temp_pin->num_ports; i++)
-			temp_pin->ports[i].pin = NULL;
-		kfree(temp_pin->ports);
-		list_del(&temp_pin->head);
-		kfree(temp_pin);
-	}
-
+		dev_err(&hdev->dev, "Failed to init DAI map with err: %d\n",
+			ret);
 	return ret;
 }
 
@@ -1547,7 +1584,7 @@ static void hdac_hdmi_eld_notify_cb(void *aptr, int port, int pipe)
 {
 	struct hdac_device *hdev = aptr;
 	struct hdac_hdmi_priv *hdmi = hdev_to_hdmi_priv(hdev);
-	struct hdac_hdmi_pin *pin = NULL;
+	struct hdac_hdmi_pin *pin;
 	struct hdac_hdmi_port *hport = NULL;
 	struct snd_soc_component *component = hdmi->component;
 	int i;
@@ -1601,179 +1638,6 @@ static struct drm_audio_component_audio_ops aops = {
 	.pin_eld_notify	= hdac_hdmi_eld_notify_cb,
 };
 
-static struct snd_pcm *hdac_hdmi_get_pcm_from_id(struct snd_soc_card *card,
-						int device)
-{
-	struct snd_soc_pcm_runtime *rtd;
-
-	list_for_each_entry(rtd, &card->rtd_list, list) {
-		if (rtd->pcm && (rtd->pcm->device == device))
-			return rtd->pcm;
-	}
-
-	return NULL;
-}
-
-/* create jack pin kcontrols */
-static int create_fill_jack_kcontrols(struct snd_soc_card *card,
-				    struct hdac_device *hdev)
-{
-	struct hdac_hdmi_pin *pin;
-	struct snd_kcontrol_new *kc;
-	char kc_name[NAME_SIZE], xname[NAME_SIZE];
-	char *name;
-	int i = 0, j;
-	struct hdac_hdmi_priv *hdmi = hdev_to_hdmi_priv(hdev);
-	struct snd_soc_component *component = hdmi->component;
-
-	kc = devm_kcalloc(component->dev, hdmi->num_ports,
-				sizeof(*kc), GFP_KERNEL);
-
-	if (!kc)
-		return -ENOMEM;
-
-	list_for_each_entry(pin, &hdmi->pin_list, head) {
-		for (j = 0; j < pin->num_ports; j++) {
-			snprintf(xname, sizeof(xname), "hif%d-%d Jack",
-						pin->nid, pin->ports[j].id);
-			name = devm_kstrdup(component->dev, xname, GFP_KERNEL);
-			if (!name)
-				return -ENOMEM;
-			snprintf(kc_name, sizeof(kc_name), "%s Switch", xname);
-			kc[i].name = devm_kstrdup(component->dev, kc_name,
-							GFP_KERNEL);
-			if (!kc[i].name)
-				return -ENOMEM;
-
-			kc[i].private_value = (unsigned long)name;
-			kc[i].iface = SNDRV_CTL_ELEM_IFACE_MIXER;
-			kc[i].access = 0;
-			kc[i].info = snd_soc_dapm_info_pin_switch;
-			kc[i].put = snd_soc_dapm_put_pin_switch;
-			kc[i].get = snd_soc_dapm_get_pin_switch;
-			i++;
-		}
-	}
-
-	return snd_soc_add_card_controls(card, kc, i);
-}
-
-int hdac_hdmi_jack_port_init(struct snd_soc_component *component,
-			struct snd_soc_dapm_context *dapm)
-{
-	struct hdac_hdmi_priv *hdmi = snd_soc_component_get_drvdata(component);
-	struct hdac_device *hdev = hdmi->hdev;
-	struct hdac_hdmi_pin *pin;
-	struct snd_soc_dapm_widget *widgets;
-	struct snd_soc_dapm_route *route;
-	char w_name[NAME_SIZE];
-	int i = 0, j, ret;
-
-	widgets = devm_kcalloc(dapm->dev, hdmi->num_ports,
-				sizeof(*widgets), GFP_KERNEL);
-
-	if (!widgets)
-		return -ENOMEM;
-
-	route = devm_kcalloc(dapm->dev, hdmi->num_ports,
-				sizeof(*route), GFP_KERNEL);
-	if (!route)
-		return -ENOMEM;
-
-	/* create Jack DAPM widget */
-	list_for_each_entry(pin, &hdmi->pin_list, head) {
-		for (j = 0; j < pin->num_ports; j++) {
-			snprintf(w_name, sizeof(w_name), "hif%d-%d Jack",
-						pin->nid, pin->ports[j].id);
-
-			ret = hdac_hdmi_fill_widget_info(dapm->dev, &widgets[i],
-					snd_soc_dapm_spk, NULL,
-					w_name, NULL, NULL, 0, NULL, 0);
-			if (ret < 0)
-				return ret;
-
-			pin->ports[j].jack_pin = widgets[i].name;
-			pin->ports[j].dapm = dapm;
-
-			/* add to route from Jack widget to output */
-			hdac_hdmi_fill_route(&route[i], pin->ports[j].jack_pin,
-					NULL, pin->ports[j].output_pin, NULL);
-
-			i++;
-		}
-	}
-
-	/* Add Route from Jack widget to the output widget */
-	ret = snd_soc_dapm_new_controls(dapm, widgets, hdmi->num_ports);
-	if (ret < 0)
-		return ret;
-
-	ret = snd_soc_dapm_add_routes(dapm, route, hdmi->num_ports);
-	if (ret < 0)
-		return ret;
-
-	ret = snd_soc_dapm_new_widgets(dapm->card);
-	if (ret < 0)
-		return ret;
-
-	/* Add Jack Pin switch Kcontrol */
-	ret = create_fill_jack_kcontrols(dapm->card, hdev);
-
-	if (ret < 0)
-		return ret;
-
-	/* default set the Jack Pin switch to OFF */
-	list_for_each_entry(pin, &hdmi->pin_list, head) {
-		for (j = 0; j < pin->num_ports; j++)
-			snd_soc_dapm_disable_pin(pin->ports[j].dapm,
-						pin->ports[j].jack_pin);
-	}
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(hdac_hdmi_jack_port_init);
-
-int hdac_hdmi_jack_init(struct snd_soc_dai *dai, int device,
-				struct snd_soc_jack *jack)
-{
-	struct snd_soc_component *component = dai->component;
-	struct hdac_hdmi_priv *hdmi = snd_soc_component_get_drvdata(component);
-	struct hdac_device *hdev = hdmi->hdev;
-	struct hdac_hdmi_pcm *pcm;
-	struct snd_pcm *snd_pcm;
-	int err;
-
-	/*
-	 * this is a new PCM device, create new pcm and
-	 * add to the pcm list
-	 */
-	pcm = kzalloc(sizeof(*pcm), GFP_KERNEL);
-	if (!pcm)
-		return -ENOMEM;
-	pcm->pcm_id = device;
-	pcm->cvt = hdmi->dai_map[dai->id].cvt;
-	pcm->jack_event = 0;
-	pcm->jack = jack;
-	mutex_init(&pcm->lock);
-	INIT_LIST_HEAD(&pcm->port_list);
-	snd_pcm = hdac_hdmi_get_pcm_from_id(dai->component->card, device);
-	if (snd_pcm) {
-		err = snd_hdac_add_chmap_ctls(snd_pcm, device, &hdmi->chmap);
-		if (err < 0) {
-			dev_err(&hdev->dev,
-				"chmap control add failed with err: %d for pcm: %d\n",
-				err, device);
-			kfree(pcm);
-			return err;
-		}
-	}
-
-	list_add_tail(&pcm->head, &hdmi->pcm_list);
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(hdac_hdmi_jack_init);
-
 static void hdac_hdmi_present_sense_all_pins(struct hdac_device *hdev,
 			struct hdac_hdmi_priv *hdmi, bool detect_pin_caps)
 {
@@ -1804,7 +1668,7 @@ static int hdmi_codec_probe(struct snd_soc_component *component)
 	struct hdac_device *hdev = hdmi->hdev;
 	struct snd_soc_dapm_context *dapm =
 		snd_soc_component_get_dapm(component);
-	struct hdac_ext_link *hlink = NULL;
+	struct hdac_ext_link *hlink;
 	int ret;
 
 	hdmi->component = component;
@@ -1813,7 +1677,7 @@ static int hdmi_codec_probe(struct snd_soc_component *component)
 	 * hold the ref while we probe, also no need to drop the ref on
 	 * exit, we call pm_runtime_suspend() so that will do for us
 	 */
-	hlink = snd_hdac_ext_bus_get_link(hdev->bus, dev_name(&hdev->dev));
+	hlink = snd_hdac_ext_bus_get_hlink_by_name(hdev->bus, dev_name(&hdev->dev));
 	if (!hlink) {
 		dev_err(&hdev->dev, "hdac link not found\n");
 		return -EIO;
@@ -1872,59 +1736,34 @@ static void hdmi_codec_remove(struct snd_soc_component *component)
 	pm_runtime_disable(&hdev->dev);
 }
 
-#ifdef CONFIG_PM
-static int hdmi_codec_prepare(struct device *dev)
-{
-	struct hdac_device *hdev = dev_to_hdac_dev(dev);
-
-	pm_runtime_get_sync(&hdev->dev);
-
-	/*
-	 * Power down afg.
-	 * codec_read is preferred over codec_write to set the power state.
-	 * This way verb is send to set the power state and response
-	 * is received. So setting power state is ensured without using loop
-	 * to read the state.
-	 */
-	snd_hdac_codec_read(hdev, hdev->afg, 0,	AC_VERB_SET_POWER_STATE,
-							AC_PWRST_D3);
-
-	return 0;
-}
-
-static void hdmi_codec_complete(struct device *dev)
+static int hdmi_codec_resume(struct device *dev)
 {
 	struct hdac_device *hdev = dev_to_hdac_dev(dev);
 	struct hdac_hdmi_priv *hdmi = hdev_to_hdmi_priv(hdev);
+	int ret;
 
-	/* Power up afg */
-	snd_hdac_codec_read(hdev, hdev->afg, 0,	AC_VERB_SET_POWER_STATE,
-							AC_PWRST_D0);
-
-	hdac_hdmi_skl_enable_all_pins(hdev);
-	hdac_hdmi_skl_enable_dp12(hdev);
-
+	ret = pm_runtime_force_resume(dev);
+	if (ret < 0)
+		return ret;
 	/*
 	 * As the ELD notify callback request is not entertained while the
 	 * device is in suspend state. Need to manually check detection of
 	 * all pins here. pin capablity change is not support, so use the
 	 * already set pin caps.
+	 *
+	 * NOTE: this is safe to call even if the codec doesn't actually resume.
+	 * The pin check involves only with DRM audio component hooks, so it
+	 * works even if the HD-audio side is still dreaming peacefully.
 	 */
 	hdac_hdmi_present_sense_all_pins(hdev, hdmi, false);
-
-	pm_runtime_put_sync(&hdev->dev);
+	return 0;
 }
-#else
-#define hdmi_codec_prepare NULL
-#define hdmi_codec_complete NULL
-#endif
 
 static const struct snd_soc_component_driver hdmi_hda_codec = {
 	.probe			= hdmi_codec_probe,
 	.remove			= hdmi_codec_remove,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
-	.non_legacy_dai_naming	= 1,
 };
 
 static void hdac_hdmi_get_chmap(struct hdac_device *hdev, int pcm_idx,
@@ -1986,9 +1825,6 @@ static int hdac_hdmi_get_spk_alloc(struct hdac_device *hdev, int pcm_idx)
 
 	port = list_first_entry(&pcm->port_list, struct hdac_hdmi_port, head);
 
-	if (!port)
-		return 0;
-
 	if (!port || !port->eld.eld_valid)
 		return 0;
 
@@ -2005,16 +1841,16 @@ static struct hdac_hdmi_drv_data intel_drv_data  = {
 
 static int hdac_hdmi_dev_probe(struct hdac_device *hdev)
 {
-	struct hdac_hdmi_priv *hdmi_priv = NULL;
+	struct hdac_hdmi_priv *hdmi_priv;
 	struct snd_soc_dai_driver *hdmi_dais = NULL;
-	struct hdac_ext_link *hlink = NULL;
+	struct hdac_ext_link *hlink;
 	int num_dais = 0;
-	int ret = 0;
+	int ret;
 	struct hdac_driver *hdrv = drv_to_hdac_driver(hdev->dev.driver);
 	const struct hda_device_id *hdac_id = hdac_get_device_id(hdev, hdrv);
 
 	/* hold the ref while we probe */
-	hlink = snd_hdac_ext_bus_get_link(hdev->bus, dev_name(&hdev->dev));
+	hlink = snd_hdac_ext_bus_get_hlink_by_name(hdev->bus, dev_name(&hdev->dev));
 	if (!hlink) {
 		dev_err(&hdev->dev, "hdac link not found\n");
 		return -EIO;
@@ -2053,13 +1889,7 @@ static int hdac_hdmi_dev_probe(struct hdac_device *hdev)
 	 * Turned off in the runtime_suspend during the first explicit
 	 * pm_runtime_suspend call.
 	 */
-	ret = snd_hdac_display_power(hdev->bus, true);
-	if (ret < 0) {
-		dev_err(&hdev->dev,
-			"Cannot turn on display power on i915 err: %d\n",
-			ret);
-		return ret;
-	}
+	snd_hdac_display_power(hdev->bus, hdev->addr, true);
 
 	ret = hdac_hdmi_parse_and_map_nid(hdev, &hdmi_dais, &num_dais);
 	if (ret < 0) {
@@ -2067,7 +1897,7 @@ static int hdac_hdmi_dev_probe(struct hdac_device *hdev)
 			"Failed in parse and map nid with err: %d\n", ret);
 		return ret;
 	}
-	snd_hdac_refresh_widgets(hdev, true);
+	snd_hdac_refresh_widgets(hdev);
 
 	/* ASoC specific initialization */
 	ret = devm_snd_soc_register_component(&hdev->dev, &hdmi_hda_codec,
@@ -2078,121 +1908,30 @@ static int hdac_hdmi_dev_probe(struct hdac_device *hdev)
 	return ret;
 }
 
-static int hdac_hdmi_dev_remove(struct hdac_device *hdev)
+static void clear_dapm_works(struct hdac_device *hdev)
 {
 	struct hdac_hdmi_priv *hdmi = hdev_to_hdmi_priv(hdev);
-	struct hdac_hdmi_pin *pin, *pin_next;
-	struct hdac_hdmi_cvt *cvt, *cvt_next;
-	struct hdac_hdmi_pcm *pcm, *pcm_next;
-	struct hdac_hdmi_port *port, *port_next;
+	struct hdac_hdmi_pin *pin;
 	int i;
 
-	list_for_each_entry_safe(pcm, pcm_next, &hdmi->pcm_list, head) {
-		pcm->cvt = NULL;
-		if (list_empty(&pcm->port_list))
-			continue;
-
-		list_for_each_entry_safe(port, port_next,
-					&pcm->port_list, head)
-			list_del(&port->head);
-
-		list_del(&pcm->head);
-		kfree(pcm);
-	}
-
-	list_for_each_entry_safe(cvt, cvt_next, &hdmi->cvt_list, head) {
-		list_del(&cvt->head);
-		kfree(cvt->name);
-		kfree(cvt);
-	}
-
-	list_for_each_entry_safe(pin, pin_next, &hdmi->pin_list, head) {
+	list_for_each_entry(pin, &hdmi->pin_list, head)
 		for (i = 0; i < pin->num_ports; i++)
-			pin->ports[i].pin = NULL;
-		kfree(pin->ports);
-		list_del(&pin->head);
-		kfree(pin);
-	}
+			cancel_work_sync(&pin->ports[i].dapm_work);
+}
+
+static int hdac_hdmi_dev_remove(struct hdac_device *hdev)
+{
+	clear_dapm_works(hdev);
+	snd_hdac_display_power(hdev->bus, hdev->addr, false);
 
 	return 0;
 }
 
-#ifdef CONFIG_PM
-/*
- * Power management sequences
- * ==========================
- *
- * The following explains the PM handling of HDAC HDMI with its parent
- * device SKL and display power usage
- *
- * Probe
- * -----
- * In SKL probe,
- * 1. skl_probe_work() powers up the display (refcount++ -> 1)
- * 2. enumerates the codecs on the link
- * 3. powers down the display  (refcount-- -> 0)
- *
- * In HDAC HDMI probe,
- * 1. hdac_hdmi_dev_probe() powers up the display (refcount++ -> 1)
- * 2. probe the codec
- * 3. put the HDAC HDMI device to runtime suspend
- * 4. hdac_hdmi_runtime_suspend() powers down the display (refcount-- -> 0)
- *
- * Once children are runtime suspended, SKL device also goes to runtime
- * suspend
- *
- * HDMI Playback
- * -------------
- * Open HDMI device,
- * 1. skl_runtime_resume() invoked
- * 2. hdac_hdmi_runtime_resume() powers up the display (refcount++ -> 1)
- *
- * Close HDMI device,
- * 1. hdac_hdmi_runtime_suspend() powers down the display (refcount-- -> 0)
- * 2. skl_runtime_suspend() invoked
- *
- * S0/S3 Cycle with playback in progress
- * -------------------------------------
- * When the device is opened for playback, the device is runtime active
- * already and the display refcount is 1 as explained above.
- *
- * Entering to S3,
- * 1. hdmi_codec_prepare() invoke the runtime resume of codec which just
- *    increments the PM runtime usage count of the codec since the device
- *    is in use already
- * 2. skl_suspend() powers down the display (refcount-- -> 0)
- *
- * Wakeup from S3,
- * 1. skl_resume() powers up the display (refcount++ -> 1)
- * 2. hdmi_codec_complete() invokes the runtime suspend of codec which just
- *    decrements the PM runtime usage count of the codec since the device
- *    is in use already
- *
- * Once playback is stopped, the display refcount is set to 0 as explained
- * above in the HDMI playback sequence. The PM handlings are designed in
- * such way that to balance the refcount of display power when the codec
- * device put to S3 while playback is going on.
- *
- * S0/S3 Cycle without playback in progress
- * ----------------------------------------
- * Entering to S3,
- * 1. hdmi_codec_prepare() invoke the runtime resume of codec
- * 2. skl_runtime_resume() invoked
- * 3. hdac_hdmi_runtime_resume() powers up the display (refcount++ -> 1)
- * 4. skl_suspend() powers down the display (refcount-- -> 0)
- *
- * Wakeup from S3,
- * 1. skl_resume() powers up the display (refcount++ -> 1)
- * 2. hdmi_codec_complete() invokes the runtime suspend of codec
- * 3. hdac_hdmi_runtime_suspend() powers down the display (refcount-- -> 0)
- * 4. skl_runtime_suspend() invoked
- */
 static int hdac_hdmi_runtime_suspend(struct device *dev)
 {
 	struct hdac_device *hdev = dev_to_hdac_dev(dev);
 	struct hdac_bus *bus = hdev->bus;
-	struct hdac_ext_link *hlink = NULL;
-	int err;
+	struct hdac_ext_link *hlink;
 
 	dev_dbg(dev, "Enter: %s\n", __func__);
 
@@ -2210,27 +1949,25 @@ static int hdac_hdmi_runtime_suspend(struct device *dev)
 	snd_hdac_codec_read(hdev, hdev->afg, 0,	AC_VERB_SET_POWER_STATE,
 							AC_PWRST_D3);
 
-	hlink = snd_hdac_ext_bus_get_link(bus, dev_name(dev));
+	hlink = snd_hdac_ext_bus_get_hlink_by_name(bus, dev_name(dev));
 	if (!hlink) {
 		dev_err(dev, "hdac link not found\n");
 		return -EIO;
 	}
 
+	snd_hdac_codec_link_down(hdev);
 	snd_hdac_ext_bus_link_put(bus, hlink);
 
-	err = snd_hdac_display_power(bus, false);
-	if (err < 0)
-		dev_err(dev, "Cannot turn off display power on i915\n");
+	snd_hdac_display_power(bus, hdev->addr, false);
 
-	return err;
+	return 0;
 }
 
 static int hdac_hdmi_runtime_resume(struct device *dev)
 {
 	struct hdac_device *hdev = dev_to_hdac_dev(dev);
 	struct hdac_bus *bus = hdev->bus;
-	struct hdac_ext_link *hlink = NULL;
-	int err;
+	struct hdac_ext_link *hlink;
 
 	dev_dbg(dev, "Enter: %s\n", __func__);
 
@@ -2238,19 +1975,16 @@ static int hdac_hdmi_runtime_resume(struct device *dev)
 	if (!bus)
 		return 0;
 
-	hlink = snd_hdac_ext_bus_get_link(bus, dev_name(dev));
+	hlink = snd_hdac_ext_bus_get_hlink_by_name(bus, dev_name(dev));
 	if (!hlink) {
 		dev_err(dev, "hdac link not found\n");
 		return -EIO;
 	}
 
 	snd_hdac_ext_bus_link_get(bus, hlink);
+	snd_hdac_codec_link_up(hdev);
 
-	err = snd_hdac_display_power(bus, true);
-	if (err < 0) {
-		dev_err(dev, "Cannot turn on display power on i915\n");
-		return err;
-	}
+	snd_hdac_display_power(bus, hdev->addr, true);
 
 	hdac_hdmi_skl_enable_all_pins(hdev);
 	hdac_hdmi_skl_enable_dp12(hdev);
@@ -2261,15 +1995,10 @@ static int hdac_hdmi_runtime_resume(struct device *dev)
 
 	return 0;
 }
-#else
-#define hdac_hdmi_runtime_suspend NULL
-#define hdac_hdmi_runtime_resume NULL
-#endif
 
 static const struct dev_pm_ops hdac_hdmi_pm = {
-	SET_RUNTIME_PM_OPS(hdac_hdmi_runtime_suspend, hdac_hdmi_runtime_resume, NULL)
-	.prepare = hdmi_codec_prepare,
-	.complete = hdmi_codec_complete,
+	RUNTIME_PM_OPS(hdac_hdmi_runtime_suspend, hdac_hdmi_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, hdmi_codec_resume)
 };
 
 static const struct hda_device_id hdmi_list[] = {
@@ -2288,7 +2017,7 @@ MODULE_DEVICE_TABLE(hdaudio, hdmi_list);
 static struct hdac_driver hdmi_driver = {
 	.driver = {
 		.name   = "HDMI HDA Codec",
-		.pm = &hdac_hdmi_pm,
+		.pm = pm_ptr(&hdac_hdmi_pm),
 	},
 	.id_table       = hdmi_list,
 	.probe          = hdac_hdmi_dev_probe,

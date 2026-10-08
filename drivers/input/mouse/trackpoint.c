@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Stephen Evanchik <evanchsa@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  *
  * Trademarks are the property of their respective owners.
  */
@@ -217,9 +214,9 @@ static bool trackpoint_is_attr_available(struct psmouse *psmouse,
 static umode_t trackpoint_is_attr_visible(struct kobject *kobj,
 					  struct attribute *attr, int n)
 {
-	struct device *dev = container_of(kobj, struct device, kobj);
+	struct device *dev = kobj_to_dev(kobj);
 	struct serio *serio = to_serio_port(dev);
-	struct psmouse *psmouse = serio_get_drvdata(serio);
+	struct psmouse *psmouse = psmouse_from_serio(serio);
 
 	return trackpoint_is_attr_available(psmouse, attr) ? attr->mode : 0;
 }

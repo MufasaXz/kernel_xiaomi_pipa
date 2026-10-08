@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	elanfreq:	cpufreq driver for the AMD ELAN family
  *
@@ -7,13 +8,7 @@
  *
  *      All Rights Reserved.
  *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
- *
  *	2002-02-13: - initial revision for 2.4.18-pre9 by Robert Schwebel
- *
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -26,7 +21,6 @@
 #include <linux/cpufreq.h>
 
 #include <asm/cpu_device_id.h>
-#include <asm/msr.h>
 #include <linux/timex.h>
 #include <linux/io.h>
 
@@ -199,11 +193,10 @@ static struct cpufreq_driver elanfreq_driver = {
 	.target_index	= elanfreq_target,
 	.init		= elanfreq_cpu_init,
 	.name		= "elanfreq",
-	.attr		= cpufreq_generic_attr,
 };
 
 static const struct x86_cpu_id elan_id[] = {
-	{ X86_VENDOR_AMD, 4, 10, },
+	X86_MATCH_VENDOR_FAM_MODEL(AMD, 4, 10, NULL),
 	{}
 };
 MODULE_DEVICE_TABLE(x86cpu, elan_id);

@@ -7,15 +7,14 @@
 #include <linux/ata.h>
 #include <linux/slab.h>
 #include <linux/hdreg.h>
-#include <linux/blkdev.h>
+#include <linux/blk-mq.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
-#include <linux/genhd.h>
 #include <linux/moduleparam.h>
 #include <linux/workqueue.h>
 #include <linux/kthread.h>
 #include <net/net_namespace.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/uio.h>
 #include "aoe.h"
 
@@ -122,7 +121,7 @@ newtag(struct aoedev *d)
 	register ulong n;
 
 	n = jiffies & 0xffff;
-	return n |= (++d->lasttag & 0x7fff) << 16;
+	return n | (++d->lasttag & 0x7fff) << 16;
 }
 
 static u32
@@ -746,7 +745,7 @@ rexmit_timer(struct timer_list *timer)
 	int utgts;	/* number of aoetgt descriptors (not slots) */
 	int since;
 
-	d = from_timer(d, timer, timer);
+	d = timer_container_of(d, timer, timer);
 
 	spin_lock_irqsave(&d->lock, flags);
 
@@ -755,7 +754,7 @@ rexmit_timer(struct timer_list *timer)
 
 	utgts = count_targets(d, NULL);
 
-	if (d->flags & DEVFL_TKILL) {
+	if (d->flags & (DEVFL_TKILL | DEVFL_DEAD)) {
 		spin_unlock_irqrestore(&d->lock, flags);
 		return;
 	}
@@ -787,7 +786,8 @@ rexmit_timer(struct timer_list *timer)
 			 * to clean up.
 			 */
 			list_splice(&flist, &d->factive[0]);
-			aoedev_downdev(d);
+			d->flags |= DEVFL_DEAD;
+			queue_work(aoe_wq, &d->work);
 			goto out;
 		}
 
@@ -821,24 +821,13 @@ rexmit_timer(struct timer_list *timer)
 out:
 	if ((d->flags & DEVFL_KICKME) && d->blkq) {
 		d->flags &= ~DEVFL_KICKME;
-		d->blkq->request_fn(d->blkq);
+		blk_mq_run_hw_queues(d->blkq, true);
 	}
 
 	d->timer.expires = jiffies + TIMERTICK;
 	add_timer(&d->timer);
 
 	spin_unlock_irqrestore(&d->lock, flags);
-}
-
-static unsigned long
-rqbiocnt(struct request *r)
-{
-	struct bio *bio;
-	unsigned long n = 0;
-
-	__rq_for_each_bio(bio, r)
-		n++;
-	return n;
 }
 
 static void
@@ -855,6 +844,7 @@ nextbuf(struct aoedev *d)
 {
 	struct request *rq;
 	struct request_queue *q;
+	struct aoe_req *req;
 	struct buf *buf;
 	struct bio *bio;
 
@@ -865,13 +855,19 @@ nextbuf(struct aoedev *d)
 		return d->ip.buf;
 	rq = d->ip.rq;
 	if (rq == NULL) {
-		rq = blk_peek_request(q);
+		rq = list_first_entry_or_null(&d->rq_list, struct request,
+						queuelist);
 		if (rq == NULL)
 			return NULL;
-		blk_start_request(rq);
+		list_del_init(&rq->queuelist);
+		blk_mq_start_request(rq);
 		d->ip.rq = rq;
 		d->ip.nxbio = rq->bio;
-		rq->special = (void *) rqbiocnt(rq);
+
+		req = blk_mq_rq_to_pdu(rq);
+		req->nr_bios = 0;
+		__rq_for_each_bio(bio, rq)
+			req->nr_bios++;
 	}
 	buf = mempool_alloc(d->bufpool, GFP_ATOMIC);
 	if (buf == NULL) {
@@ -902,21 +898,16 @@ void
 aoecmd_sleepwork(struct work_struct *work)
 {
 	struct aoedev *d = container_of(work, struct aoedev, work);
-	struct block_device *bd;
-	u64 ssize;
+
+	if (d->flags & DEVFL_DEAD)
+		aoedev_downdev(d);
 
 	if (d->flags & DEVFL_GDALLOC)
 		aoeblk_gdalloc(d);
 
 	if (d->flags & DEVFL_NEWSIZE) {
-		ssize = get_capacity(d->gd);
-		bd = bdget_disk(d->gd, 0);
-		if (bd) {
-			inode_lock(bd->bd_inode);
-			i_size_write(bd->bd_inode, (loff_t)ssize<<9);
-			inode_unlock(bd->bd_inode);
-			bdput(bd);
-		}
+		set_capacity_and_notify(d->gd, d->ssize);
+
 		spin_lock_irq(&d->lock);
 		d->flags |= DEVFL_UP;
 		d->flags &= ~DEVFL_NEWSIZE;
@@ -985,12 +976,11 @@ ataid_complete(struct aoedev *d, struct aoetgt *t, unsigned char *id)
 	d->geo.start = 0;
 	if (d->flags & (DEVFL_GDALLOC|DEVFL_NEWSIZE))
 		return;
-	if (d->gd != NULL) {
-		set_capacity(d->gd, ssize);
+	if (d->gd != NULL)
 		d->flags |= DEVFL_NEWSIZE;
-	} else
+	else
 		d->flags |= DEVFL_GDALLOC;
-	schedule_work(&d->work);
+	queue_work(aoe_wq, &d->work);
 }
 
 static void
@@ -1040,9 +1030,9 @@ bvcpy(struct sk_buff *skb, struct bio *bio, struct bvec_iter iter, long cnt)
 	iter.bi_size = cnt;
 
 	__bio_for_each_segment(bv, bio, iter, iter) {
-		char *p = kmap_atomic(bv.bv_page) + bv.bv_offset;
+		char *p = bvec_kmap_local(&bv);
 		skb_copy_bits(skb, soff, p, bv.bv_len);
-		kunmap_atomic(p);
+		kunmap_local(p);
 		soff += bv.bv_len;
 	}
 }
@@ -1053,6 +1043,7 @@ aoe_end_request(struct aoedev *d, struct request *rq, int fastfail)
 	struct bio *bio;
 	int bok;
 	struct request_queue *q;
+	blk_status_t err = BLK_STS_OK;
 
 	q = d->blkq;
 	if (rq == d->ip.rq)
@@ -1060,26 +1051,27 @@ aoe_end_request(struct aoedev *d, struct request *rq, int fastfail)
 	do {
 		bio = rq->bio;
 		bok = !fastfail && !bio->bi_status;
-	} while (__blk_end_request(rq, bok ? BLK_STS_OK : BLK_STS_IOERR, bio->bi_iter.bi_size));
+		if (!bok)
+			err = BLK_STS_IOERR;
+	} while (blk_update_request(rq, bok ? BLK_STS_OK : BLK_STS_IOERR, bio->bi_iter.bi_size));
 
-	/* cf. http://lkml.org/lkml/2006/10/31/28 */
+	__blk_mq_end_request(rq, err);
+
+	/* cf. https://lore.kernel.org/lkml/20061031071040.GS14055@kernel.dk/ */
 	if (!fastfail)
-		__blk_run_queue(q);
+		blk_mq_run_hw_queues(q, true);
 }
 
 static void
 aoe_end_buf(struct aoedev *d, struct buf *buf)
 {
-	struct request *rq;
-	unsigned long n;
+	struct request *rq = buf->rq;
+	struct aoe_req *req = blk_mq_rq_to_pdu(rq);
 
 	if (buf == d->ip.buf)
 		d->ip.buf = NULL;
-	rq = buf->rq;
 	mempool_free(buf, d->bufpool);
-	n = (unsigned long) rq->special;
-	rq->special = (void *) --n;
-	if (n == 0)
+	if (--req->nr_bios == 0)
 		aoe_end_request(d, rq, 0);
 }
 
@@ -1145,7 +1137,7 @@ noskb:		if (buf)
 			break;
 		}
 		bvcpy(skb, f->buf->bio, f->iter, n);
-		/* fall through */
+		fallthrough;
 	case ATA_CMD_PIO_WRITE:
 	case ATA_CMD_PIO_WRITE_EXT:
 		spin_lock_irq(&d->lock);
@@ -1723,8 +1715,6 @@ aoecmd_init(void)
 		goto ktiowq_fail;
 	}
 
-	mutex_init(&ktio_spawn_lock);
-
 	for (i = 0; i < ncpus; i++) {
 		INIT_LIST_HEAD(&iocq[i].head);
 		spin_lock_init(&iocq[i].lock);
@@ -1771,6 +1761,6 @@ aoecmd_exit(void)
 	kfree(kts);
 	kfree(ktiowq);
 
-	free_page((unsigned long) page_address(empty_page));
+	__free_page(empty_page);
 	empty_page = NULL;
 }

@@ -1,9 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2014-2016 Pratyush Anand <panand@redhat.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef _ASM_UPROBES_H
@@ -30,5 +27,16 @@ struct arch_uprobe {
 	struct arch_probe_insn api;
 	bool simulate;
 };
+
+int uprobe_brk_handler(struct pt_regs *regs, unsigned long esr);
+#ifdef CONFIG_UPROBES
+int uprobe_single_step_handler(struct pt_regs *regs, unsigned long esr);
+#else
+static inline int uprobe_single_step_handler(struct pt_regs *regs,
+	unsigned long esr)
+{
+	return DBG_HOOK_ERROR;
+}
+#endif
 
 #endif

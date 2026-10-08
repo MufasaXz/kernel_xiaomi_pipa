@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* drivers/atm/idt77105.c - IDT77105 (PHY) driver */
  
 /* Written 1999 by Greg Banks, NEC Australia <gnb@linuxfan.com>. Based on suni.c */
@@ -191,7 +192,7 @@ static int idt77105_ioctl(struct atm_dev *dev,unsigned int cmd,void __user *arg)
 	switch (cmd) {
 		case IDT77105_GETSTATZ:
 			if (!capable(CAP_NET_ADMIN)) return -EPERM;
-			/* fall through */
+			fallthrough;
 		case IDT77105_GETSTAT:
 			return fetch_stats(dev, arg, cmd == IDT77105_GETSTATZ);
 		case ATM_SETLOOP:
@@ -365,10 +366,11 @@ EXPORT_SYMBOL(idt77105_init);
 static void __exit idt77105_exit(void)
 {
 	/* turn off timers */
-	del_timer_sync(&stats_timer);
-	del_timer_sync(&restart_timer);
+	timer_delete_sync(&stats_timer);
+	timer_delete_sync(&restart_timer);
 }
 
 module_exit(idt77105_exit);
 
+MODULE_DESCRIPTION("IDT77105 PHY driver");
 MODULE_LICENSE("GPL");

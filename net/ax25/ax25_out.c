@@ -1,8 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * Copyright (C) Alan Cox GW4PTS (alan@lxorguk.ukuu.org.uk)
  * Copyright (C) Jonathan Naylor G4KLX (g4klx@g4klx.demon.co.uk)
@@ -32,7 +29,7 @@
 
 static DEFINE_SPINLOCK(ax25_frag_lock);
 
-ax25_cb *ax25_send_frame(struct sk_buff *skb, int paclen, ax25_address *src, ax25_address *dest, ax25_digi *digi, struct net_device *dev)
+ax25_cb *ax25_send_frame(struct sk_buff *skb, int paclen, const ax25_address *src, ax25_address *dest, ax25_digi *digi, struct net_device *dev)
 {
 	ax25_dev *ax25_dev;
 	ax25_cb *ax25;
@@ -42,10 +39,14 @@ ax25_cb *ax25_send_frame(struct sk_buff *skb, int paclen, ax25_address *src, ax2
 	 * specified.
 	 */
 	if (paclen == 0) {
-		if ((ax25_dev = ax25_dev_ax25dev(dev)) == NULL)
+		rcu_read_lock();
+		ax25_dev = ax25_dev_ax25dev(dev);
+		if (!ax25_dev) {
+			rcu_read_unlock();
 			return NULL;
-
+		}
 		paclen = ax25_dev->values[AX25_VALUES_PACLEN];
+		rcu_read_unlock();
 	}
 
 	/*
@@ -56,13 +57,19 @@ ax25_cb *ax25_send_frame(struct sk_buff *skb, int paclen, ax25_address *src, ax2
 		return ax25;		/* It already existed */
 	}
 
-	if ((ax25_dev = ax25_dev_ax25dev(dev)) == NULL)
+	rcu_read_lock();
+	ax25_dev = ax25_dev_ax25dev(dev);
+	if (!ax25_dev) {
+		rcu_read_unlock();
 		return NULL;
+	}
 
-	if ((ax25 = ax25_create_cb()) == NULL)
+	if ((ax25 = ax25_create_cb()) == NULL) {
+		rcu_read_unlock();
 		return NULL;
-
+	}
 	ax25_fillin_cb(ax25, ax25_dev);
+	rcu_read_unlock();
 
 	ax25->source_addr = *src;
 	ax25->dest_addr   = *dest;
@@ -328,7 +335,6 @@ void ax25_kick(ax25_cb *ax25)
 
 void ax25_transmit_buffer(ax25_cb *ax25, struct sk_buff *skb, int type)
 {
-	struct sk_buff *skbn;
 	unsigned char *ptr;
 	int headroom;
 
@@ -339,18 +345,12 @@ void ax25_transmit_buffer(ax25_cb *ax25, struct sk_buff *skb, int type)
 
 	headroom = ax25_addr_size(ax25->digipeat);
 
-	if (skb_headroom(skb) < headroom) {
-		if ((skbn = skb_realloc_headroom(skb, headroom)) == NULL) {
+	if (unlikely(skb_headroom(skb) < headroom)) {
+		skb = skb_expand_head(skb, headroom);
+		if (!skb) {
 			printk(KERN_CRIT "AX.25: ax25_transmit_buffer - out of memory\n");
-			kfree_skb(skb);
 			return;
 		}
-
-		if (skb->sk != NULL)
-			skb_set_owner_w(skbn, skb->sk);
-
-		consume_skb(skb);
-		skb = skbn;
 	}
 
 	ptr = skb_push(skb, headroom);
@@ -368,7 +368,9 @@ void ax25_queue_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	unsigned char *ptr;
 
+	rcu_read_lock();
 	skb->protocol = ax25_type_trans(skb, ax25_fwd_dev(dev));
+	rcu_read_unlock();
 
 	ptr  = skb_push(skb, 1);
 	*ptr = 0x00;			/* KISS */

@@ -1,18 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * PRNG: Pseudo Random Number Generator
  *       Based on NIST Recommended PRNG From ANSI X9.31 Appendix A.2.4 using
  *       AES 128 cipher
  *
  *  (C) Neil Horman <nhorman@tuxdriver.com>
- *
- *  This program is free software; you can redistribute it and/or modify it
- *  under the terms of the GNU General Public License as published by the
- *  Free Software Foundation; either version 2 of the License, or (at your
- *  any later version.
- *
- *
  */
 
+#include <crypto/internal/cipher.h>
 #include <crypto/internal/rng.h>
 #include <linux/err.h>
 #include <linux/init.h>
@@ -476,3 +471,4 @@ module_init(prng_mod_init);
 module_exit(prng_mod_fini);
 MODULE_ALIAS_CRYPTO("stdrng");
 MODULE_ALIAS_CRYPTO("ansi_cprng");
+MODULE_IMPORT_NS("CRYPTO_INTERNAL");

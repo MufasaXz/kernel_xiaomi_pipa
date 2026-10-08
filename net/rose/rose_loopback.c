@@ -1,8 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * Copyright (C) Jonathan Naylor G4KLX (g4klx@g4klx.demon.co.uk)
  */
@@ -127,7 +124,7 @@ void __exit rose_loopback_clear(void)
 {
 	struct sk_buff *skb;
 
-	del_timer(&loopback_timer);
+	timer_delete(&loopback_timer);
 
 	while ((skb = skb_dequeue(&loopback_queue)) != NULL) {
 		skb->sk = NULL;

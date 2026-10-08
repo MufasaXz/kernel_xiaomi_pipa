@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0+
+/* SPDX-License-Identifier: GPL-2.0+ */
 //
 // OWL common clock driver
 //
@@ -12,10 +12,10 @@
 #define _OWL_COMMON_H_
 
 #include <linux/clk-provider.h>
-#include <linux/of_platform.h>
 #include <linux/regmap.h>
 
 struct device_node;
+struct platform_device;
 
 struct owl_clk_common {
 	struct regmap			*regmap;
@@ -26,6 +26,9 @@ struct owl_clk_desc {
 	struct owl_clk_common		**clks;
 	unsigned long			num_clks;
 	struct clk_hw_onecell_data	*hw_clks;
+	const struct owl_reset_map	*resets;
+	unsigned long			num_resets;
+	struct regmap			*regmap;
 };
 
 static inline struct owl_clk_common *
@@ -35,7 +38,7 @@ static inline struct owl_clk_common *
 }
 
 int owl_clk_regmap_init(struct platform_device *pdev,
-			 const struct owl_clk_desc *desc);
+			struct owl_clk_desc *desc);
 int owl_clk_probe(struct device *dev, struct clk_hw_onecell_data *hw_clks);
 
 #endif /* _OWL_COMMON_H_ */

@@ -1,18 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2010 Cisco Systems, Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
 /* XXX TBD some includes may be extraneous */
@@ -28,10 +16,9 @@
 #include <linux/configfs.h>
 #include <linux/ctype.h>
 #include <linux/hash.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <scsi/scsi_tcq.h>
 #include <scsi/libfc.h>
-#include <scsi/fc_encode.h>
 
 #include <target/target_core_base.h>
 #include <target/target_core_fabric.h>
@@ -184,13 +171,6 @@ int ft_queue_status(struct se_cmd *se_cmd)
 	return 0;
 }
 
-int ft_write_pending_status(struct se_cmd *se_cmd)
-{
-	struct ft_cmd *cmd = container_of(se_cmd, struct ft_cmd, se_cmd);
-
-	return cmd->write_data_len != se_cmd->data_length;
-}
-
 /*
  * Send TX_RDY (transfer ready).
  */
@@ -240,11 +220,6 @@ int ft_write_pending(struct se_cmd *se_cmd)
 		}
 	}
 	fc_seq_send(lport, cmd->seq, fp);
-	return 0;
-}
-
-int ft_get_cmd_state(struct se_cmd *se_cmd)
-{
 	return 0;
 }
 
@@ -556,23 +531,29 @@ static void ft_send_work(struct work_struct *work)
 	case FCP_PTA_ACA:
 		task_attr = TCM_ACA_TAG;
 		break;
-	case FCP_PTA_SIMPLE: /* Fallthrough */
+	case FCP_PTA_SIMPLE:
 	default:
 		task_attr = TCM_SIMPLE_TAG;
 	}
 
 	fc_seq_set_resp(cmd->seq, ft_recv_seq, cmd);
 	cmd->se_cmd.tag = fc_seq_exch(cmd->seq)->rxid;
+
 	/*
 	 * Use a single se_cmd->cmd_kref as we expect to release se_cmd
 	 * directly from ft_check_stop_free callback in response path.
 	 */
-	if (target_submit_cmd(&cmd->se_cmd, cmd->sess->se_sess, fcp->fc_cdb,
-			      &cmd->ft_sense_buffer[0], scsilun_to_int(&fcp->fc_lun),
-			      ntohl(fcp->fc_dl), task_attr, data_dir,
-			      TARGET_SCF_ACK_KREF | TARGET_SCF_USE_CPUID))
+	if (target_init_cmd(&cmd->se_cmd, cmd->sess->se_sess,
+			    &cmd->ft_sense_buffer[0],
+			    scsilun_to_int(&fcp->fc_lun), ntohl(fcp->fc_dl),
+			    task_attr, data_dir, TARGET_SCF_ACK_KREF))
 		goto err;
 
+	if (target_submit_prep(&cmd->se_cmd, fcp->fc_cdb, NULL, 0, NULL, 0,
+			       NULL, 0, GFP_KERNEL))
+		return;
+
+	target_submit(&cmd->se_cmd);
 	pr_debug("r_ctl %x target_submit_cmd %p\n", fh->fh_r_ctl, cmd);
 	return;
 

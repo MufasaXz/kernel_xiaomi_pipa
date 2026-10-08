@@ -124,8 +124,8 @@ csio_wr_fill_fl(struct csio_hw *hw, struct csio_q *flq)
 
 	while (n--) {
 		buf->len = sge->sge_fl_buf_size[sreg];
-		buf->vaddr = pci_alloc_consistent(hw->pdev, buf->len,
-						  &buf->paddr);
+		buf->vaddr = dma_alloc_coherent(&hw->pdev->dev, buf->len,
+						&buf->paddr, GFP_KERNEL);
 		if (!buf->vaddr) {
 			csio_err(hw, "Could only fill %d buffers!\n", n + 1);
 			return -ENOMEM;
@@ -233,7 +233,8 @@ csio_wr_alloc_q(struct csio_hw *hw, uint32_t qsize, uint32_t wrsize,
 
 	q = wrm->q_arr[free_idx];
 
-	q->vstart = pci_zalloc_consistent(hw->pdev, qsz, &q->pstart);
+	q->vstart = dma_alloc_coherent(&hw->pdev->dev, qsz, &q->pstart,
+				       GFP_KERNEL);
 	if (!q->vstart) {
 		csio_err(hw,
 			 "Failed to allocate DMA memory for "
@@ -807,6 +808,7 @@ csio_wr_destroy_queues(struct csio_hw *hw, bool cmd)
 
 				csio_q_eqid(hw, i) = CSIO_MAX_QID;
 			}
+			fallthrough;
 		case CSIO_INGRESS:
 			if (csio_q_iqid(hw, i) != CSIO_MAX_QID) {
 				csio_wr_cleanup_iq_ftr(hw, i);
@@ -828,6 +830,7 @@ csio_wr_destroy_queues(struct csio_hw *hw, bool cmd)
 				if (flq_idx != -1)
 					csio_q_flid(hw, flq_idx) = CSIO_MAX_QID;
 			}
+			break;
 		default:
 			break;
 		}
@@ -957,7 +960,7 @@ csio_wr_copy_to_wrp(void *data_buf, struct csio_wr_pair *wrp,
 	memcpy((uint8_t *) wrp->addr1 + wr_off, data_buf, nbytes);
 	data_len -= nbytes;
 
-	/* Write the remaining data from the begining of circular buffer */
+	/* Write the remaining data from the beginning of circular buffer */
 	if (data_len) {
 		CSIO_DB_ASSERT(data_len <= wrp->size2);
 		CSIO_DB_ASSERT(wrp->addr2 != NULL);
@@ -1048,7 +1051,6 @@ csio_wr_process_fl(struct csio_hw *hw, struct csio_q *q,
 	struct csio_fl_dma_buf flb;
 	struct csio_dma_buf *buf, *fbuf;
 	uint32_t bufsz, len, lastlen = 0;
-	int n;
 	struct csio_q *flq = hw->wrm.q_arr[q->un.iq.flq_idx];
 
 	CSIO_DB_ASSERT(flq != NULL);
@@ -1068,7 +1070,7 @@ csio_wr_process_fl(struct csio_hw *hw, struct csio_q *q,
 	flb.totlen = len;
 
 	/* Consume all freelist buffers used for len bytes */
-	for (n = 0, fbuf = flb.flbufs; ; n++, fbuf++) {
+	for (fbuf = flb.flbufs; ; fbuf++) {
 		buf = &flq->un.fl.bufs[flq->cidx];
 		bufsz = csio_wr_fl_bufsz(sge, buf);
 
@@ -1222,7 +1224,7 @@ csio_wr_process_iq(struct csio_hw *hw, struct csio_q *q,
 
 	/*
 	 * We need to re-arm SGE interrupts in case we got a stray interrupt,
-	 * especially in msix mode. With INTx, this may be a common occurence.
+	 * especially in msix mode. With INTx, this may be a common occurrence.
 	 */
 	if (unlikely(!q->inc_idx)) {
 		CSIO_INC_STATS(q, n_stray_comp);
@@ -1314,7 +1316,6 @@ csio_wr_fixup_host_params(struct csio_hw *hw)
 	u32 fl_align = clsz < 32 ? 32 : clsz;
 	u32 pack_align;
 	u32 ingpad, ingpack;
-	int pcie_cap;
 
 	csio_wr_reg32(hw, HOSTPAGESIZEPF0_V(s_hps) | HOSTPAGESIZEPF1_V(s_hps) |
 		      HOSTPAGESIZEPF2_V(s_hps) | HOSTPAGESIZEPF3_V(s_hps) |
@@ -1345,8 +1346,7 @@ csio_wr_fixup_host_params(struct csio_hw *hw)
 	 * multiple of the Maximum Payload Size.
 	 */
 	pack_align = fl_align;
-	pcie_cap = pci_find_capability(hw->pdev, PCI_CAP_ID_EXP);
-	if (pcie_cap) {
+	if (pci_is_pcie(hw->pdev)) {
 		u32 mps, mps_log;
 		u16 devctl;
 
@@ -1354,9 +1354,7 @@ csio_wr_fixup_host_params(struct csio_hw *hw)
 		 * [bits 7:5] encodes sizes as powers of 2 starting at
 		 * 128 bytes.
 		 */
-		pci_read_config_word(hw->pdev,
-				     pcie_cap + PCI_EXP_DEVCTL,
-				     &devctl);
+		pcie_capability_read_word(hw->pdev, PCI_EXP_DEVCTL, &devctl);
 		mps_log = ((devctl & PCI_EXP_DEVCTL_PAYLOAD) >> 5) + 7;
 		mps = 1 << mps_log;
 		if (mps > pack_align)
@@ -1703,14 +1701,14 @@ csio_wrm_exit(struct csio_wrm *wrm, struct csio_hw *hw)
 					buf = &q->un.fl.bufs[j];
 					if (!buf->vaddr)
 						continue;
-					pci_free_consistent(hw->pdev, buf->len,
-							    buf->vaddr,
-							    buf->paddr);
+					dma_free_coherent(&hw->pdev->dev,
+							buf->len, buf->vaddr,
+							buf->paddr);
 				}
 				kfree(q->un.fl.bufs);
 			}
-			pci_free_consistent(hw->pdev, q->size,
-					    q->vstart, q->pstart);
+			dma_free_coherent(&hw->pdev->dev, q->size,
+					q->vstart, q->pstart);
 		}
 		kfree(q);
 	}

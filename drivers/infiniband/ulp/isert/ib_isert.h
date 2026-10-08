@@ -65,7 +65,11 @@
  */
 #define ISER_RX_SIZE		(ISCSI_DEF_MAX_RECV_SEG_LEN + 1024)
 
-#define ISCSI_ISER_SG_TABLESIZE		256
+/* Minimum I/O size is 512KB */
+#define ISCSI_ISER_MIN_SG_TABLESIZE 128
+
+/* Maximum support is 16MB I/O size */
+#define ISCSI_ISER_MAX_SG_TABLESIZE	4096
 
 enum isert_desc_type {
 	ISCSI_TX_CONTROL,
@@ -142,7 +146,7 @@ struct isert_cmd {
 	u64			pdu_buf_dma;
 	u32			pdu_buf_len;
 	struct isert_conn	*conn;
-	struct iscsi_cmd	*iscsi_cmd;
+	struct iscsit_cmd	*iscsit_cmd;
 	struct iser_tx_desc	tx_desc;
 	struct iser_rx_desc	*rx_desc;
 	struct rdma_rw_ctx	rw;
@@ -169,13 +173,15 @@ struct isert_conn {
 	u64			login_rsp_dma;
 	struct iser_rx_desc	*rx_descs;
 	struct ib_recv_wr	rx_wr[ISERT_QP_MAX_RECV_DTOS];
-	struct iscsi_conn	*conn;
+	struct iscsit_conn	*conn;
 	struct list_head	node;
 	struct completion	login_comp;
 	struct completion	login_req_comp;
 	struct iser_tx_desc	login_tx_desc;
 	struct rdma_cm_id	*cm_id;
 	struct ib_qp		*qp;
+	struct ib_cq		*cq;
+	u32			cq_size;
 	struct isert_device	*device;
 	struct mutex		mutex;
 	struct kref		kref;
@@ -184,22 +190,6 @@ struct isert_conn {
 	bool                    snd_w_inv;
 	wait_queue_head_t	rem_wait;
 	bool			dev_removed;
-};
-
-#define ISERT_MAX_CQ 64
-
-/**
- * struct isert_comp - iSER completion context
- *
- * @device:     pointer to device handle
- * @cq:         completion queue
- * @active_qps: Number of active QPs attached
- *              to completion context
- */
-struct isert_comp {
-	struct isert_device     *device;
-	struct ib_cq		*cq;
-	int                      active_qps;
 };
 
 struct isert_device {

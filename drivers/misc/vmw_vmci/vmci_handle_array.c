@@ -1,26 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * VMware VMCI Driver
  *
  * Copyright (C) 2012 VMware, Inc. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation version 2 and no later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
- * or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * for more details.
  */
 
 #include <linux/slab.h>
 #include "vmci_handle_array.h"
-
-static size_t handle_arr_calc_size(u32 capacity)
-{
-	return VMCI_HANDLE_ARRAY_HEADER_SIZE +
-	    capacity * sizeof(struct vmci_handle);
-}
 
 struct vmci_handle_arr *vmci_handle_arr_create(u32 capacity, u32 max_capacity)
 {
@@ -33,7 +19,7 @@ struct vmci_handle_arr *vmci_handle_arr_create(u32 capacity, u32 max_capacity)
 		capacity = min((u32)VMCI_HANDLE_ARRAY_DEFAULT_CAPACITY,
 			       max_capacity);
 
-	array = kmalloc(handle_arr_calc_size(capacity), GFP_ATOMIC);
+	array = kmalloc(struct_size(array, entries, capacity), GFP_ATOMIC);
 	if (!array)
 		return NULL;
 
@@ -59,8 +45,8 @@ int vmci_handle_arr_append_entry(struct vmci_handle_arr **array_ptr,
 		struct vmci_handle_arr *new_array;
 		u32 capacity_bump = min(array->max_capacity - array->capacity,
 					array->capacity);
-		size_t new_size = handle_arr_calc_size(array->capacity +
-						       capacity_bump);
+		size_t new_size = struct_size(array, entries,
+					      size_add(array->capacity, capacity_bump));
 
 		if (array->size >= array->max_capacity)
 			return VMCI_ERROR_NO_MEM;

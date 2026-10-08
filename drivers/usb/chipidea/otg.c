@@ -22,7 +22,8 @@
 #include "otg_fsm.h"
 
 /**
- * hw_read_otgsc returns otgsc register bits value.
+ * hw_read_otgsc - returns otgsc register bits value.
+ * @ci: the controller
  * @mask: bitfield mask
  */
 u32 hw_read_otgsc(struct ci_hdrc *ci, u32 mask)
@@ -35,7 +36,7 @@ u32 hw_read_otgsc(struct ci_hdrc *ci, u32 mask)
 	 * detection overwrite OTGSC register value
 	 */
 	cable = &ci->platdata->vbus_extcon;
-	if (!IS_ERR(cable->edev)) {
+	if (!IS_ERR(cable->edev) || ci->role_switch) {
 		if (cable->changed)
 			val |= OTGSC_BSVIS;
 		else
@@ -53,7 +54,7 @@ u32 hw_read_otgsc(struct ci_hdrc *ci, u32 mask)
 	}
 
 	cable = &ci->platdata->id_extcon;
-	if (!IS_ERR(cable->edev)) {
+	if (!IS_ERR(cable->edev) || ci->role_switch) {
 		if (cable->changed)
 			val |= OTGSC_IDIS;
 		else
@@ -74,7 +75,8 @@ u32 hw_read_otgsc(struct ci_hdrc *ci, u32 mask)
 }
 
 /**
- * hw_write_otgsc updates target bits of OTGSC register.
+ * hw_write_otgsc - updates target bits of OTGSC register.
+ * @ci: the controller
  * @mask: bitfield mask
  * @data: to be written
  */
@@ -83,7 +85,7 @@ void hw_write_otgsc(struct ci_hdrc *ci, u32 mask, u32 data)
 	struct ci_hdrc_cable *cable;
 
 	cable = &ci->platdata->vbus_extcon;
-	if (!IS_ERR(cable->edev)) {
+	if (!IS_ERR(cable->edev) || ci->role_switch) {
 		if (data & mask & OTGSC_BSVIS)
 			cable->changed = false;
 
@@ -97,7 +99,7 @@ void hw_write_otgsc(struct ci_hdrc *ci, u32 mask, u32 data)
 	}
 
 	cable = &ci->platdata->id_extcon;
-	if (!IS_ERR(cable->edev)) {
+	if (!IS_ERR(cable->edev) || ci->role_switch) {
 		if (data & mask & OTGSC_IDIS)
 			cable->changed = false;
 
@@ -128,8 +130,14 @@ enum ci_role ci_otg_role(struct ci_hdrc *ci)
 
 void ci_handle_vbus_change(struct ci_hdrc *ci)
 {
-	if (!ci->is_otg)
+	if (ci->role != CI_ROLE_GADGET)
 		return;
+
+	if (!ci->is_otg) {
+		if (ci->platdata->flags & CI_HDRC_FORCE_VBUS_ACTIVE_ALWAYS)
+			usb_gadget_vbus_connect(&ci->gadget);
+		return;
+	}
 
 	if (hw_read_otgsc(ci, OTGSC_BSV) && !ci->vbus_active)
 		usb_gadget_vbus_connect(&ci->gadget);
@@ -138,8 +146,9 @@ void ci_handle_vbus_change(struct ci_hdrc *ci)
 }
 
 /**
- * When we switch to device mode, the vbus value should be lower
- * than OTGSC_BSV before connecting to host.
+ * hw_wait_vbus_lower_bsv - When we switch to device mode, the vbus value
+ *                          should be lower than OTGSC_BSV before connecting
+ *                          to host.
  *
  * @ci: the controller
  *
@@ -162,7 +171,7 @@ static int hw_wait_vbus_lower_bsv(struct ci_hdrc *ci)
 	return 0;
 }
 
-static void ci_handle_id_switch(struct ci_hdrc *ci)
+void ci_handle_id_switch(struct ci_hdrc *ci)
 {
 	enum ci_role role;
 
@@ -172,10 +181,17 @@ static void ci_handle_id_switch(struct ci_hdrc *ci)
 		dev_dbg(ci->dev, "switching from %s to %s\n",
 			ci_role(ci)->name, ci->roles[role]->name);
 
+		if (ci->vbus_active && ci->role == CI_ROLE_GADGET)
+			/*
+			 * vbus disconnect event is lost due to role
+			 * switch occurs during system suspend.
+			 */
+			usb_gadget_vbus_disconnect(&ci->gadget);
+
 		ci_role_stop(ci);
 
-		if (role == CI_ROLE_GADGET &&
-				IS_ERR(ci->platdata->vbus_extcon.edev))
+		if (role == CI_ROLE_GADGET && !ci->role_switch &&
+		    IS_ERR(ci->platdata->vbus_extcon.edev))
 			/*
 			 * Wait vbus lower than OTGSC_BSV before connecting
 			 * to host. If connecting status is from an external
@@ -225,7 +241,7 @@ static void ci_otg_work(struct work_struct *work)
 
 /**
  * ci_hdrc_otg_init - initialize otg struct
- * ci: the controller
+ * @ci: the controller
  */
 int ci_hdrc_otg_init(struct ci_hdrc *ci)
 {
@@ -244,14 +260,13 @@ int ci_hdrc_otg_init(struct ci_hdrc *ci)
 
 /**
  * ci_hdrc_otg_destroy - destroy otg struct
- * ci: the controller
+ * @ci: the controller
  */
 void ci_hdrc_otg_destroy(struct ci_hdrc *ci)
 {
-	if (ci->wq) {
-		flush_workqueue(ci->wq);
+	if (ci->wq)
 		destroy_workqueue(ci->wq);
-	}
+
 	/* Disable all OTG irq and clear status */
 	hw_write_otgsc(ci, OTGSC_INT_EN_BITS | OTGSC_INT_STATUS_BITS,
 						OTGSC_INT_STATUS_BITS);

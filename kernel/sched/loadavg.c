@@ -6,6 +6,7 @@
  * figure. Its a silly number but people think its important. We go through
  * great pains to make it work on big machines and tickless kernels.
  */
+#include <linux/sched/nohz.h>
 #include "sched.h"
 
 /*
@@ -46,7 +47,7 @@
  *    again, being late doesn't loose the delta, just wrecks the sample.
  *
  *  - cpu_rq()->nr_uninterruptible isn't accurately tracked per-CPU because
- *    this would add another cross-CPU cacheline miss and atomic operation
+ *    this would add another cross-CPU cache-line miss and atomic operation
  *    to the wakeup path. Instead we increment on whatever CPU the task ran
  *    when it went into uninterruptible state and decrement on whatever CPU
  *    did the wakeup. This means that only the sum of nr_uninterruptible over
@@ -63,7 +64,7 @@ EXPORT_SYMBOL(avenrun); /* should be removed */
 
 /**
  * get_avenrun - get the load average array
- * @loads:	pointer to dest load array
+ * @loads:	pointer to destination load array
  * @offset:	offset to add
  * @shift:	shift count to shift the result left
  *
@@ -189,7 +190,7 @@ calc_load_n(unsigned long load, unsigned long exp,
  *    w:0 1 1           0 0           1 1           0 0
  *
  *    This ensures we'll fold the old NO_HZ contribution in this window while
- *    accumlating the new one.
+ *    accumulating the new one.
  *
  *  - When we wake up from NO_HZ during the window, we push up our
  *    contribution, since we effectively move our sample point to a known
@@ -231,21 +232,34 @@ static inline int calc_load_read_idx(void)
 	return calc_load_idx & 1;
 }
 
-void calc_load_nohz_start(void)
+static void calc_load_nohz_fold(struct rq *rq)
 {
-	struct rq *this_rq = this_rq();
 	long delta;
 
-	/*
-	 * We're going into NO_HZ mode, if there's any pending delta, fold it
-	 * into the pending NO_HZ delta.
-	 */
-	delta = calc_load_fold_active(this_rq, 0);
+	delta = calc_load_fold_active(rq, 0);
 	if (delta) {
 		int idx = calc_load_write_idx();
 
 		atomic_long_add(delta, &calc_load_nohz[idx]);
 	}
+}
+
+void calc_load_nohz_start(void)
+{
+	/*
+	 * We're going into NO_HZ mode, if there's any pending delta, fold it
+	 * into the pending NO_HZ delta.
+	 */
+	calc_load_nohz_fold(this_rq());
+}
+
+/*
+ * Keep track of the load for NOHZ_FULL, must be called between
+ * calc_load_nohz_{start,stop}().
+ */
+void calc_load_nohz_remote(struct rq *rq)
+{
+	calc_load_nohz_fold(rq);
 }
 
 void calc_load_nohz_stop(void)
@@ -268,7 +282,7 @@ void calc_load_nohz_stop(void)
 		this_rq->calc_load_update += LOAD_FREQ;
 }
 
-static long calc_load_nohz_fold(void)
+static long calc_load_nohz_read(void)
 {
 	int idx = calc_load_read_idx();
 	long delta = 0;
@@ -321,12 +335,12 @@ static void calc_global_nohz(void)
 	smp_wmb();
 	calc_load_idx++;
 }
-#else /* !CONFIG_NO_HZ_COMMON */
+#else /* !CONFIG_NO_HZ_COMMON: */
 
-static inline long calc_load_nohz_fold(void) { return 0; }
+static inline long calc_load_nohz_read(void) { return 0; }
 static inline void calc_global_nohz(void) { }
 
-#endif /* CONFIG_NO_HZ_COMMON */
+#endif /* !CONFIG_NO_HZ_COMMON */
 
 /*
  * calc_load - update the avenrun load estimates 10 ticks after the
@@ -334,7 +348,7 @@ static inline void calc_global_nohz(void) { }
  *
  * Called from the global timer code.
  */
-void calc_global_load(unsigned long ticks)
+void calc_global_load(void)
 {
 	unsigned long sample_window;
 	long active, delta;
@@ -346,7 +360,7 @@ void calc_global_load(unsigned long ticks)
 	/*
 	 * Fold the 'old' NO_HZ-delta to include all NO_HZ CPUs.
 	 */
-	delta = calc_load_nohz_fold();
+	delta = calc_load_nohz_read();
 	if (delta)
 		atomic_long_add(delta, &calc_load_tasks);
 
@@ -367,7 +381,7 @@ void calc_global_load(unsigned long ticks)
 }
 
 /*
- * Called from scheduler_tick() to periodically update this CPU's
+ * Called from sched_tick() to periodically update this CPU's
  * active count.
  */
 void calc_global_load_tick(struct rq *this_rq)

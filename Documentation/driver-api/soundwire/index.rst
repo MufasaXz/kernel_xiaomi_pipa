@@ -9,8 +9,10 @@ SoundWire Documentation
    stream
    error_handling
    locking
+   bra
+   bra_cadence
 
-.. only::  subproject
+.. only::  subproject and html
 
    Indices
    =======

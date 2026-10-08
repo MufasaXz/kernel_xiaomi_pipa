@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * lib/ts_bm.c		Boyer-Moore text search implementation
- *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
  *
  * Authors:	Pablo Neira Ayuso <pablo@eurodev.net>
  *
@@ -15,7 +11,7 @@
  *   [1] A Fast String Searching Algorithm, R.S. Boyer and Moore.
  *       Communications of the Association for Computing Machinery, 
  *       20(10), 1977, pp. 762-772.
- *       http://www.cs.utexas.edu/users/moore/publications/fstrpos.pdf
+ *       https://www.cs.utexas.edu/users/moore/publications/fstrpos.pdf
  *
  *   [2] Handbook of Exact String Matching Algorithms, Thierry Lecroq, 2004
  *       http://www-igm.univ-mlv.fr/~lecroq/string/string.pdf
@@ -56,8 +52,26 @@ struct ts_bm
 	u8 *		pattern;
 	unsigned int	patlen;
 	unsigned int 	bad_shift[ASIZE];
-	unsigned int	good_shift[0];
+	unsigned int	good_shift[];
 };
+
+static unsigned int matchpat(const u8 *pattern, unsigned int patlen,
+			     const u8 *text, bool icase)
+{
+	unsigned int i;
+
+	for (i = 0; i < patlen; i++) {
+		u8 t = *(text-i);
+
+		if (icase)
+			t = toupper(t);
+
+		if (t != *(pattern-i))
+			break;
+	}
+
+	return i;
+}
 
 static unsigned int bm_find(struct ts_config *conf, struct ts_state *state)
 {
@@ -76,19 +90,18 @@ static unsigned int bm_find(struct ts_config *conf, struct ts_state *state)
 			break;
 
 		while (shift < text_len) {
-			DEBUGP("Searching in position %d (%c)\n", 
-				shift, text[shift]);
-			for (i = 0; i < bm->patlen; i++) 
-				if ((icase ? toupper(text[shift-i])
-				    : text[shift-i])
-					!= bm->pattern[bm->patlen-1-i])
-				     goto next;
+			DEBUGP("Searching in position %d (%c)\n",
+			       shift, text[shift]);
 
-			/* London calling... */
-			DEBUGP("found!\n");
-			return consumed += (shift-(bm->patlen-1));
+			i = matchpat(&bm->pattern[bm->patlen-1], bm->patlen,
+				     &text[shift], icase);
+			if (i == bm->patlen) {
+				/* London calling... */
+				DEBUGP("found!\n");
+				return consumed + (shift-(bm->patlen-1));
+			}
 
-next:			bs = bm->bad_shift[text[shift-i]];
+			bs = bm->bad_shift[text[shift-i]];
 
 			/* Now jumping to... */
 			shift = max_t(int, shift-i+bs, shift+bm->good_shift[i]);
@@ -203,6 +216,7 @@ static void __exit exit_bm(void)
 	textsearch_unregister(&bm_ops);
 }
 
+MODULE_DESCRIPTION("Boyer-Moore text search implementation");
 MODULE_LICENSE("GPL");
 
 module_init(init_bm);

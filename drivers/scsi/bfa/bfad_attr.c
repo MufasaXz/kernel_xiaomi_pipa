@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2005-2014 Brocade Communications Systems, Inc.
  * Copyright (c) 2014- QLogic Corporation.
@@ -5,15 +6,6 @@
  * www.qlogic.com
  *
  * Linux driver for QLogic BR-series Fibre Channel Host Bus Adapter.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License (GPL) Version 2 as
- * published by the Free Software Foundation
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
  */
 
 /*
@@ -445,7 +437,7 @@ bfad_im_vport_create(struct fc_vport *fc_vport, bool disable)
 	return status;
 }
 
-int
+static int
 bfad_im_issue_fc_host_lip(struct Scsi_Host *shost)
 {
 	struct bfad_im_port_s *im_port =
@@ -570,7 +562,7 @@ bfad_im_vport_disable(struct fc_vport *fc_vport, bool disable)
 	return 0;
 }
 
-void
+static void
 bfad_im_vport_set_symbolic_name(struct fc_vport *fc_vport)
 {
 	struct bfad_vport_s *vport = (struct bfad_vport_s *)fc_vport->dd_data;
@@ -842,7 +834,7 @@ bfad_im_symbolic_name_show(struct device *dev, struct device_attribute *attr,
 	char symname[BFA_SYMNAME_MAXLEN];
 
 	bfa_fcs_lport_get_attr(&bfad->bfa_fcs.fabric.bport, &port_attr);
-	strlcpy(symname, port_attr.port_cfg.sym_name.symname,
+	strscpy(symname, port_attr.port_cfg.sym_name.symname,
 			BFA_SYMNAME_MAXLEN);
 	return sysfs_emit(buf, "%s\n", symname);
 }
@@ -859,13 +851,6 @@ bfad_im_hw_version_show(struct device *dev, struct device_attribute *attr,
 
 	bfa_get_pci_chip_rev(&bfad->bfa, hw_ver);
 	return sysfs_emit(buf, "%s\n", hw_ver);
-}
-
-static ssize_t
-bfad_im_drv_version_show(struct device *dev, struct device_attribute *attr,
-				char *buf)
-{
-	return sysfs_emit(buf, "%s\n", BFAD_DRIVER_VERSION);
 }
 
 static ssize_t
@@ -910,13 +895,6 @@ bfad_im_num_of_ports_show(struct device *dev, struct device_attribute *attr,
 }
 
 static ssize_t
-bfad_im_drv_name_show(struct device *dev, struct device_attribute *attr,
-				char *buf)
-{
-	return sysfs_emit(buf, "%s\n", BFAD_DRIVER_NAME);
-}
-
-static ssize_t
 bfad_im_num_of_discovered_ports_show(struct device *dev,
 			struct device_attribute *attr, char *buf)
 {
@@ -952,48 +930,64 @@ static          DEVICE_ATTR(symbolic_name, S_IRUGO,
 				bfad_im_symbolic_name_show, NULL);
 static          DEVICE_ATTR(hardware_version, S_IRUGO,
 				bfad_im_hw_version_show, NULL);
-static          DEVICE_ATTR(driver_version, S_IRUGO,
-				bfad_im_drv_version_show, NULL);
+static		DEVICE_STRING_ATTR_RO(driver_version, S_IRUGO,
+				BFAD_DRIVER_VERSION);
 static          DEVICE_ATTR(option_rom_version, S_IRUGO,
 				bfad_im_optionrom_version_show, NULL);
 static          DEVICE_ATTR(firmware_version, S_IRUGO,
 				bfad_im_fw_version_show, NULL);
 static          DEVICE_ATTR(number_of_ports, S_IRUGO,
 				bfad_im_num_of_ports_show, NULL);
-static          DEVICE_ATTR(driver_name, S_IRUGO, bfad_im_drv_name_show, NULL);
+static		DEVICE_STRING_ATTR_RO(driver_name, S_IRUGO, BFAD_DRIVER_NAME);
 static          DEVICE_ATTR(number_of_discovered_ports, S_IRUGO,
 				bfad_im_num_of_discovered_ports_show, NULL);
 
-struct device_attribute *bfad_im_host_attrs[] = {
-	&dev_attr_serial_number,
-	&dev_attr_model,
-	&dev_attr_model_description,
-	&dev_attr_node_name,
-	&dev_attr_symbolic_name,
-	&dev_attr_hardware_version,
-	&dev_attr_driver_version,
-	&dev_attr_option_rom_version,
-	&dev_attr_firmware_version,
-	&dev_attr_number_of_ports,
-	&dev_attr_driver_name,
-	&dev_attr_number_of_discovered_ports,
+static struct attribute *bfad_im_host_attrs[] = {
+	&dev_attr_serial_number.attr,
+	&dev_attr_model.attr,
+	&dev_attr_model_description.attr,
+	&dev_attr_node_name.attr,
+	&dev_attr_symbolic_name.attr,
+	&dev_attr_hardware_version.attr,
+	&dev_attr_driver_version.attr.attr,
+	&dev_attr_option_rom_version.attr,
+	&dev_attr_firmware_version.attr,
+	&dev_attr_number_of_ports.attr,
+	&dev_attr_driver_name.attr.attr,
+	&dev_attr_number_of_discovered_ports.attr,
 	NULL,
 };
 
-struct device_attribute *bfad_im_vport_attrs[] = {
-	&dev_attr_serial_number,
-	&dev_attr_model,
-	&dev_attr_model_description,
-	&dev_attr_node_name,
-	&dev_attr_symbolic_name,
-	&dev_attr_hardware_version,
-	&dev_attr_driver_version,
-	&dev_attr_option_rom_version,
-	&dev_attr_firmware_version,
-	&dev_attr_number_of_ports,
-	&dev_attr_driver_name,
-	&dev_attr_number_of_discovered_ports,
+static const struct attribute_group bfad_im_host_attr_group = {
+	.attrs = bfad_im_host_attrs
+};
+
+const struct attribute_group *bfad_im_host_groups[] = {
+	&bfad_im_host_attr_group,
+	NULL
+};
+
+static struct attribute *bfad_im_vport_attrs[] = {
+	&dev_attr_serial_number.attr,
+	&dev_attr_model.attr,
+	&dev_attr_model_description.attr,
+	&dev_attr_node_name.attr,
+	&dev_attr_symbolic_name.attr,
+	&dev_attr_hardware_version.attr,
+	&dev_attr_driver_version.attr.attr,
+	&dev_attr_option_rom_version.attr,
+	&dev_attr_firmware_version.attr,
+	&dev_attr_number_of_ports.attr,
+	&dev_attr_driver_name.attr.attr,
+	&dev_attr_number_of_discovered_ports.attr,
 	NULL,
 };
 
+static const struct attribute_group bfad_im_vport_attr_group = {
+	.attrs = bfad_im_vport_attrs
+};
 
+const struct attribute_group *bfad_im_vport_groups[] = {
+	&bfad_im_vport_attr_group,
+	NULL
+};

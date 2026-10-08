@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Implementation of get_cpuid().
  *
  * Copyright IBM Corp. 2014, 2018
  * Author(s): Alexander Yarygin <yarygin@linux.vnet.ibm.com>
  *	      Thomas Richter <tmricht@linux.vnet.ibm.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License (version 2 only)
- * as published by the Free Software Foundation.
  */
 
 #include <sys/types.h>
@@ -15,10 +12,11 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
-#include <ctype.h>
+#include <linux/ctype.h>
+#include <linux/kernel.h>
+#include <linux/zalloc.h>
 
 #include "../../util/header.h"
-#include "../../util/util.h"
 
 #define SYSINFO_MANU	"Manufacturer:"
 #define SYSINFO_TYPE	"Type:"
@@ -29,7 +27,7 @@
 #define SYSINFO		"/proc/sysinfo"
 #define SRVLVL		"/proc/service_levels"
 
-int get_cpuid(char *buffer, size_t sz)
+int get_cpuid(char *buffer, size_t sz, struct perf_cpu cpu __maybe_unused)
 {
 	char *cp, *line = NULL, *line2;
 	char type[8], model[33], version[8], manufacturer[32], authorization[8];
@@ -139,11 +137,11 @@ skip_sysinfo:
 	return (nbytes >= sz) ? ENOBUFS : 0;
 }
 
-char *get_cpuid_str(struct perf_pmu *pmu __maybe_unused)
+char *get_cpuid_str(struct perf_cpu cpu)
 {
 	char *buf = malloc(128);
 
-	if (buf && get_cpuid(buf, 128))
+	if (buf && get_cpuid(buf, 128, cpu))
 		zfree(&buf);
 	return buf;
 }

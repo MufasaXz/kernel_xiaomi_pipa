@@ -1,24 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Power capping class
  * Copyright (c) 2013, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.
- *
  */
 
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/err.h>
+#include <linux/kstrtox.h>
 #include <linux/slab.h>
 #include <linux/powercap.h>
 
@@ -79,7 +68,7 @@ static ssize_t show_constraint_##_attr(struct device *dev, \
 	int id; \
 	struct powercap_zone_constraint *pconst;\
 	\
-	if (!sscanf(dev_attr->attr.name, "constraint_%d_", &id)) \
+	if (sscanf(dev_attr->attr.name, "constraint_%d_", &id) != 1) \
 		return -EINVAL; \
 	if (id >= power_zone->const_id_cnt)	\
 		return -EINVAL; \
@@ -104,7 +93,7 @@ static ssize_t store_constraint_##_attr(struct device *dev,\
 	int id; \
 	struct powercap_zone_constraint *pconst;\
 	\
-	if (!sscanf(dev_attr->attr.name, "constraint_%d_", &id)) \
+	if (sscanf(dev_attr->attr.name, "constraint_%d_", &id) != 1) \
 		return -EINVAL; \
 	if (id >= power_zone->const_id_cnt)	\
 		return -EINVAL; \
@@ -173,7 +162,7 @@ static ssize_t show_constraint_name(struct device *dev,
 	ssize_t len = -ENODATA;
 	struct powercap_zone_constraint *pconst;
 
-	if (!sscanf(dev_attr->attr.name, "constraint_%d_", &id))
+	if (sscanf(dev_attr->attr.name, "constraint_%d_", &id) != 1)
 		return -EINVAL;
 	if (id >= power_zone->const_id_cnt)
 		return -EINVAL;
@@ -182,9 +171,8 @@ static ssize_t show_constraint_name(struct device *dev,
 	if (pconst && pconst->ops && pconst->ops->get_name) {
 		name = pconst->ops->get_name(power_zone, id);
 		if (name) {
-			snprintf(buf, POWERCAP_CONSTRAINT_NAME_LEN,
-								"%s\n", name);
-			buf[POWERCAP_CONSTRAINT_NAME_LEN] = '\0';
+			sprintf(buf, "%.*s\n", POWERCAP_CONSTRAINT_NAME_LEN - 1,
+				name);
 			len = strlen(buf);
 		}
 	}
@@ -459,7 +447,7 @@ static ssize_t enabled_store(struct device *dev,
 {
 	bool mode;
 
-	if (strtobool(buf, &mode))
+	if (kstrtobool(buf, &mode))
 		return -EINVAL;
 	if (dev->parent) {
 		struct powercap_zone *power_zone = to_powercap_zone(dev);
@@ -637,16 +625,22 @@ struct powercap_control_type *powercap_register_control_type(
 	INIT_LIST_HEAD(&control_type->node);
 	control_type->dev.class = &powercap_class;
 	dev_set_name(&control_type->dev, "%s", name);
-	result = device_register(&control_type->dev);
-	if (result) {
-		put_device(&control_type->dev);
-		return ERR_PTR(result);
-	}
 	idr_init(&control_type->idr);
 
 	mutex_lock(&powercap_cntrl_list_lock);
 	list_add_tail(&control_type->node, &powercap_cntrl_list);
 	mutex_unlock(&powercap_cntrl_list_lock);
+
+	result = device_register(&control_type->dev);
+	if (result) {
+		mutex_lock(&powercap_cntrl_list_lock);
+		list_del(&control_type->node);
+		mutex_unlock(&powercap_cntrl_list_lock);
+
+		idr_destroy(&control_type->idr);
+		put_device(&control_type->dev);
+		return ERR_PTR(result);
+	}
 
 	return control_type;
 }
@@ -686,8 +680,7 @@ static int __init powercap_init(void)
 	return class_register(&powercap_class);
 }
 
-device_initcall(powercap_init);
+fs_initcall(powercap_init);
 
 MODULE_DESCRIPTION("PowerCap sysfs Driver");
 MODULE_AUTHOR("Srinivas Pandruvada <srinivas.pandruvada@linux.intel.com>");
-MODULE_LICENSE("GPL v2");

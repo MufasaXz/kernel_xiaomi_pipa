@@ -1,25 +1,59 @@
-#!/usr/bin/python
-
-from os import getenv
+from os import getenv, path
 from subprocess import Popen, PIPE
 from re import sub
-
-def clang_has_option(option):
-    return [o for o in Popen(['clang', option], stderr=PIPE).stderr.readlines() if "unknown argument" in o] == [ ]
+import shlex
 
 cc = getenv("CC")
-if cc == "clang":
-    from _sysconfigdata import build_time_vars
-    build_time_vars["CFLAGS"] = sub("-specs=[^ ]+", "", build_time_vars["CFLAGS"])
-    if not clang_has_option("-mcet"):
-        build_time_vars["CFLAGS"] = sub("-mcet", "", build_time_vars["CFLAGS"])
-    if not clang_has_option("-fcf-protection"):
-        build_time_vars["CFLAGS"] = sub("-fcf-protection", "", build_time_vars["CFLAGS"])
+assert cc, "Environment variable CC not set"
 
-from distutils.core import setup, Extension
+# Check if CC has options, as is the case in yocto, where it uses CC="cc --sysroot..."
+cc_tokens = cc.split()
+if len(cc_tokens) > 1:
+    cc = cc_tokens[0]
+    cc_options = " ".join([str(e) for e in cc_tokens[1:]]) + " "
+else:
+    cc_options = ""
 
-from distutils.command.build_ext   import build_ext   as _build_ext
-from distutils.command.install_lib import install_lib as _install_lib
+# ignore optional stderr could be None as it is set to PIPE to avoid that.
+# mypy: disable-error-code="union-attr"
+cc_is_clang = b"clang version" in Popen([cc, "-v"], stderr=PIPE).stderr.readline()
+
+srctree = getenv('srctree')
+assert srctree, "Environment variable srctree, for the Linux sources, not set"
+src_feature_tests  = f'{srctree}/tools/build/feature'
+
+def clang_has_option(option):
+    cmd = shlex.split(f"{cc} {cc_options} {option}")
+    cmd.append(path.join(src_feature_tests, "test-hello.c"))
+    cc_output = Popen(cmd, stderr=PIPE).stderr.readlines()
+    return [o for o in cc_output if ((b"unknown argument" in o) or (b"is not supported" in o) or (b"unknown warning option" in o))] == [ ]
+
+if cc_is_clang:
+    from sysconfig import get_config_vars
+    vars = get_config_vars()
+    for var in ('CFLAGS', 'OPT'):
+        vars[var] = sub("-specs=[^ ]+", "", vars[var])
+        if not clang_has_option("-mcet"):
+            vars[var] = sub("-mcet", "", vars[var])
+        if not clang_has_option("-fcf-protection"):
+            vars[var] = sub("-fcf-protection", "", vars[var])
+        if not clang_has_option("-fstack-clash-protection"):
+            vars[var] = sub("-fstack-clash-protection", "", vars[var])
+        if not clang_has_option("-fstack-protector-strong"):
+            vars[var] = sub("-fstack-protector-strong", "", vars[var])
+        if not clang_has_option("-fno-semantic-interposition"):
+            vars[var] = sub("-fno-semantic-interposition", "", vars[var])
+        if not clang_has_option("-ffat-lto-objects"):
+            vars[var] = sub("-ffat-lto-objects", "", vars[var])
+        if not clang_has_option("-ftree-loop-distribute-patterns"):
+            vars[var] = sub("-ftree-loop-distribute-patterns", "", vars[var])
+        if not clang_has_option("-gno-variable-location-views"):
+            vars[var] = sub("-gno-variable-location-views", "", vars[var])
+
+from setuptools import setup, Extension
+
+from setuptools.command.build_ext   import build_ext   as _build_ext
+from setuptools.command.install_lib import install_lib as _install_lib
 
 class build_ext(_build_ext):
     def finalize_options(self):
@@ -36,26 +70,24 @@ class install_lib(_install_lib):
 cflags = getenv('CFLAGS', '').split()
 # switch off several checks (need to be at the end of cflags list)
 cflags += ['-fno-strict-aliasing', '-Wno-write-strings', '-Wno-unused-parameter', '-Wno-redundant-decls' ]
-if cc != "clang":
+if cc_is_clang:
+    cflags += ["-Wno-unused-command-line-argument" ]
+    if clang_has_option("-Wno-cast-function-type-mismatch"):
+        cflags += ["-Wno-cast-function-type-mismatch" ]
+else:
     cflags += ['-Wno-cast-function-type' ]
 
-src_perf  = getenv('srctree') + '/tools/perf'
+# The python headers have mixed code with declarations (decls after asserts, for instance)
+cflags += [ "-Wno-declaration-after-statement" ]
+
+src_perf  = f'{srctree}/tools/perf'
 build_lib = getenv('PYTHON_EXTBUILD_LIB')
 build_tmp = getenv('PYTHON_EXTBUILD_TMP')
-libtraceevent = getenv('LIBTRACEEVENT')
-libapikfs = getenv('LIBAPI')
-
-ext_sources = [f.strip() for f in open('util/python-ext-sources')
-				if len(f.strip()) > 0 and f[0] != '#']
-
-# use full paths with source files
-ext_sources = list(map(lambda x: '%s/%s' % (src_perf, x) , ext_sources))
 
 perf = Extension('perf',
-		  sources = ext_sources,
-		  include_dirs = ['util/include'],
-		  extra_compile_args = cflags,
-		  extra_objects = [libtraceevent, libapikfs],
+                 sources = [ src_perf + '/util/python.c' ],
+		         include_dirs = ['util/include'],
+		         extra_compile_args = cflags,
                  )
 
 setup(name='perf',

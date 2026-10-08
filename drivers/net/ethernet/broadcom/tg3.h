@@ -2390,7 +2390,7 @@
 #define TG3_CL45_D7_EEERES_STAT_LP_1000T	0x0004
 
 
-/* Fast Ethernet Tranceiver definitions */
+/* Fast Ethernet Transceiver definitions */
 #define MII_TG3_FET_PTEST		0x17
 #define  MII_TG3_FET_PTEST_TRIM_SEL	0x0010
 #define  MII_TG3_FET_PTEST_TRIM_2	0x0002
@@ -2847,7 +2847,7 @@ struct tg3_ocir {
 	u32				port1_flags;
 	u32				port2_flags;
 	u32				port3_flags;
-	u32				reserved2[1];
+	u32				reserved2;
 };
 
 
@@ -2873,7 +2873,7 @@ struct tg3_tx_ring_info {
 struct tg3_link_config {
 	/* Describes what we're trying to get. */
 	u32				advertising;
-	u16				speed;
+	u32				speed;
 	u8				duplex;
 	u8				autoneg;
 	u8				flowctrl;
@@ -2882,7 +2882,7 @@ struct tg3_link_config {
 	u8				active_flowctrl;
 
 	u8				active_duplex;
-	u16				active_speed;
+	u32				active_speed;
 	u32				rmt_adv;
 };
 
@@ -3033,7 +3033,7 @@ struct tg3_napi {
 	dma_addr_t			rx_rcb_mapping;
 	dma_addr_t			tx_desc_mapping;
 
-	char				irq_lbl[IFNAMSIZ];
+	char				irq_lbl[IFNAMSIZ + 6 + 10]; /* name + "-txrx-" + %d */
 	unsigned int			irq_vec;
 };
 
@@ -3192,6 +3192,7 @@ struct tg3 {
 	struct ptp_clock_info		ptp_info;
 	struct ptp_clock		*ptp_clock;
 	s64				ptp_adjust;
+	u8				ptp_txts_retrycnt;
 
 	/* begin "tx thread" cacheline section */
 	void				(*write32_tx_mbox) (struct tg3 *, u32,
@@ -3372,6 +3373,8 @@ struct tg3 {
 	struct tg3_hw_stats		*hw_stats;
 	dma_addr_t			stats_mapping;
 	struct work_struct		reset_task;
+	struct sk_buff			*tx_tstamp_skb;
+	u64				pre_tx_ts;
 
 	int				nvram_lock_cnt;
 	u32				nvram_size;
@@ -3416,7 +3419,7 @@ struct tg3 {
 	unsigned int			irq_cnt;
 
 	struct ethtool_coalesce		coal;
-	struct ethtool_eee		eee;
+	struct ethtool_keee		eee;
 
 	/* firmware info */
 	const char			*fw_needed;

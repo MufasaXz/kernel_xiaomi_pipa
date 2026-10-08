@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2014 STMicroelectronics
  *
  * STMicroelectronics PHY driver MiPHY28lp (for SoC STiH407).
  *
  * Author: Alexandre Torgue <alexandre.torgue@st.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2, as
- * published by the Free Software Foundation.
- *
  */
 
 #include <linux/platform_device.h>
@@ -230,11 +226,6 @@ struct miphy28lp_dev {
 	struct mutex miphy_mutex;
 	struct miphy28lp_phy **phys;
 	int nphys;
-};
-
-struct miphy_initval {
-	u16 reg;
-	u16 val;
 };
 
 enum miphy_sata_gen { SATA_GEN1, SATA_GEN2, SATA_GEN3 };
@@ -1078,7 +1069,7 @@ static int miphy28lp_get_addr(struct miphy28lp_phy *miphy_phy)
 }
 
 static struct phy *miphy28lp_xlate(struct device *dev,
-				   struct of_phandle_args *args)
+				   const struct of_phandle_args *args)
 {
 	struct miphy28lp_dev *miphy_dev = dev_get_drvdata(dev);
 	struct miphy28lp_phy *miphy_phy = NULL;

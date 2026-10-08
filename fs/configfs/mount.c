@@ -1,22 +1,6 @@
-/* -*- mode: c; c-basic-offset: 8; -*-
- * vim: noexpandtab sw=8 ts=8 sts=0:
- *
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
  * mount.c - operations for initializing and mounting configfs.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
  *
  * Based on sysfs:
  * 	sysfs is Copyright (C) 2001, 2002, 2003 Patrick Mochel
@@ -42,9 +26,18 @@ static struct vfsmount *configfs_mount = NULL;
 struct kmem_cache *configfs_dir_cachep;
 static int configfs_mnt_count = 0;
 
+
+static void configfs_free_inode(struct inode *inode)
+{
+	if (S_ISLNK(inode->i_mode))
+		kfree(inode->i_link);
+	free_inode_nonrcu(inode);
+}
+
 static const struct super_operations configfs_ops = {
 	.statfs		= simple_statfs,
-	.drop_inode	= generic_delete_inode,
+	.drop_inode	= inode_just_drop,
+	.free_inode	= configfs_free_inode,
 };
 
 static struct config_group configfs_root_group = {
@@ -99,7 +92,8 @@ static int configfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	configfs_root_group.cg_item.ci_dentry = root;
 	root->d_fsdata = &configfs_root;
 	sb->s_root = root;
-	sb->s_d_op = &configfs_dentry_ops; /* the rest get that */
+	set_default_d_op(sb, &configfs_dentry_ops); /* the rest get that */
+	sb->s_d_flags |= DCACHE_DONTCACHE;
 	return 0;
 }
 

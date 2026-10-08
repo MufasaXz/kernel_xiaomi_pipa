@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * SBP2 driver (SCSI over IEEE1394)
  *
  * Copyright (C) 2005-2007  Kristian Hoegsberg <krh@bitplanet.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software Foundation,
- * Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
 
 /*
@@ -94,7 +81,8 @@ MODULE_PARM_DESC(exclusive_login, "Exclusive login to sbp2 device "
  *
  * - power condition
  *   Set the power condition field in the START STOP UNIT commands sent by
- *   sd_mod on suspend, resume, and shutdown (if manage_start_stop is on).
+ *   sd_mod on suspend, resume, and shutdown (if manage_system_start_stop or
+ *   manage_runtime_start_stop is on).
  *   Some disks need this to spin down or to resume properly.
  *
  * - override internal blacklist
@@ -1130,7 +1118,7 @@ static void sbp2_init_workarounds(struct sbp2_target *tgt, u32 model,
 	tgt->workarounds = w;
 }
 
-static struct scsi_host_template scsi_driver_template;
+static const struct scsi_host_template scsi_driver_template;
 static void sbp2_remove(struct fw_unit *unit);
 
 static int sbp2_probe(struct fw_unit *unit, const struct ieee1394_device_id *id)
@@ -1144,10 +1132,6 @@ static int sbp2_probe(struct fw_unit *unit, const struct ieee1394_device_id *id)
 	/* cannot (or should not) handle targets on the local node */
 	if (device->is_local)
 		return -ENODEV;
-
-	if (dma_get_max_seg_size(device->card->device) > SBP2_MAX_SEG_SIZE)
-		WARN_ON(dma_set_max_seg_size(device->card->device,
-					     SBP2_MAX_SEG_SIZE));
 
 	shost = scsi_host_alloc(&scsi_driver_template, sizeof(*tgt));
 	if (shost == NULL)
@@ -1393,7 +1377,7 @@ static void complete_command_orb(struct sbp2_orb *base_orb,
 	sbp2_unmap_scatterlist(device->card->device, orb);
 
 	orb->cmd->result = result;
-	orb->cmd->scsi_done(orb->cmd);
+	scsi_done(orb->cmd);
 }
 
 static int sbp2_map_scatterlist(struct sbp2_command_orb *orb,
@@ -1506,7 +1490,7 @@ static int sbp2_scsi_queuecommand(struct Scsi_Host *shost,
 	return retval;
 }
 
-static int sbp2_scsi_slave_alloc(struct scsi_device *sdev)
+static int sbp2_scsi_sdev_init(struct scsi_device *sdev)
 {
 	struct sbp2_logical_unit *lu = sdev->hostdata;
 
@@ -1516,26 +1500,24 @@ static int sbp2_scsi_slave_alloc(struct scsi_device *sdev)
 
 	sdev->allow_restart = 1;
 
-	/*
-	 * SBP-2 does not require any alignment, but we set it anyway
-	 * for compatibility with earlier versions of this driver.
-	 */
-	blk_queue_update_dma_alignment(sdev->request_queue, 4 - 1);
-
 	if (lu->tgt->workarounds & SBP2_WORKAROUND_INQUIRY_36)
 		sdev->inquiry_len = 36;
 
 	return 0;
 }
 
-static int sbp2_scsi_slave_configure(struct scsi_device *sdev)
+static int sbp2_scsi_sdev_configure(struct scsi_device *sdev,
+				    struct queue_limits *lim)
 {
 	struct sbp2_logical_unit *lu = sdev->hostdata;
 
 	sdev->use_10_for_rw = 1;
 
-	if (sbp2_param_exclusive_login)
-		sdev->manage_start_stop = 1;
+	if (sbp2_param_exclusive_login) {
+		sdev->manage_system_start_stop = 1;
+		sdev->manage_runtime_start_stop = 1;
+		sdev->manage_shutdown = 1;
+	}
 
 	if (sdev->type == TYPE_ROM)
 		sdev->use_10_for_ms = 1;
@@ -1551,7 +1533,7 @@ static int sbp2_scsi_slave_configure(struct scsi_device *sdev)
 		sdev->start_stop_pwr_cond = 1;
 
 	if (lu->tgt->workarounds & SBP2_WORKAROUND_128K_MAX_TRANS)
-		blk_queue_max_hw_sectors(sdev->request_queue, 128 * 1024 / 512);
+		lim->max_hw_sectors = 128 * 1024 / 512;
 
 	return 0;
 }
@@ -1596,24 +1578,26 @@ static ssize_t sbp2_sysfs_ieee1394_id_show(struct device *dev,
 
 static DEVICE_ATTR(ieee1394_id, S_IRUGO, sbp2_sysfs_ieee1394_id_show, NULL);
 
-static struct device_attribute *sbp2_scsi_sysfs_attrs[] = {
-	&dev_attr_ieee1394_id,
+static struct attribute *sbp2_scsi_sysfs_attrs[] = {
+	&dev_attr_ieee1394_id.attr,
 	NULL
 };
 
-static struct scsi_host_template scsi_driver_template = {
+ATTRIBUTE_GROUPS(sbp2_scsi_sysfs);
+
+static const struct scsi_host_template scsi_driver_template = {
 	.module			= THIS_MODULE,
 	.name			= "SBP-2 IEEE-1394",
 	.proc_name		= "sbp2",
 	.queuecommand		= sbp2_scsi_queuecommand,
-	.slave_alloc		= sbp2_scsi_slave_alloc,
-	.slave_configure	= sbp2_scsi_slave_configure,
+	.sdev_init		= sbp2_scsi_sdev_init,
+	.sdev_configure		= sbp2_scsi_sdev_configure,
 	.eh_abort_handler	= sbp2_scsi_abort,
 	.this_id		= -1,
 	.sg_tablesize		= SG_ALL,
-	.use_clustering		= ENABLE_CLUSTERING,
+	.max_segment_size	= SBP2_MAX_SEG_SIZE,
 	.can_queue		= 1,
-	.sdev_attrs		= sbp2_scsi_sysfs_attrs,
+	.sdev_groups		= sbp2_scsi_sysfs_groups,
 };
 
 MODULE_AUTHOR("Kristian Hoegsberg <krh@bitplanet.net>");

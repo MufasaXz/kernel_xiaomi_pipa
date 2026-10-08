@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * net/sched/sch_sfq.c	Stochastic Fairness Queueing discipline.
- *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
  *
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  */
@@ -175,7 +171,7 @@ static unsigned int sfq_classify(struct sk_buff *skb, struct Qdisc *sch,
 		return sfq_hash(q, skb) + 1;
 
 	*qerr = NET_XMIT_SUCCESS | __NET_XMIT_BYPASS;
-	result = tcf_classify(skb, fl, &res, false);
+	result = tcf_classify(skb, NULL, fl, &res, false);
 	if (result >= 0) {
 #ifdef CONFIG_NET_CLS_ACT
 		switch (result) {
@@ -183,7 +179,7 @@ static unsigned int sfq_classify(struct sk_buff *skb, struct Qdisc *sch,
 		case TC_ACT_QUEUED:
 		case TC_ACT_TRAP:
 			*qerr = NET_XMIT_SUCCESS | __NET_XMIT_STOLEN;
-			/* fall through */
+			fallthrough;
 		case TC_ACT_SHOT:
 			return 0;
 		}
@@ -604,13 +600,15 @@ drop:
 
 static void sfq_perturbation(struct timer_list *t)
 {
-	struct sfq_sched_data *q = from_timer(q, t, perturb_timer);
+	struct sfq_sched_data *q = timer_container_of(q, t, perturb_timer);
 	struct Qdisc *sch = q->sch;
-	spinlock_t *root_lock = qdisc_lock(qdisc_root_sleeping(sch));
+	spinlock_t *root_lock;
 	siphash_key_t nkey;
 	int period;
 
 	get_random_bytes(&nkey, sizeof(nkey));
+	rcu_read_lock();
+	root_lock = qdisc_lock(qdisc_root_sleeping(sch));
 	spin_lock(root_lock);
 	q->perturbation = nkey;
 	if (!q->filter_list && q->tail)
@@ -623,6 +621,7 @@ static void sfq_perturbation(struct timer_list *t)
 	period = READ_ONCE(q->perturb_period);
 	if (period)
 		mod_timer(&q->perturb_timer, jiffies + period);
+	rcu_read_unlock();
 }
 
 static int sfq_change(struct Qdisc *sch, struct nlattr *opt,
@@ -740,7 +739,7 @@ static int sfq_change(struct Qdisc *sch, struct nlattr *opt,
 	rtnl_kfree_skbs(to_free, tail);
 	qdisc_tree_reduce_backlog(sch, qlen - sch->q.qlen, dropped);
 
-	del_timer(&q->perturb_timer);
+	timer_delete(&q->perturb_timer);
 	if (q->perturb_period) {
 		mod_timer(&q->perturb_timer, jiffies + q->perturb_period);
 		get_random_bytes(&q->perturbation, sizeof(q->perturbation));
@@ -766,7 +765,7 @@ static void sfq_destroy(struct Qdisc *sch)
 
 	tcf_block_put(q->block);
 	WRITE_ONCE(q->perturb_period, 0);
-	del_timer_sync(&q->perturb_timer);
+	timer_delete_sync(&q->perturb_timer);
 	sfq_free(q->ht);
 	sfq_free(q->slots);
 	kfree(q->red_parms);
@@ -931,16 +930,12 @@ static void sfq_walk(struct Qdisc *sch, struct qdisc_walker *arg)
 		return;
 
 	for (i = 0; i < q->divisor; i++) {
-		if (q->ht[i] == SFQ_EMPTY_SLOT ||
-		    arg->count < arg->skip) {
+		if (q->ht[i] == SFQ_EMPTY_SLOT) {
 			arg->count++;
 			continue;
 		}
-		if (arg->fn(sch, i + 1, arg) < 0) {
-			arg->stop = 1;
+		if (!tc_qdisc_stats_dump(sch, i + 1, arg))
 			break;
-		}
-		arg->count++;
 	}
 }
 
@@ -969,6 +964,7 @@ static struct Qdisc_ops sfq_qdisc_ops __read_mostly = {
 	.dump		=	sfq_dump,
 	.owner		=	THIS_MODULE,
 };
+MODULE_ALIAS_NET_SCH("sfq");
 
 static int __init sfq_module_init(void)
 {
@@ -981,3 +977,4 @@ static void __exit sfq_module_exit(void)
 module_init(sfq_module_init)
 module_exit(sfq_module_exit)
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Stochastic Fairness qdisc");

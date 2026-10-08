@@ -12,10 +12,8 @@
 #define _TRACE_IOMMU_H
 
 #include <linux/tracepoint.h>
-#include <linux/iommu.h>
 
 struct device;
-struct iommu_domain;
 
 DECLARE_EVENT_CLASS(iommu_group_event,
 
@@ -30,7 +28,7 @@ DECLARE_EVENT_CLASS(iommu_group_event,
 
 	TP_fast_assign(
 		__entry->gid = group_id;
-		__assign_str(device, dev_name(dev));
+		__assign_str(device);
 	),
 
 	TP_printk("IOMMU: groupID=%d device=%s",
@@ -64,7 +62,7 @@ DECLARE_EVENT_CLASS(iommu_device_event,
 	),
 
 	TP_fast_assign(
-		__assign_str(device, dev_name(dev));
+		__assign_str(device);
 	),
 
 	TP_printk("IOMMU: device=%s", __get_str(device)
@@ -78,93 +76,51 @@ DEFINE_EVENT(iommu_device_event, attach_device_to_domain,
 	TP_ARGS(dev)
 );
 
-DEFINE_EVENT(iommu_device_event, detach_device_from_domain,
-
-	TP_PROTO(struct device *dev),
-
-	TP_ARGS(dev)
-);
-
 TRACE_EVENT(map,
 
-	TP_PROTO(struct iommu_domain *domain, unsigned long iova,
-		 phys_addr_t paddr, size_t size, int prot),
+	TP_PROTO(unsigned long iova, phys_addr_t paddr, size_t size),
 
-	TP_ARGS(domain, iova, paddr, size, prot),
+	TP_ARGS(iova, paddr, size),
 
 	TP_STRUCT__entry(
-		__string(name, domain->name)
 		__field(u64, iova)
 		__field(u64, paddr)
 		__field(size_t, size)
-		__field(int, prot)
 	),
 
 	TP_fast_assign(
-		__assign_str(name, domain->name);
 		__entry->iova = iova;
 		__entry->paddr = paddr;
 		__entry->size = size;
-		__entry->prot = prot;
 	),
 
-	TP_printk("IOMMU:%s iova=0x%016llx paddr=0x%016llx size=0x%zx prot=0x%x",
-			__get_str(name), __entry->iova, __entry->paddr,
-			__entry->size, __entry->prot
+	TP_printk("IOMMU: iova=0x%016llx - 0x%016llx paddr=0x%016llx size=%zu",
+		  __entry->iova, __entry->iova + __entry->size, __entry->paddr,
+		  __entry->size
 	)
 );
 
 TRACE_EVENT(unmap,
 
-	TP_PROTO(struct iommu_domain *domain, unsigned long iova, size_t size,
-			size_t unmapped_size),
+	TP_PROTO(unsigned long iova, size_t size, size_t unmapped_size),
 
-	TP_ARGS(domain, iova, size, unmapped_size),
+	TP_ARGS(iova, size, unmapped_size),
 
 	TP_STRUCT__entry(
-		__string(name, domain->name)
 		__field(u64, iova)
 		__field(size_t, size)
 		__field(size_t, unmapped_size)
 	),
 
 	TP_fast_assign(
-		__assign_str(name, domain->name);
 		__entry->iova = iova;
 		__entry->size = size;
 		__entry->unmapped_size = unmapped_size;
 	),
 
-	TP_printk("IOMMU:%s iova=0x%016llx size=0x%zx unmapped_size=0x%zx",
-			__get_str(name), __entry->iova, __entry->size,
-			__entry->unmapped_size
-	)
-);
-
-TRACE_EVENT(map_sg,
-
-	TP_PROTO(struct iommu_domain *domain, unsigned long iova, size_t size,
-		int prot),
-
-	TP_ARGS(domain, iova, size, prot),
-
-	TP_STRUCT__entry(
-		__string(name, domain->name)
-		__field(u64, iova)
-		__field(size_t, size)
-		__field(int, prot)
-	),
-
-	TP_fast_assign(
-		__assign_str(name, domain->name);
-		__entry->iova = iova;
-		__entry->size = size;
-		__entry->prot = prot;
-	),
-
-	TP_printk("IOMMU:%s iova=0x%016llx size=0x%zx prot=0x%x",
-			__get_str(name), __entry->iova, __entry->size,
-			__entry->prot
+	TP_printk("IOMMU: iova=0x%016llx - 0x%016llx size=%zu unmapped_size=%zu",
+		  __entry->iova, __entry->iova + __entry->size,
+		  __entry->size, __entry->unmapped_size
 	)
 );
 
@@ -182,8 +138,8 @@ DECLARE_EVENT_CLASS(iommu_error,
 	),
 
 	TP_fast_assign(
-		__assign_str(device, dev_name(dev));
-		__assign_str(driver, dev_driver_string(dev));
+		__assign_str(device);
+		__assign_str(driver);
 		__entry->iova = iova;
 		__entry->flags = flags;
 	),
@@ -200,66 +156,6 @@ DEFINE_EVENT(iommu_error, io_page_fault,
 
 	TP_ARGS(dev, iova, flags)
 );
-
-DECLARE_EVENT_CLASS(iommu_tlbi,
-
-	TP_PROTO(struct device *dev, u64 time),
-
-	TP_ARGS(dev, time),
-
-	TP_STRUCT__entry(
-		__string(device, dev_name(dev))
-		__field(u64, time)
-	),
-
-	TP_fast_assign(
-		__assign_str(device, dev_name(dev));
-		__entry->time = time;
-	),
-
-	TP_printk("IOMMU:%s %lld us",
-			__get_str(device), __entry->time
-	)
-);
-
-DEFINE_EVENT(iommu_tlbi, tlbi_start,
-
-	TP_PROTO(struct device *dev, u64 time),
-
-	TP_ARGS(dev, time)
-);
-
-DEFINE_EVENT(iommu_tlbi, tlbi_end,
-
-	TP_PROTO(struct device *dev, u64 time),
-
-	TP_ARGS(dev, time)
-);
-
-DEFINE_EVENT(iommu_tlbi, tlbsync_timeout,
-
-	TP_PROTO(struct device *dev, u64 time),
-
-	TP_ARGS(dev, time)
-);
-
-TRACE_EVENT(smmu_init,
-
-	TP_PROTO(u64 time),
-
-	TP_ARGS(time),
-
-	TP_STRUCT__entry(
-		__field(u64, time)
-	),
-
-	TP_fast_assign(
-		__entry->time = time;
-	),
-
-	TP_printk("ARM SMMU init latency: %lld us", __entry->time)
-);
-
 #endif /* _TRACE_IOMMU_H */
 
 /* This part must be outside protection */

@@ -1,21 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *   ALSA sequencer Queue handling
  *   Copyright (c) 1998-1999 by Frank van de Pol <fvdpol@coil.demon.nl>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 #ifndef __SND_SEQ_QUEUE_H
 #define __SND_SEQ_QUEUE_H
@@ -73,9 +59,6 @@ struct snd_seq_queue *snd_seq_queue_alloc(int client, int locked, unsigned int f
 /* delete queue (destructor) */
 int snd_seq_queue_delete(int client, int queueid);
 
-/* notification that client has left the system */
-void snd_seq_queue_client_termination(int client);
-
 /* final stage */
 void snd_seq_queue_client_leave(int client);
 
@@ -83,13 +66,14 @@ void snd_seq_queue_client_leave(int client);
 int snd_seq_enqueue_event(struct snd_seq_event_cell *cell, int atomic, int hop);
 
 /* Remove events */
-void snd_seq_queue_client_leave_cells(int client);
 void snd_seq_queue_remove_cells(int client, struct snd_seq_remove_events *info);
 
 /* return pointer to queue structure for specified id */
 struct snd_seq_queue *queueptr(int queueid);
 /* unlock */
 #define queuefree(q) snd_use_lock_free(&(q)->use_lock)
+
+DEFINE_FREE(snd_seq_queue, struct snd_seq_queue *, if (!IS_ERR_OR_NULL(_T)) queuefree(_T))
 
 /* return the (first) queue matching with the specified name */
 struct snd_seq_queue *snd_seq_queue_find_name(char *name);
@@ -101,7 +85,6 @@ void snd_seq_check_queue(struct snd_seq_queue *q, int atomic, int hop);
 int snd_seq_queue_check_access(int queueid, int client);
 int snd_seq_queue_timer_set_tempo(int queueid, int client, struct snd_seq_queue_tempo *info);
 int snd_seq_queue_set_owner(int queueid, int client, int locked);
-int snd_seq_queue_set_locked(int queueid, int client, int locked);
 int snd_seq_queue_timer_open(int queueid);
 int snd_seq_queue_timer_close(int queueid);
 int snd_seq_queue_use(int queueid, int client, int use);

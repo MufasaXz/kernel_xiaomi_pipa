@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2016, Linaro Ltd
- * Copyright (c) 2018-2019, The Linux Foundation, All rights reserved.
  */
 
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/of_irq.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
+#include <linux/mailbox_client.h>
 #include <linux/mfd/syscon.h>
 #include <linux/slab.h>
 #include <linux/rpmsg.h>
@@ -34,6 +35,18 @@
 #define SMEM_GLINK_NATIVE_XPRT_FIFO_0		479
 #define SMEM_GLINK_NATIVE_XPRT_FIFO_1		480
 
+struct qcom_glink_smem {
+	struct device dev;
+
+	int irq;
+	struct qcom_glink *glink;
+
+	struct mbox_client mbox_client;
+	struct mbox_chan *mbox_chan;
+
+	u32 remote_pid;
+};
+
 struct glink_smem_pipe {
 	struct qcom_glink_pipe native;
 
@@ -42,27 +55,22 @@ struct glink_smem_pipe {
 
 	void *fifo;
 
-	int remote_pid;
+	struct qcom_glink_smem *smem;
 };
 
 #define to_smem_pipe(p) container_of(p, struct glink_smem_pipe, native)
 
-static void glink_smem_rx_reset(struct qcom_glink_pipe *np)
-{
-	struct glink_smem_pipe *pipe = to_smem_pipe(np);
-	*pipe->tail = 0;
-}
-
 static size_t glink_smem_rx_avail(struct qcom_glink_pipe *np)
 {
 	struct glink_smem_pipe *pipe = to_smem_pipe(np);
+	struct qcom_glink_smem *smem = pipe->smem;
 	size_t len;
 	void *fifo;
 	u32 head;
 	u32 tail;
 
 	if (!pipe->fifo) {
-		fifo = qcom_smem_get(pipe->remote_pid,
+		fifo = qcom_smem_get(smem->remote_pid,
 				     SMEM_GLINK_NATIVE_XPRT_FIFO_1, &len);
 		if (IS_ERR(fifo)) {
 			pr_err("failed to acquire RX fifo handle: %ld\n",
@@ -78,17 +86,12 @@ static size_t glink_smem_rx_avail(struct qcom_glink_pipe *np)
 	tail = le32_to_cpu(*pipe->tail);
 
 	if (head < tail)
-		len = pipe->native.length - tail + head;
+		return pipe->native.length - tail + head;
 	else
-		len = head - tail;
-
-	if (WARN_ON_ONCE(len > pipe->native.length))
-		len = 0;
-
-	return len;
+		return head - tail;
 }
 
-static void glink_smem_rx_peak(struct qcom_glink_pipe *np,
+static void glink_smem_rx_peek(struct qcom_glink_pipe *np,
 			       void *data, unsigned int offset, size_t count)
 {
 	struct glink_smem_pipe *pipe = to_smem_pipe(np);
@@ -96,10 +99,6 @@ static void glink_smem_rx_peak(struct qcom_glink_pipe *np,
 	u32 tail;
 
 	tail = le32_to_cpu(*pipe->tail);
-
-	if (WARN_ON_ONCE(tail > pipe->native.length))
-		return;
-
 	tail += offset;
 	if (tail >= pipe->native.length)
 		tail -= pipe->native.length;
@@ -122,15 +121,9 @@ static void glink_smem_rx_advance(struct qcom_glink_pipe *np,
 
 	tail += count;
 	if (tail >= pipe->native.length)
-		tail %= pipe->native.length;
+		tail -= pipe->native.length;
 
 	*pipe->tail = cpu_to_le32(tail);
-}
-
-static void glink_smem_tx_reset(struct qcom_glink_pipe *np)
-{
-	struct glink_smem_pipe *pipe = to_smem_pipe(np);
-	*pipe->head = 0;
 }
 
 static size_t glink_smem_tx_avail(struct qcom_glink_pipe *np)
@@ -153,9 +146,6 @@ static size_t glink_smem_tx_avail(struct qcom_glink_pipe *np)
 	else
 		avail -= FIFO_FULL_RESERVE + TX_BLOCKED_CMD_RESERVE;
 
-	if (WARN_ON_ONCE(avail > pipe->native.length))
-		avail = 0;
-
 	return avail;
 }
 
@@ -164,9 +154,6 @@ static unsigned int glink_smem_tx_write_one(struct glink_smem_pipe *pipe,
 					    const void *data, size_t count)
 {
 	size_t len;
-
-	if (WARN_ON_ONCE(head > pipe->native.length))
-		return head;
 
 	len = min_t(size_t, count, pipe->native.length - head);
 	if (len)
@@ -205,16 +192,37 @@ static void glink_smem_tx_write(struct qcom_glink_pipe *glink_pipe,
 	*pipe->head = cpu_to_le32(head);
 }
 
-static void qcom_glink_smem_release(struct device *dev)
+static void glink_smem_tx_kick(struct qcom_glink_pipe *glink_pipe)
 {
-	kfree(dev);
+	struct glink_smem_pipe *pipe = to_smem_pipe(glink_pipe);
+	struct qcom_glink_smem *smem = pipe->smem;
+
+	mbox_send_message(smem->mbox_chan, NULL);
+	mbox_client_txdone(smem->mbox_chan, 0);
 }
 
-struct qcom_glink *qcom_glink_smem_register(struct device *parent,
-					    struct device_node *node)
+static irqreturn_t qcom_glink_smem_intr(int irq, void *data)
+{
+	struct qcom_glink_smem *smem = data;
+
+	qcom_glink_native_rx(smem->glink);
+
+	return IRQ_HANDLED;
+}
+
+static void qcom_glink_smem_release(struct device *dev)
+{
+	struct qcom_glink_smem *smem = container_of(dev, struct qcom_glink_smem, dev);
+
+	kfree(smem);
+}
+
+struct qcom_glink_smem *qcom_glink_smem_register(struct device *parent,
+						 struct device_node *node)
 {
 	struct glink_smem_pipe *rx_pipe;
 	struct glink_smem_pipe *tx_pipe;
+	struct qcom_glink_smem *smem;
 	struct qcom_glink *glink;
 	struct device *dev;
 	u32 remote_pid;
@@ -222,14 +230,16 @@ struct qcom_glink *qcom_glink_smem_register(struct device *parent,
 	size_t size;
 	int ret;
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
-	if (!dev)
+	smem = kzalloc(sizeof(*smem), GFP_KERNEL);
+	if (!smem)
 		return ERR_PTR(-ENOMEM);
+
+	dev = &smem->dev;
 
 	dev->parent = parent;
 	dev->of_node = node;
 	dev->release = qcom_glink_smem_release;
-	dev_set_name(dev, "%s:%s", node->parent->name, node->name);
+	dev_set_name(dev, "%s:%pOFn", dev_name(parent->parent), node);
 	ret = device_register(dev);
 	if (ret) {
 		pr_err("failed to register glink edge\n");
@@ -243,6 +253,8 @@ struct qcom_glink *qcom_glink_smem_register(struct device *parent,
 		dev_err(dev, "failed to parse qcom,remote-pid\n");
 		goto err_put_dev;
 	}
+
+	smem->remote_pid = remote_pid;
 
 	rx_pipe = devm_kzalloc(dev, sizeof(*rx_pipe), GFP_KERNEL);
 	tx_pipe = devm_kzalloc(dev, sizeof(*tx_pipe), GFP_KERNEL);
@@ -292,16 +304,33 @@ struct qcom_glink *qcom_glink_smem_register(struct device *parent,
 		goto err_put_dev;
 	}
 
-	rx_pipe->native.reset = glink_smem_rx_reset;
-	rx_pipe->native.avail = glink_smem_rx_avail;
-	rx_pipe->native.peak = glink_smem_rx_peak;
-	rx_pipe->native.advance = glink_smem_rx_advance;
-	rx_pipe->remote_pid = remote_pid;
+	smem->irq = of_irq_get(smem->dev.of_node, 0);
+	ret = devm_request_irq(&smem->dev, smem->irq, qcom_glink_smem_intr,
+			       IRQF_NO_SUSPEND | IRQF_NO_AUTOEN,
+			       "glink-smem", smem);
+	if (ret) {
+		dev_err(&smem->dev, "failed to request IRQ\n");
+		goto err_put_dev;
+	}
 
-	tx_pipe->native.reset = glink_smem_tx_reset;
+	smem->mbox_client.dev = &smem->dev;
+	smem->mbox_client.knows_txdone = true;
+	smem->mbox_chan = mbox_request_channel(&smem->mbox_client, 0);
+	if (IS_ERR(smem->mbox_chan)) {
+		ret = dev_err_probe(&smem->dev, PTR_ERR(smem->mbox_chan),
+				    "failed to acquire IPC channel\n");
+		goto err_put_dev;
+	}
+
+	rx_pipe->smem = smem;
+	rx_pipe->native.avail = glink_smem_rx_avail;
+	rx_pipe->native.peek = glink_smem_rx_peek;
+	rx_pipe->native.advance = glink_smem_rx_advance;
+
+	tx_pipe->smem = smem;
 	tx_pipe->native.avail = glink_smem_tx_avail;
 	tx_pipe->native.write = glink_smem_tx_write;
-	tx_pipe->remote_pid = remote_pid;
+	tx_pipe->native.kick = glink_smem_tx_kick;
 
 	*rx_pipe->tail = 0;
 	*tx_pipe->head = 0;
@@ -312,10 +341,17 @@ struct qcom_glink *qcom_glink_smem_register(struct device *parent,
 					false);
 	if (IS_ERR(glink)) {
 		ret = PTR_ERR(glink);
-		goto err_put_dev;
+		goto err_free_mbox;
 	}
 
-	return glink;
+	smem->glink = glink;
+
+	enable_irq(smem->irq);
+
+	return smem;
+
+err_free_mbox:
+	mbox_free_channel(smem->mbox_chan);
 
 err_put_dev:
 	device_unregister(dev);
@@ -324,10 +360,16 @@ err_put_dev:
 }
 EXPORT_SYMBOL_GPL(qcom_glink_smem_register);
 
-void qcom_glink_smem_unregister(struct qcom_glink *glink)
+void qcom_glink_smem_unregister(struct qcom_glink_smem *smem)
 {
+	struct qcom_glink *glink = smem->glink;
+
+	disable_irq(smem->irq);
+
 	qcom_glink_native_remove(glink);
-	qcom_glink_native_unregister(glink);
+
+	mbox_free_channel(smem->mbox_chan);
+	device_unregister(&smem->dev);
 }
 EXPORT_SYMBOL_GPL(qcom_glink_smem_unregister);
 

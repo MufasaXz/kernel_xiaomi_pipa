@@ -1,5 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 /*
- * Copyright 2014 Advanced Micro Devices, Inc.
+ * Copyright 2014-2022 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -31,21 +32,21 @@
 #include "kfd_device_queue_manager.h"
 #include "kfd_pm4_headers.h"
 #include "kfd_pm4_opcodes.h"
+#include "amdgpu_reset.h"
 
 #define PM4_COUNT_ZERO (((1 << 15) - 1) << 16)
 
-static bool initialize(struct kernel_queue *kq, struct kfd_dev *dev,
+/* Initialize a kernel queue, including allocations of GART memory
+ * needed for the queue.
+ */
+static bool kq_initialize(struct kernel_queue *kq, struct kfd_node *dev,
 		enum kfd_queue_type type, unsigned int queue_size)
 {
 	struct queue_properties prop;
 	int retval;
 	union PM4_MES_TYPE_3_HEADER nop;
 
-	if (WARN_ON(type != KFD_QUEUE_TYPE_DIQ && type != KFD_QUEUE_TYPE_HIQ))
-		return false;
-
-	pr_debug("Initializing queue type %d size %d\n", KFD_QUEUE_TYPE_HIQ,
-			queue_size);
+	pr_debug("Initializing queue type %d size %d\n", type, queue_size);
 
 	memset(&prop, 0, sizeof(prop));
 	memset(&nop, 0, sizeof(nop));
@@ -58,37 +59,48 @@ static bool initialize(struct kernel_queue *kq, struct kfd_dev *dev,
 	kq->nop_packet = nop.u32all;
 	switch (type) {
 	case KFD_QUEUE_TYPE_DIQ:
+		kq->mqd_mgr = dev->dqm->mqd_mgrs[KFD_MQD_TYPE_DIQ];
+		break;
 	case KFD_QUEUE_TYPE_HIQ:
-		kq->mqd_mgr = dev->dqm->ops.get_mqd_manager(dev->dqm,
-						KFD_MQD_TYPE_HIQ);
+		kq->mqd_mgr = dev->dqm->mqd_mgrs[KFD_MQD_TYPE_HIQ];
 		break;
 	default:
-		pr_err("Invalid queue type %d\n", type);
+		WARN(1, "Invalid queue type %d\n", type);
+		dev_err(dev->adev->dev, "Invalid queue type %d\n", type);
 		return false;
 	}
 
 	if (!kq->mqd_mgr)
 		return false;
 
-	prop.doorbell_ptr = kfd_get_kernel_doorbell(dev, &prop.doorbell_off);
+	prop.doorbell_ptr = kfd_get_kernel_doorbell(dev->kfd, &prop.doorbell_off);
 
 	if (!prop.doorbell_ptr) {
-		pr_err("Failed to initialize doorbell");
+		dev_err(dev->adev->dev, "Failed to initialize doorbell");
 		goto err_get_kernel_doorbell;
 	}
 
 	retval = kfd_gtt_sa_allocate(dev, queue_size, &kq->pq);
 	if (retval != 0) {
-		pr_err("Failed to init pq queues size %d\n", queue_size);
+		dev_err(dev->adev->dev, "Failed to init pq queues size %d\n",
+			queue_size);
 		goto err_pq_allocate_vidmem;
 	}
 
 	kq->pq_kernel_addr = kq->pq->cpu_ptr;
 	kq->pq_gpu_addr = kq->pq->gpu_addr;
 
-	retval = kq->ops_asic_specific.initialize(kq, dev, type, queue_size);
-	if (!retval)
-		goto err_eop_allocate_vidmem;
+	/* For CIK family asics, kq->eop_mem is not needed */
+	if (dev->adev->asic_type > CHIP_MULLINS) {
+		retval = kfd_gtt_sa_allocate(dev, PAGE_SIZE, &kq->eop_mem);
+		if (retval != 0)
+			goto err_eop_allocate_vidmem;
+
+		kq->eop_gpu_addr = kq->eop_mem->gpu_addr;
+		kq->eop_kernel_addr = kq->eop_mem->cpu_ptr;
+
+		memset(kq->eop_kernel_addr, 0, PAGE_SIZE);
+	}
 
 	retval = kfd_gtt_sa_allocate(dev, sizeof(*kq->rptr_kernel),
 					&kq->rptr_mem);
@@ -99,7 +111,7 @@ static bool initialize(struct kernel_queue *kq, struct kfd_dev *dev,
 	kq->rptr_kernel = kq->rptr_mem->cpu_ptr;
 	kq->rptr_gpu_addr = kq->rptr_mem->gpu_addr;
 
-	retval = kfd_gtt_sa_allocate(dev, dev->device_info->doorbell_size,
+	retval = kfd_gtt_sa_allocate(dev, dev->kfd->device_info.doorbell_size,
 					&kq->wptr_mem);
 
 	if (retval != 0)
@@ -110,10 +122,11 @@ static bool initialize(struct kernel_queue *kq, struct kfd_dev *dev,
 
 	memset(kq->pq_kernel_addr, 0, queue_size);
 	memset(kq->rptr_kernel, 0, sizeof(*kq->rptr_kernel));
-	memset(kq->wptr_kernel, 0, sizeof(*kq->wptr_kernel));
+	memset(kq->wptr_kernel, 0, dev->kfd->device_info.doorbell_size);
 
 	prop.queue_size = queue_size;
 	prop.is_interop = false;
+	prop.is_gws = false;
 	prop.priority = 1;
 	prop.queue_percent = 100;
 	prop.type = type;
@@ -123,7 +136,6 @@ static bool initialize(struct kernel_queue *kq, struct kfd_dev *dev,
 	prop.write_ptr = (uint32_t *) kq->wptr_gpu_addr;
 	prop.eop_ring_buffer_address = kq->eop_gpu_addr;
 	prop.eop_ring_buffer_size = PAGE_SIZE;
-	prop.cu_mask = NULL;
 
 	if (init_queue(&kq->queue, &prop) != 0)
 		goto err_init_queue;
@@ -131,13 +143,14 @@ static bool initialize(struct kernel_queue *kq, struct kfd_dev *dev,
 	kq->queue->device = dev;
 	kq->queue->process = kfd_get_process(current);
 
-	retval = kq->mqd_mgr->init_mqd(kq->mqd_mgr, &kq->queue->mqd,
-					&kq->queue->mqd_mem_obj,
+	kq->queue->mqd_mem_obj = kq->mqd_mgr->allocate_mqd(kq->mqd_mgr->dev,
+					&kq->queue->properties);
+	if (!kq->queue->mqd_mem_obj)
+		goto err_allocate_mqd;
+	kq->mqd_mgr->init_mqd(kq->mqd_mgr, &kq->queue->mqd,
+					kq->queue->mqd_mem_obj,
 					&kq->queue->gart_mqd_addr,
 					&kq->queue->properties);
-	if (retval != 0)
-		goto err_init_mqd;
-
 	/* assign HIQ to HQD */
 	if (type == KFD_QUEUE_TYPE_HIQ) {
 		pr_debug("Assigning hiq to hqd\n");
@@ -163,7 +176,8 @@ static bool initialize(struct kernel_queue *kq, struct kfd_dev *dev,
 
 	return true;
 err_alloc_fence:
-err_init_mqd:
+	kq->mqd_mgr->free_mqd(kq->mqd_mgr, kq->queue->mqd, kq->queue->mqd_mem_obj);
+err_allocate_mqd:
 	uninit_queue(kq->queue);
 err_init_queue:
 	kfd_gtt_sa_free(dev, kq->wptr_mem);
@@ -174,37 +188,45 @@ err_rptr_allocate_vidmem:
 err_eop_allocate_vidmem:
 	kfd_gtt_sa_free(dev, kq->pq);
 err_pq_allocate_vidmem:
-	kfd_release_kernel_doorbell(dev, prop.doorbell_ptr);
+	kfd_release_kernel_doorbell(dev->kfd, prop.doorbell_ptr);
 err_get_kernel_doorbell:
 	return false;
 
 }
 
-static void uninitialize(struct kernel_queue *kq)
+/* Uninitialize a kernel queue and free all its memory usages. */
+static void kq_uninitialize(struct kernel_queue *kq)
 {
-	if (kq->queue->properties.type == KFD_QUEUE_TYPE_HIQ)
+	if (kq->queue->properties.type == KFD_QUEUE_TYPE_HIQ && down_read_trylock(&kq->dev->adev->reset_domain->sem)) {
 		kq->mqd_mgr->destroy_mqd(kq->mqd_mgr,
 					kq->queue->mqd,
 					KFD_PREEMPT_TYPE_WAVEFRONT_RESET,
 					KFD_UNMAP_LATENCY_MS,
 					kq->queue->pipe,
 					kq->queue->queue);
+		up_read(&kq->dev->adev->reset_domain->sem);
+	}
 	else if (kq->queue->properties.type == KFD_QUEUE_TYPE_DIQ)
 		kfd_gtt_sa_free(kq->dev, kq->fence_mem_obj);
 
-	kq->mqd_mgr->uninit_mqd(kq->mqd_mgr, kq->queue->mqd,
+	kq->mqd_mgr->free_mqd(kq->mqd_mgr, kq->queue->mqd,
 				kq->queue->mqd_mem_obj);
 
 	kfd_gtt_sa_free(kq->dev, kq->rptr_mem);
 	kfd_gtt_sa_free(kq->dev, kq->wptr_mem);
-	kq->ops_asic_specific.uninitialize(kq);
+
+	/* For CIK family asics, kq->eop_mem is Null, kfd_gtt_sa_free()
+	 * is able to handle NULL properly.
+	 */
+	kfd_gtt_sa_free(kq->dev, kq->eop_mem);
+
 	kfd_gtt_sa_free(kq->dev, kq->pq);
-	kfd_release_kernel_doorbell(kq->dev,
+	kfd_release_kernel_doorbell(kq->dev->kfd,
 					kq->queue->properties.doorbell_ptr);
 	uninit_queue(kq->queue);
 }
 
-static int acquire_packet_buffer(struct kernel_queue *kq,
+int kq_acquire_packet_buffer(struct kernel_queue *kq,
 		size_t packet_size_in_dwords, unsigned int **buffer_ptr)
 {
 	size_t available_size;
@@ -265,7 +287,7 @@ err_no_space:
 	return -ENOMEM;
 }
 
-static void submit_packet(struct kernel_queue *kq)
+int kq_submit_packet(struct kernel_queue *kq)
 {
 #ifdef DEBUG
 	int i;
@@ -277,13 +299,31 @@ static void submit_packet(struct kernel_queue *kq)
 	}
 	pr_debug("\n");
 #endif
+	/* Fatal err detected, packet submission won't go through */
+	if (amdgpu_amdkfd_is_fed(kq->dev->adev))
+		return -EIO;
 
-	kq->ops_asic_specific.submit_packet(kq);
+	/* Make sure ring buffer is updated before wptr updated */
+	mb();
+
+	if (kq->dev->kfd->device_info.doorbell_size == 8) {
+		*kq->wptr64_kernel = kq->pending_wptr64;
+		mb(); /* Make sure wptr updated before ring doorbell */
+		write_kernel_doorbell64(kq->queue->properties.doorbell_ptr,
+					kq->pending_wptr64);
+	} else {
+		*kq->wptr_kernel = kq->pending_wptr;
+		mb(); /* Make sure wptr updated before ring doorbell */
+		write_kernel_doorbell(kq->queue->properties.doorbell_ptr,
+					kq->pending_wptr);
+	}
+
+	return 0;
 }
 
-static void rollback_packet(struct kernel_queue *kq)
+void kq_rollback_packet(struct kernel_queue *kq)
 {
-	if (kq->dev->device_info->doorbell_size == 8) {
+	if (kq->dev->kfd->device_info.doorbell_size == 8) {
 		kq->pending_wptr64 = *kq->wptr64_kernel;
 		kq->pending_wptr = *kq->wptr_kernel %
 			(kq->queue->properties.queue_size / 4);
@@ -292,7 +332,7 @@ static void rollback_packet(struct kernel_queue *kq)
 	}
 }
 
-struct kernel_queue *kernel_queue_init(struct kfd_dev *dev,
+struct kernel_queue *kernel_queue_init(struct kfd_node *dev,
 					enum kfd_queue_type type)
 {
 	struct kernel_queue *kq;
@@ -301,79 +341,48 @@ struct kernel_queue *kernel_queue_init(struct kfd_dev *dev,
 	if (!kq)
 		return NULL;
 
-	kq->ops.initialize = initialize;
-	kq->ops.uninitialize = uninitialize;
-	kq->ops.acquire_packet_buffer = acquire_packet_buffer;
-	kq->ops.submit_packet = submit_packet;
-	kq->ops.rollback_packet = rollback_packet;
-
-	switch (dev->device_info->asic_family) {
-	case CHIP_CARRIZO:
-	case CHIP_TONGA:
-	case CHIP_FIJI:
-	case CHIP_POLARIS10:
-	case CHIP_POLARIS11:
-		kernel_queue_init_vi(&kq->ops_asic_specific);
-		break;
-
-	case CHIP_KAVERI:
-	case CHIP_HAWAII:
-		kernel_queue_init_cik(&kq->ops_asic_specific);
-		break;
-
-	case CHIP_VEGA10:
-	case CHIP_RAVEN:
-		kernel_queue_init_v9(&kq->ops_asic_specific);
-		break;
-	default:
-		WARN(1, "Unexpected ASIC family %u",
-		     dev->device_info->asic_family);
-		goto out_free;
-	}
-
-	if (kq->ops.initialize(kq, dev, type, KFD_KERNEL_QUEUE_SIZE))
+	if (kq_initialize(kq, dev, type, KFD_KERNEL_QUEUE_SIZE))
 		return kq;
 
-	pr_err("Failed to init kernel queue\n");
+	dev_err(dev->adev->dev, "Failed to init kernel queue\n");
 
-out_free:
 	kfree(kq);
 	return NULL;
 }
 
 void kernel_queue_uninit(struct kernel_queue *kq)
 {
-	kq->ops.uninitialize(kq);
+	kq_uninitialize(kq);
 	kfree(kq);
 }
 
 /* FIXME: Can this test be removed? */
-static __attribute__((unused)) void test_kq(struct kfd_dev *dev)
+static __attribute__((unused)) void test_kq(struct kfd_node *dev)
 {
 	struct kernel_queue *kq;
 	uint32_t *buffer, i;
 	int retval;
 
-	pr_err("Starting kernel queue test\n");
+	dev_err(dev->adev->dev, "Starting kernel queue test\n");
 
 	kq = kernel_queue_init(dev, KFD_QUEUE_TYPE_HIQ);
 	if (unlikely(!kq)) {
-		pr_err("  Failed to initialize HIQ\n");
-		pr_err("Kernel queue test failed\n");
+		dev_err(dev->adev->dev, "  Failed to initialize HIQ\n");
+		dev_err(dev->adev->dev, "Kernel queue test failed\n");
 		return;
 	}
 
-	retval = kq->ops.acquire_packet_buffer(kq, 5, &buffer);
+	retval = kq_acquire_packet_buffer(kq, 5, &buffer);
 	if (unlikely(retval != 0)) {
-		pr_err("  Failed to acquire packet buffer\n");
-		pr_err("Kernel queue test failed\n");
+		dev_err(dev->adev->dev, "  Failed to acquire packet buffer\n");
+		dev_err(dev->adev->dev, "Kernel queue test failed\n");
 		return;
 	}
 	for (i = 0; i < 5; i++)
 		buffer[i] = kq->nop_packet;
-	kq->ops.submit_packet(kq);
+	kq_submit_packet(kq);
 
-	pr_err("Ending kernel queue test\n");
+	dev_err(dev->adev->dev, "Ending kernel queue test\n");
 }
 
 

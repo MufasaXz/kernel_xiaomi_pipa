@@ -1,8 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) ST-Ericsson AB 2010
  * Authors:	Sjur Brendeland
  *		Daniel Martensson
- * License terms: GNU General Public License (GPL) version 2
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ":%s(): " fmt, __func__
@@ -31,6 +31,7 @@
 /*This list is protected by the rtnl lock. */
 static LIST_HEAD(chnl_net_list);
 
+MODULE_DESCRIPTION("ST-Ericsson CAIF modem protocol GPRS network device");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS_RTNL_LINK("caif");
 
@@ -46,7 +47,6 @@ struct chnl_net {
 	struct caif_connect_request conn_req;
 	struct list_head list_field;
 	struct net_device *netdev;
-	char name[256];
 	wait_queue_head_t netmgmt_wq;
 	/* Flow status to remember and control the transmission. */
 	bool flowenabled;
@@ -62,8 +62,6 @@ static int chnl_recv_cb(struct cflayer *layr, struct cfpkt *pkt)
 	u8 buf;
 
 	priv = container_of(layr, struct chnl_net, chnl);
-	if (!priv)
-		return -EINVAL;
 
 	skb = (struct sk_buff *) cfpkt_tonative(pkt);
 
@@ -101,10 +99,7 @@ static int chnl_recv_cb(struct cflayer *layr, struct cfpkt *pkt)
 	else
 		skb->ip_summed = CHECKSUM_NONE;
 
-	if (in_interrupt())
-		netif_rx(skb);
-	else
-		netif_rx_ni(skb);
+	netif_rx(skb);
 
 	/* Update statistics. */
 	priv->netdev->stats.rx_packets++;
@@ -197,7 +192,8 @@ static void chnl_flowctrl_cb(struct cflayer *layr, enum caif_ctrlcmd flow,
 	}
 }
 
-static int chnl_net_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t chnl_net_start_xmit(struct sk_buff *skb,
+				       struct net_device *dev)
 {
 	struct chnl_net *priv;
 	struct cfpkt *pkt = NULL;
@@ -350,7 +346,6 @@ static int chnl_net_init(struct net_device *dev)
 	struct chnl_net *priv;
 	ASSERT_RTNL();
 	priv = netdev_priv(dev);
-	strncpy(priv->name, dev->name, sizeof(priv->name));
 	INIT_LIST_HEAD(&priv->list_field);
 	return 0;
 }
@@ -443,10 +438,11 @@ static void caif_netlink_parms(struct nlattr *data[],
 	}
 }
 
-static int ipcaif_newlink(struct net *src_net, struct net_device *dev,
-			  struct nlattr *tb[], struct nlattr *data[],
+static int ipcaif_newlink(struct net_device *dev,
+			  struct rtnl_newlink_params *params,
 			  struct netlink_ext_ack *extack)
 {
+	struct nlattr **data = params->data;
 	int ret;
 	struct chnl_net *caifdev;
 	ASSERT_RTNL();

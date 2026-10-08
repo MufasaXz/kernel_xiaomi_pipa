@@ -1,11 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2005 - 2016 Broadcom
  * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License version 2
- * as published by the Free Software Foundation.  The full GNU General
- * Public License is included in this distribution in the file called COPYING.
  *
  * Contact Information:
  * linux-drivers@emulex.com
@@ -139,7 +135,8 @@ static int be_mcc_notify(struct be_adapter *adapter)
 
 /* To check if valid bit is set, check the entire word as we don't know
  * the endianness of the data (old entry is host endian while a new entry is
- * little endian) */
+ * little endian)
+ */
 static inline bool be_mcc_compl_is_new(struct be_mcc_compl *compl)
 {
 	u32 flags;
@@ -252,7 +249,8 @@ static int be_mcc_compl_process(struct be_adapter *adapter,
 	u8 opcode = 0, subsystem = 0;
 
 	/* Just swap the status to host endian; mcc tag is opaquely copied
-	 * from mcc_wrb */
+	 * from mcc_wrb
+	 */
 	be_dws_le_to_cpu(compl, 4);
 
 	base_status = base_status(compl->status);
@@ -661,8 +659,7 @@ static int be_mbox_db_ready_wait(struct be_adapter *adapter, void __iomem *db)
 	return 0;
 }
 
-/*
- * Insert the mailbox address into the doorbell in two steps
+/* Insert the mailbox address into the doorbell in two steps
  * Polls on the mbox doorbell till a command completion (or a timeout) occurs
  */
 static int be_mbox_notify_wait(struct be_adapter *adapter)
@@ -806,7 +803,7 @@ static void be_wrb_cmd_hdr_prepare(struct be_cmd_req_hdr *req_hdr,
 	req_hdr->subsystem = subsystem;
 	req_hdr->request_length = cpu_to_le32(cmd_len - sizeof(*req_hdr));
 	req_hdr->version = 0;
-	fill_wrb_tags(wrb, (ulong) req_hdr);
+	fill_wrb_tags(wrb, (ulong)req_hdr);
 	wrb->payload_length = cmd_len;
 	if (mem) {
 		wrb->embedded |= (1 & MCC_WRB_SGE_CNT_MASK) <<
@@ -836,8 +833,8 @@ static void be_cmd_page_addrs_prepare(struct phys_addr *pages, u32 max_pages,
 static inline struct be_mcc_wrb *wrb_from_mbox(struct be_adapter *adapter)
 {
 	struct be_dma_mem *mbox_mem = &adapter->mbox_mem;
-	struct be_mcc_wrb *wrb
-		= &((struct be_mcc_mailbox *)(mbox_mem->va))->wrb;
+	struct be_mcc_wrb *wrb = &((struct be_mcc_mailbox *)(mbox_mem->va))->wrb;
+
 	memset(wrb, 0, sizeof(*wrb));
 	return wrb;
 }
@@ -880,7 +877,7 @@ static int be_cmd_lock(struct be_adapter *adapter)
 static void be_cmd_unlock(struct be_adapter *adapter)
 {
 	if (use_mcc(adapter))
-		spin_unlock_bh(&adapter->mcc_lock);
+		return spin_unlock_bh(&adapter->mcc_lock);
 	else
 		return mutex_unlock(&adapter->mbox_lock);
 }
@@ -900,7 +897,7 @@ static struct be_mcc_wrb *be_cmd_copy(struct be_adapter *adapter,
 
 	memcpy(dest_wrb, wrb, sizeof(*wrb));
 	if (wrb->embedded & cpu_to_le32(MCC_WRB_EMBEDDED_MASK))
-		fill_wrb_tags(dest_wrb, (ulong) embedded_payload(wrb));
+		fill_wrb_tags(dest_wrb, (ulong)embedded_payload(wrb));
 
 	return dest_wrb;
 }
@@ -1084,7 +1081,7 @@ err:
 }
 
 /* Uses synchronous MCCQ */
-int be_cmd_pmac_add(struct be_adapter *adapter, u8 *mac_addr,
+int be_cmd_pmac_add(struct be_adapter *adapter, const u8 *mac_addr,
 		    u32 if_id, u32 *pmac_id, u32 domain)
 {
 	struct be_mcc_wrb *wrb;
@@ -1118,7 +1115,7 @@ int be_cmd_pmac_add(struct be_adapter *adapter, u8 *mac_addr,
 err:
 	spin_unlock_bh(&adapter->mcc_lock);
 
-	 if (base_status(status) == MCC_STATUS_UNAUTHORIZED_REQUEST)
+	if (base_status(status) == MCC_STATUS_UNAUTHORIZED_REQUEST)
 		status = -EPERM;
 
 	return status;
@@ -1807,17 +1804,17 @@ int be_cmd_get_fat_dump(struct be_adapter *adapter, u32 buf_len, void *buf)
 
 	total_size = buf_len;
 
-	get_fat_cmd.size = sizeof(struct be_cmd_req_get_fat) + 60*1024;
-	get_fat_cmd.va = dma_zalloc_coherent(&adapter->pdev->dev,
-					     get_fat_cmd.size,
-					     &get_fat_cmd.dma, GFP_ATOMIC);
+	get_fat_cmd.size = sizeof(struct be_cmd_req_get_fat) + 60 * 1024;
+	get_fat_cmd.va = dma_alloc_coherent(&adapter->pdev->dev,
+					    get_fat_cmd.size,
+					    &get_fat_cmd.dma, GFP_ATOMIC);
 	if (!get_fat_cmd.va)
 		return -ENOMEM;
 
 	spin_lock_bh(&adapter->mcc_lock);
 
 	while (total_size) {
-		buf_size = min(total_size, (u32)60*1024);
+		buf_size = min(total_size, (u32)60 * 1024);
 		total_size -= buf_size;
 
 		wrb = wrb_from_mccq(adapter);
@@ -1882,9 +1879,9 @@ int be_cmd_get_fw_ver(struct be_adapter *adapter)
 	if (!status) {
 		struct be_cmd_resp_get_fw_version *resp = embedded_payload(wrb);
 
-		strlcpy(adapter->fw_ver, resp->firmware_version_string,
+		strscpy(adapter->fw_ver, resp->firmware_version_string,
 			sizeof(adapter->fw_ver));
-		strlcpy(adapter->fw_on_flash, resp->fw_on_flash_version_string,
+		strscpy(adapter->fw_on_flash, resp->fw_on_flash_version_string,
 			sizeof(adapter->fw_on_flash));
 	}
 err:
@@ -2302,8 +2299,8 @@ int be_cmd_read_port_transceiver_data(struct be_adapter *adapter,
 		return -EINVAL;
 
 	cmd.size = sizeof(struct be_cmd_resp_port_type);
-	cmd.va = dma_zalloc_coherent(&adapter->pdev->dev, cmd.size, &cmd.dma,
-				     GFP_ATOMIC);
+	cmd.va = dma_alloc_coherent(&adapter->pdev->dev, cmd.size, &cmd.dma,
+				    GFP_ATOMIC);
 	if (!cmd.va) {
 		dev_err(&adapter->pdev->dev, "Memory allocation failed\n");
 		return -ENOMEM;
@@ -2377,7 +2374,7 @@ static int lancer_cmd_write_object(struct be_adapter *adapter,
 
 	be_dws_cpu_to_le(ctxt, sizeof(req->context));
 	req->write_offset = cpu_to_le32(data_offset);
-	strlcpy(req->object_name, obj_name, sizeof(req->object_name));
+	strscpy(req->object_name, obj_name, sizeof(req->object_name));
 	req->descriptor_count = cpu_to_le32(1);
 	req->buf_len = cpu_to_le32(data_size);
 	req->addr_low = cpu_to_le32((cmd->dma +
@@ -2446,9 +2443,9 @@ int be_cmd_query_sfp_info(struct be_adapter *adapter)
 	status = be_cmd_read_port_transceiver_data(adapter, TR_PAGE_A0,
 						   0, PAGE_DATA_LEN, page_data);
 	if (!status) {
-		strlcpy(adapter->phy.vendor_name, page_data +
+		strscpy(adapter->phy.vendor_name, page_data +
 			SFP_VENDOR_NAME_OFFSET, SFP_VENDOR_NAME_LEN - 1);
-		strlcpy(adapter->phy.vendor_pn,
+		strscpy(adapter->phy.vendor_pn,
 			page_data + SFP_VENDOR_PN_OFFSET,
 			SFP_VENDOR_NAME_LEN - 1);
 	}
@@ -2477,7 +2474,7 @@ static int lancer_cmd_delete_object(struct be_adapter *adapter,
 			       OPCODE_COMMON_DELETE_OBJECT,
 			       sizeof(*req), wrb, NULL);
 
-	strlcpy(req->object_name, obj_name, sizeof(req->object_name));
+	strscpy(req->object_name, obj_name, sizeof(req->object_name));
 
 	status = be_mcc_notify_wait(adapter);
 err:
@@ -2618,7 +2615,11 @@ err:
 	return status;
 }
 
-static char flash_cookie[2][16] = {"*** SE FLAS", "H DIRECTORY *** "};
+/*
+ * Since the cookie is text, add a parsing-skipped space to keep it from
+ * ever being matched on storage holding this source file.
+ */
+static const char flash_cookie[32] __nonstring = "*** SE FLAS" "H DIRECTORY *** ";
 
 static bool phy_flashing_required(struct be_adapter *adapter)
 {
@@ -2762,7 +2763,7 @@ static int be_flash_BEx(struct be_adapter *adapter,
 	bool crc_match;
 	const u8 *p;
 
-	struct flash_comp gen3_flash_types[] = {
+	static const struct flash_comp gen3_flash_types[] = {
 		{ BE3_ISCSI_PRIMARY_IMAGE_START, OPTYPE_ISCSI_ACTIVE,
 			BE3_COMP_MAX_SIZE, IMAGE_FIRMWARE_ISCSI},
 		{ BE3_REDBOOT_START, OPTYPE_REDBOOT,
@@ -2785,7 +2786,7 @@ static int be_flash_BEx(struct be_adapter *adapter,
 			BE3_PHY_FW_COMP_MAX_SIZE, IMAGE_FIRMWARE_PHY}
 	};
 
-	struct flash_comp gen2_flash_types[] = {
+	static const struct flash_comp gen2_flash_types[] = {
 		{ BE2_ISCSI_PRIMARY_IMAGE_START, OPTYPE_ISCSI_ACTIVE,
 			BE2_COMP_MAX_SIZE, IMAGE_FIRMWARE_ISCSI},
 		{ BE2_REDBOOT_START, OPTYPE_REDBOOT,
@@ -3066,8 +3067,8 @@ int lancer_fw_download(struct be_adapter *adapter,
 
 	flash_cmd.size = sizeof(struct lancer_cmd_req_write_object)
 				+ LANCER_FW_DOWNLOAD_CHUNK;
-	flash_cmd.va = dma_zalloc_coherent(dev, flash_cmd.size,
-					   &flash_cmd.dma, GFP_KERNEL);
+	flash_cmd.va = dma_alloc_coherent(dev, flash_cmd.size, &flash_cmd.dma,
+					  GFP_KERNEL);
 	if (!flash_cmd.va)
 		return -ENOMEM;
 
@@ -3184,8 +3185,8 @@ int be_fw_download(struct be_adapter *adapter, const struct firmware *fw)
 	}
 
 	flash_cmd.size = sizeof(struct be_cmd_write_flashrom);
-	flash_cmd.va = dma_zalloc_coherent(dev, flash_cmd.size, &flash_cmd.dma,
-					   GFP_KERNEL);
+	flash_cmd.va = dma_alloc_coherent(dev, flash_cmd.size, &flash_cmd.dma,
+					  GFP_KERNEL);
 	if (!flash_cmd.va)
 		return -ENOMEM;
 
@@ -3366,7 +3367,7 @@ int be_cmd_ddr_dma_test(struct be_adapter *adapter, u64 pattern,
 	req->pattern = cpu_to_le64(pattern);
 	req->byte_count = cpu_to_le32(byte_cnt);
 	for (i = 0; i < byte_cnt; i++) {
-		req->snd_buff[i] = (u8)(pattern >> (j*8));
+		req->snd_buff[i] = (u8)(pattern >> (j * 8));
 		j++;
 		if (j > 7)
 			j = 0;
@@ -3435,8 +3436,8 @@ int be_cmd_get_phy_info(struct be_adapter *adapter)
 		goto err;
 	}
 	cmd.size = sizeof(struct be_cmd_req_get_phy_info);
-	cmd.va = dma_zalloc_coherent(&adapter->pdev->dev, cmd.size, &cmd.dma,
-				     GFP_ATOMIC);
+	cmd.va = dma_alloc_coherent(&adapter->pdev->dev, cmd.size, &cmd.dma,
+				    GFP_ATOMIC);
 	if (!cmd.va) {
 		dev_err(&adapter->pdev->dev, "Memory alloc failure\n");
 		status = -ENOMEM;
@@ -3522,9 +3523,9 @@ int be_cmd_get_cntl_attributes(struct be_adapter *adapter)
 
 	memset(&attribs_cmd, 0, sizeof(struct be_dma_mem));
 	attribs_cmd.size = sizeof(struct be_cmd_resp_cntl_attribs);
-	attribs_cmd.va = dma_zalloc_coherent(&adapter->pdev->dev,
-					     attribs_cmd.size,
-					     &attribs_cmd.dma, GFP_ATOMIC);
+	attribs_cmd.va = dma_alloc_coherent(&adapter->pdev->dev,
+					    attribs_cmd.size,
+					    &attribs_cmd.dma, GFP_ATOMIC);
 	if (!attribs_cmd.va) {
 		dev_err(&adapter->pdev->dev, "Memory allocation failure\n");
 		status = -ENOMEM;
@@ -3699,10 +3700,10 @@ int be_cmd_get_mac_from_list(struct be_adapter *adapter, u8 *mac,
 
 	memset(&get_mac_list_cmd, 0, sizeof(struct be_dma_mem));
 	get_mac_list_cmd.size = sizeof(struct be_cmd_resp_get_mac_list);
-	get_mac_list_cmd.va = dma_zalloc_coherent(&adapter->pdev->dev,
-						  get_mac_list_cmd.size,
-						  &get_mac_list_cmd.dma,
-						  GFP_ATOMIC);
+	get_mac_list_cmd.va = dma_alloc_coherent(&adapter->pdev->dev,
+						 get_mac_list_cmd.size,
+						 &get_mac_list_cmd.dma,
+						 GFP_ATOMIC);
 
 	if (!get_mac_list_cmd.va) {
 		dev_err(&adapter->pdev->dev,
@@ -3800,6 +3801,7 @@ int be_cmd_get_perm_mac(struct be_adapter *adapter, u8 *mac)
 {
 	int status;
 	bool pmac_valid = false;
+	u32 pmac_id;
 
 	eth_zero_addr(mac);
 
@@ -3812,7 +3814,7 @@ int be_cmd_get_perm_mac(struct be_adapter *adapter, u8 *mac)
 						       adapter->if_handle, 0);
 	} else {
 		status = be_cmd_get_mac_from_list(adapter, mac, &pmac_valid,
-						  NULL, adapter->if_handle, 0);
+						  &pmac_id, adapter->if_handle, 0);
 	}
 
 	return status;
@@ -3829,8 +3831,8 @@ int be_cmd_set_mac_list(struct be_adapter *adapter, u8 *mac_array,
 
 	memset(&cmd, 0, sizeof(struct be_dma_mem));
 	cmd.size = sizeof(struct be_cmd_req_set_mac_list);
-	cmd.va = dma_zalloc_coherent(&adapter->pdev->dev, cmd.size, &cmd.dma,
-				     GFP_KERNEL);
+	cmd.va = dma_alloc_coherent(&adapter->pdev->dev, cmd.size, &cmd.dma,
+				    GFP_KERNEL);
 	if (!cmd.va)
 		return -ENOMEM;
 
@@ -3850,7 +3852,7 @@ int be_cmd_set_mac_list(struct be_adapter *adapter, u8 *mac_array,
 	req->hdr.domain = domain;
 	req->mac_count = mac_count;
 	if (mac_count)
-		memcpy(req->mac, mac_array, ETH_ALEN*mac_count);
+		memcpy(req->mac, mac_array, ETH_ALEN * mac_count);
 
 	status = be_mcc_notify_wait(adapter);
 
@@ -4035,8 +4037,8 @@ int be_cmd_get_acpi_wol_cap(struct be_adapter *adapter)
 
 	memset(&cmd, 0, sizeof(struct be_dma_mem));
 	cmd.size = sizeof(struct be_cmd_resp_acpi_wol_magic_config_v1);
-	cmd.va = dma_zalloc_coherent(&adapter->pdev->dev, cmd.size, &cmd.dma,
-				     GFP_ATOMIC);
+	cmd.va = dma_alloc_coherent(&adapter->pdev->dev, cmd.size, &cmd.dma,
+				    GFP_ATOMIC);
 	if (!cmd.va) {
 		dev_err(&adapter->pdev->dev, "Memory allocation failure\n");
 		status = -ENOMEM;
@@ -4089,9 +4091,9 @@ int be_cmd_set_fw_log_level(struct be_adapter *adapter, u32 level)
 
 	memset(&extfat_cmd, 0, sizeof(struct be_dma_mem));
 	extfat_cmd.size = sizeof(struct be_cmd_resp_get_ext_fat_caps);
-	extfat_cmd.va = dma_zalloc_coherent(&adapter->pdev->dev,
-					    extfat_cmd.size, &extfat_cmd.dma,
-					    GFP_ATOMIC);
+	extfat_cmd.va = dma_alloc_coherent(&adapter->pdev->dev,
+					   extfat_cmd.size, &extfat_cmd.dma,
+					   GFP_ATOMIC);
 	if (!extfat_cmd.va)
 		return -ENOMEM;
 
@@ -4127,9 +4129,9 @@ int be_cmd_get_fw_log_level(struct be_adapter *adapter)
 
 	memset(&extfat_cmd, 0, sizeof(struct be_dma_mem));
 	extfat_cmd.size = sizeof(struct be_cmd_resp_get_ext_fat_caps);
-	extfat_cmd.va = dma_zalloc_coherent(&adapter->pdev->dev,
-					    extfat_cmd.size, &extfat_cmd.dma,
-					    GFP_ATOMIC);
+	extfat_cmd.va = dma_alloc_coherent(&adapter->pdev->dev,
+					   extfat_cmd.size, &extfat_cmd.dma,
+					   GFP_ATOMIC);
 
 	if (!extfat_cmd.va) {
 		dev_err(&adapter->pdev->dev, "%s: Memory allocation failure\n",
@@ -4354,8 +4356,8 @@ int be_cmd_get_func_config(struct be_adapter *adapter, struct be_resources *res)
 
 	memset(&cmd, 0, sizeof(struct be_dma_mem));
 	cmd.size = sizeof(struct be_cmd_resp_get_func_config);
-	cmd.va = dma_zalloc_coherent(&adapter->pdev->dev, cmd.size, &cmd.dma,
-				     GFP_ATOMIC);
+	cmd.va = dma_alloc_coherent(&adapter->pdev->dev, cmd.size, &cmd.dma,
+				    GFP_ATOMIC);
 	if (!cmd.va) {
 		dev_err(&adapter->pdev->dev, "Memory alloc failure\n");
 		status = -ENOMEM;
@@ -4452,8 +4454,8 @@ int be_cmd_get_profile_config(struct be_adapter *adapter,
 
 	memset(&cmd, 0, sizeof(struct be_dma_mem));
 	cmd.size = sizeof(struct be_cmd_resp_get_profile_config);
-	cmd.va = dma_zalloc_coherent(&adapter->pdev->dev, cmd.size, &cmd.dma,
-				     GFP_ATOMIC);
+	cmd.va = dma_alloc_coherent(&adapter->pdev->dev, cmd.size, &cmd.dma,
+				    GFP_ATOMIC);
 	if (!cmd.va)
 		return -ENOMEM;
 
@@ -4539,8 +4541,8 @@ static int be_cmd_set_profile_config(struct be_adapter *adapter, void *desc,
 
 	memset(&cmd, 0, sizeof(struct be_dma_mem));
 	cmd.size = sizeof(struct be_cmd_req_set_profile_config);
-	cmd.va = dma_zalloc_coherent(&adapter->pdev->dev, cmd.size, &cmd.dma,
-				     GFP_ATOMIC);
+	cmd.va = dma_alloc_coherent(&adapter->pdev->dev, cmd.size, &cmd.dma,
+				    GFP_ATOMIC);
 	if (!cmd.va)
 		return -ENOMEM;
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * RapidIO mport character device
  *
@@ -8,11 +9,6 @@
  *    Jerry Jacobs <jerry.jacobs@prodrive-technologies.com>
  * Copyright (C) 2014 Texas Instruments Incorporated
  *    Aurelien Jacquiot <a-jacquiot@ti.com>
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -102,18 +98,6 @@ MODULE_PARM_DESC(dbg_level, "Debugging output level (default 0 = none)");
 #endif
 
 /*
- * An internal DMA coherent buffer
- */
-struct mport_dma_buf {
-	void		*ib_base;
-	dma_addr_t	ib_phys;
-	u32		ib_size;
-	u64		ib_rio_base;
-	bool		ib_map;
-	struct file	*filp;
-};
-
-/*
  * Internal memory mapping structure
  */
 enum rio_mport_map_dir {
@@ -135,14 +119,6 @@ struct rio_mport_mapping {
 	struct file *filp;
 };
 
-struct rio_mport_dma_map {
-	int valid;
-	u64 length;
-	void *vaddr;
-	dma_addr_t paddr;
-};
-
-#define MPORT_MAX_DMA_BUFS	16
 #define MPORT_EVENT_DEPTH	10
 
 /*
@@ -254,7 +230,9 @@ static DEFINE_MUTEX(mport_devs_lock);
 static DECLARE_WAIT_QUEUE_HEAD(mport_cdev_wait);
 #endif
 
-static struct class *dev_class;
+static const struct class dev_class = {
+	.name = DRV_NAME,
+};
 static dev_t dev_number;
 
 static void mport_release_mapping(struct kref *ref);
@@ -576,14 +554,12 @@ static void dma_req_free(struct kref *ref)
 	struct mport_dma_req *req = container_of(ref, struct mport_dma_req,
 			refcount);
 	struct mport_cdev_priv *priv = req->priv;
-	unsigned int i;
 
 	dma_unmap_sg(req->dmach->device->dev,
 		     req->sgt.sgl, req->sgt.nents, req->dir);
 	sg_free_table(&req->sgt);
 	if (req->page_list) {
-		for (i = 0; i < req->nr_pages; i++)
-			put_page(req->page_list[i]);
+		unpin_user_pages(req->page_list, req->nr_pages);
 		kfree(req->page_list);
 	}
 
@@ -819,7 +795,7 @@ rio_dma_transfer(struct file *filp, u32 transfer_mode,
 	struct mport_dma_req *req;
 	struct mport_dev *md = priv->md;
 	struct dma_chan *chan;
-	int i, ret;
+	int ret;
 	int nents;
 
 	if (xfer->length == 0)
@@ -866,13 +842,15 @@ rio_dma_transfer(struct file *filp, u32 transfer_mode,
 			goto err_req;
 		}
 
-		pinned = get_user_pages_fast(
+		pinned = pin_user_pages_fast(
 				(unsigned long)xfer->loc_addr & PAGE_MASK,
-				nr_pages, dir == DMA_FROM_DEVICE, page_list);
+				nr_pages,
+				dir == DMA_FROM_DEVICE ? FOLL_WRITE : 0,
+				page_list);
 
 		if (pinned != nr_pages) {
 			if (pinned < 0) {
-				rmcd_error("get_user_pages_unlocked err=%ld",
+				rmcd_error("pin_user_pages_fast err=%ld",
 					   pinned);
 				nr_pages = 0;
 			} else {
@@ -919,7 +897,7 @@ rio_dma_transfer(struct file *filp, u32 transfer_mode,
 			goto err_req;
 		}
 
-		if (xfer->length + xfer->offset > map->size) {
+		if (xfer->length + xfer->offset > req->map->size) {
 			ret = -EINVAL;
 			goto err_req;
 		}
@@ -931,7 +909,7 @@ rio_dma_transfer(struct file *filp, u32 transfer_mode,
 		}
 
 		sg_set_buf(req->sgt.sgl,
-			   map->virt_addr + (baddr - map->phys_addr) +
+			   req->map->virt_addr + (baddr - req->map->phys_addr) +
 				xfer->offset, xfer->length);
 	}
 
@@ -954,8 +932,7 @@ rio_dma_transfer(struct file *filp, u32 transfer_mode,
 
 err_pg:
 	if (!req->page_list) {
-		for (i = 0; i < nr_pages; i++)
-			put_page(page_list[i]);
+		unpin_user_pages(page_list, nr_pages);
 		kfree(page_list);
 	}
 err_req:
@@ -970,6 +947,7 @@ static int rio_mport_transfer_ioctl(struct file *filp, void __user *arg)
 	struct rio_transfer_io *transfer;
 	enum dma_data_direction dir;
 	int i, ret = 0;
+	size_t size;
 
 	if (unlikely(copy_from_user(&transaction, arg, sizeof(transaction))))
 		return -EFAULT;
@@ -981,13 +959,14 @@ static int rio_mport_transfer_ioctl(struct file *filp, void __user *arg)
 	     priv->md->properties.transfer_mode) == 0)
 		return -ENODEV;
 
-	transfer = vmalloc(array_size(sizeof(*transfer), transaction.count));
+	size = array_size(sizeof(*transfer), transaction.count);
+	transfer = vmalloc(size);
 	if (!transfer)
 		return -ENOMEM;
 
 	if (unlikely(copy_from_user(transfer,
 				    (void __user *)(uintptr_t)transaction.block,
-				    transaction.count * sizeof(*transfer)))) {
+				    size))) {
 		ret = -EFAULT;
 		goto out_free;
 	}
@@ -999,8 +978,7 @@ static int rio_mport_transfer_ioctl(struct file *filp, void __user *arg)
 			transaction.sync, dir, &transfer[i]);
 
 	if (unlikely(copy_to_user((void __user *)(uintptr_t)transaction.block,
-				  transfer,
-				  transaction.count * sizeof(*transfer))))
+				  transfer, size)))
 		ret = -EFAULT;
 
 out_free:
@@ -1719,8 +1697,7 @@ static int rio_mport_add_riodev(struct mport_cdev_priv *priv,
 	if (rval & RIO_PEF_SWITCH) {
 		rio_mport_read_config_32(mport, destid, hopcount,
 					 RIO_SWP_INFO_CAR, &swpinfo);
-		size += (RIO_GET_TOTAL_PORTS(swpinfo) *
-			 sizeof(rswitch->nextdev[0])) + sizeof(*rswitch);
+		size += struct_size(rswitch, nextdev, RIO_GET_TOTAL_PORTS(swpinfo));
 	}
 
 	rdev = kzalloc(size, GFP_KERNEL);
@@ -2164,6 +2141,7 @@ static void mport_release_mapping(struct kref *ref)
 	switch (map->dir) {
 	case MAP_INBOUND:
 		rio_unmap_inb_region(mport, map->phys_addr);
+		fallthrough;
 	case MAP_DMA:
 		dma_free_coherent(mport->dev.parent, map->size,
 				  map->virt_addr, map->phys_addr);
@@ -2384,7 +2362,7 @@ static struct mport_dev *mport_cdev_add(struct rio_mport *mport)
 
 	device_initialize(&md->dev);
 	md->dev.devt = MKDEV(MAJOR(dev_number), mport->id);
-	md->dev.class = dev_class;
+	md->dev.class = &dev_class;
 	md->dev.parent = &mport->dev;
 	md->dev.release = mport_device_release;
 	dev_set_name(&md->dev, DEV_NAME "%d", mport->id);
@@ -2541,10 +2519,8 @@ static void mport_cdev_remove(struct mport_dev *md)
 /*
  * mport_add_mport() - Add rio_mport from LDM device struct
  * @dev:		Linux device model struct
- * @class_intf:	Linux class_interface
  */
-static int mport_add_mport(struct device *dev,
-		struct class_interface *class_intf)
+static int mport_add_mport(struct device *dev)
 {
 	struct rio_mport *mport = NULL;
 	struct mport_dev *chdev = NULL;
@@ -2564,8 +2540,7 @@ static int mport_add_mport(struct device *dev,
  * mport_remove_mport() - Remove rio_mport from global list
  * TODO remove device from global mport_dev list
  */
-static void mport_remove_mport(struct device *dev,
-		struct class_interface *class_intf)
+static void mport_remove_mport(struct device *dev)
 {
 	struct rio_mport *mport = NULL;
 	struct mport_dev *chdev;
@@ -2608,10 +2583,10 @@ static int __init mport_init(void)
 	int ret;
 
 	/* Create device class needed by udev */
-	dev_class = class_create(THIS_MODULE, DRV_NAME);
-	if (IS_ERR(dev_class)) {
+	ret = class_register(&dev_class);
+	if (ret) {
 		rmcd_error("Unable to create " DRV_NAME " class");
-		return PTR_ERR(dev_class);
+		return ret;
 	}
 
 	ret = alloc_chrdev_region(&dev_number, 0, RIO_MAX_MPORTS, DRV_NAME);
@@ -2632,7 +2607,7 @@ static int __init mport_init(void)
 err_cli:
 	unregister_chrdev_region(dev_number, RIO_MAX_MPORTS);
 err_chr:
-	class_destroy(dev_class);
+	class_unregister(&dev_class);
 	return ret;
 }
 
@@ -2642,7 +2617,7 @@ err_chr:
 static void __exit mport_exit(void)
 {
 	class_interface_unregister(&rio_mport_interface);
-	class_destroy(dev_class);
+	class_unregister(&dev_class);
 	unregister_chrdev_region(dev_number, RIO_MAX_MPORTS);
 }
 

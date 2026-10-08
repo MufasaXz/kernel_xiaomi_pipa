@@ -1,15 +1,5 @@
-/*
- * Copyright (C) 2014 Broadcom Corporation
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation version 2.
- *
- * This program is distributed "as is" WITHOUT ANY WARRANTY of any
- * kind, whether express or implied; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- */
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2014 Broadcom Corporation
 
 #include <linux/kernel.h>
 #include <linux/err.h>
@@ -704,7 +694,7 @@ static const struct clk_ops iproc_clk_ops = {
 	.set_rate = iproc_clk_set_rate,
 };
 
-/**
+/*
  * Some PLLs require the PLL SW override bit to be set before changes can be
  * applied to the PLL
  */
@@ -732,7 +722,7 @@ void iproc_pll_clk_setup(struct device_node *node,
 	int i, ret;
 	struct iproc_pll *pll;
 	struct iproc_clk *iclk;
-	struct clk_init_data init = {};
+	struct clk_init_data init;
 	const char *parent_name;
 	struct iproc_clk *iclk_array;
 	struct clk_hw_onecell_data *clk_data;

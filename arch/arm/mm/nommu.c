@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/arch/arm/mm/nommu.c
  *
@@ -20,6 +21,7 @@
 #include <asm/cputype.h>
 #include <asm/mpu.h>
 #include <asm/procinfo.h>
+#include <asm/idmap.h>
 
 #include "mm.h"
 
@@ -160,10 +162,7 @@ void __init paging_init(const struct machine_desc *mdesc)
 	mpu_setup();
 
 	/* allocate the zero page. */
-	zero_page = (void *)memblock_alloc(PAGE_SIZE, PAGE_SIZE);
-	if (!zero_page)
-		panic("%s: Failed to allocate %lu bytes align=0x%lx\n",
-		      __func__, PAGE_SIZE, PAGE_SIZE);
+	zero_page = (void *)memblock_alloc_or_panic(PAGE_SIZE, PAGE_SIZE);
 
 	bootmem_init();
 
@@ -178,17 +177,17 @@ void setup_mm_for_reboot(void)
 {
 }
 
+void flush_dcache_folio(struct folio *folio)
+{
+	__cpuc_flush_dcache_area(folio_address(folio), folio_size(folio));
+}
+EXPORT_SYMBOL(flush_dcache_folio);
+
 void flush_dcache_page(struct page *page)
 {
 	__cpuc_flush_dcache_area(page_address(page), PAGE_SIZE);
 }
 EXPORT_SYMBOL(flush_dcache_page);
-
-void flush_kernel_dcache_page(struct page *page)
-{
-	__cpuc_flush_dcache_area(page_address(page), PAGE_SIZE);
-}
-EXPORT_SYMBOL(flush_kernel_dcache_page);
 
 void copy_to_user_page(struct vm_area_struct *vma, struct page *page,
 		       unsigned long uaddr, void *dst, const void *src,
@@ -224,15 +223,11 @@ void __iomem *ioremap(resource_size_t res_cookie, size_t size)
 EXPORT_SYMBOL(ioremap);
 
 void __iomem *ioremap_cache(resource_size_t res_cookie, size_t size)
-	__alias(ioremap_cached);
-
-void __iomem *ioremap_cached(resource_size_t res_cookie, size_t size)
 {
 	return __arm_ioremap_caller(res_cookie, size, MT_DEVICE_CACHED,
 				    __builtin_return_address(0));
 }
 EXPORT_SYMBOL(ioremap_cache);
-EXPORT_SYMBOL(ioremap_cached);
 
 void __iomem *ioremap_wc(resource_size_t res_cookie, size_t size)
 {
@@ -253,19 +248,12 @@ void __iomem *pci_remap_cfgspace(resource_size_t res_cookie, size_t size)
 EXPORT_SYMBOL_GPL(pci_remap_cfgspace);
 #endif
 
-void *arch_memremap_wb(phys_addr_t phys_addr, size_t size)
+void *arch_memremap_wb(phys_addr_t phys_addr, size_t size, unsigned long flags)
 {
 	return (void *)phys_addr;
 }
 
-void __iounmap(volatile void __iomem *addr)
-{
-}
-EXPORT_SYMBOL(__iounmap);
-
-void (*arch_iounmap)(volatile void __iomem *);
-
-void iounmap(volatile void __iomem *addr)
+void iounmap(volatile void __iomem *io_addr)
 {
 }
 EXPORT_SYMBOL(iounmap);

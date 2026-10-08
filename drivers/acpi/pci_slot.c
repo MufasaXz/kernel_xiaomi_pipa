@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  pci_slot.c - ACPI PCI Slot Driver
  *
@@ -11,15 +12,6 @@
  *
  *  Copyright (C) 2013 Huawei Tech. Co., Ltd.
  *	Jiang Liu <jiang.liu@huawei.com>
- *
- *  This program is free software; you can redistribute it and/or modify it
- *  under the terms and conditions of the GNU General Public License,
- *  version 2, as published by the Free Software Foundation.
- *
- *  This program is distributed in the hope that it will be useful, but
- *  WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  General Public License for more details.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -35,9 +27,6 @@
 #include <linux/pci-acpi.h>
 
 static int check_sta_before_sun;
-
-#define _COMPONENT		ACPI_PCI_COMPONENT
-ACPI_MODULE_NAME("pci_slot");
 
 #define SLOT_NAME_SIZE 21		/* Inspired by #define in acpiphp.h */
 
@@ -122,7 +111,7 @@ register_slot(acpi_handle handle, u32 lvl, void *context, void **rv)
 	snprintf(name, sizeof(name), "%llu", sun);
 	pci_slot = pci_create_slot(pci_bus, device, name, NULL);
 	if (IS_ERR(pci_slot)) {
-		pr_err("pci_create_slot returned %ld\n", PTR_ERR(pci_slot));
+		pr_err("pci_create_slot returned %pe\n", pci_slot);
 		kfree(slot);
 		return AE_OK;
 	}

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2005, 2006 IBM Corporation
  * Copyright (C) 2014, 2015 Intel Corporation
@@ -13,11 +14,6 @@
  *
  * This device driver implements the TPM interface as defined in
  * the TCG TPM Interface Spec version 1.2, revision 1.0.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
  */
 #include <linux/init.h>
 #include <linux/module.h>
@@ -29,9 +25,7 @@
 #include <linux/acpi.h>
 #include <linux/freezer.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/kernel.h>
-#include <linux/dmi.h>
 #include "tpm.h"
 #include "tpm_tis_core.h"
 
@@ -54,8 +48,47 @@ static inline struct tpm_tis_tcg_phy *to_tpm_tis_tcg_phy(struct tpm_tis_data *da
 	return container_of(data, struct tpm_tis_tcg_phy, priv);
 }
 
-static int interrupts = -1;
-module_param(interrupts, int, 0444);
+#ifdef CONFIG_PREEMPT_RT
+/*
+ * Flush previous write operations with a dummy read operation to the
+ * TPM MMIO base address.
+ */
+static inline void tpm_tis_flush(void __iomem *iobase)
+{
+	ioread8(iobase + TPM_ACCESS(0));
+}
+#else
+#define tpm_tis_flush(iobase) do { } while (0)
+#endif
+
+/*
+ * Write a byte word to the TPM MMIO address, and flush the write queue.
+ * The flush ensures that the data is sent immediately over the bus and not
+ * aggregated with further requests and transferred later in a batch. The large
+ * write requests can lead to unwanted latency spikes by blocking the CPU until
+ * the complete batch has been transferred.
+ */
+static inline void tpm_tis_iowrite8(u8 b, void __iomem *iobase, u32 addr)
+{
+	iowrite8(b, iobase + addr);
+	tpm_tis_flush(iobase);
+}
+
+/*
+ * Write a 32-bit word to the TPM MMIO address, and flush the write queue.
+ * The flush ensures that the data is sent immediately over the bus and not
+ * aggregated with further requests and transferred later in a batch. The large
+ * write requests can lead to unwanted latency spikes by blocking the CPU until
+ * the complete batch has been transferred.
+ */
+static inline void tpm_tis_iowrite32(u32 b, void __iomem *iobase, u32 addr)
+{
+	iowrite32(b, iobase + addr);
+	tpm_tis_flush(iobase);
+}
+
+static bool interrupts;
+module_param(interrupts, bool, 0444);
 MODULE_PARM_DESC(interrupts, "Enable interrupts");
 
 static bool itpm;
@@ -67,44 +100,6 @@ static bool force;
 module_param(force, bool, 0444);
 MODULE_PARM_DESC(force, "Force device probe rather than using ACPI entry");
 #endif
-
-static int tpm_tis_disable_irq(const struct dmi_system_id *d)
-{
-	if (interrupts == -1) {
-		pr_notice("tpm_tis: %s detected: disabling interrupts.\n", d->ident);
-		interrupts = 0;
-	}
-
-	return 0;
-}
-
-static const struct dmi_system_id tpm_tis_dmi_table[] = {
-	{
-		.callback = tpm_tis_disable_irq,
-		.ident = "ThinkPad T490s",
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
-			DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad T490s"),
-		},
-	},
-	{
-		.callback = tpm_tis_disable_irq,
-		.ident = "ThinkStation P360 Tiny",
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
-			DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkStation P360 Tiny"),
-		},
-	},
-	{
-		.callback = tpm_tis_disable_irq,
-		.ident = "ThinkPad L490",
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
-			DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad L490"),
-		},
-	},
-	{}
-};
 
 #if defined(CONFIG_PNP) && defined(CONFIG_ACPI)
 static int has_hid(struct acpi_device *dev, const char *hid)
@@ -174,50 +169,46 @@ static int check_acpi_tpm2(struct device *dev)
 #endif
 
 static int tpm_tcg_read_bytes(struct tpm_tis_data *data, u32 addr, u16 len,
-			      u8 *result)
+			      u8 *result, enum tpm_tis_io_mode io_mode)
 {
 	struct tpm_tis_tcg_phy *phy = to_tpm_tis_tcg_phy(data);
+	__le16 result_le16;
+	__le32 result_le32;
 
-	while (len--)
-		*result++ = ioread8(phy->iobase + addr);
+	switch (io_mode) {
+	case TPM_TIS_PHYS_8:
+		while (len--)
+			*result++ = ioread8(phy->iobase + addr);
+		break;
+	case TPM_TIS_PHYS_16:
+		result_le16 = cpu_to_le16(ioread16(phy->iobase + addr));
+		memcpy(result, &result_le16, sizeof(u16));
+		break;
+	case TPM_TIS_PHYS_32:
+		result_le32 = cpu_to_le32(ioread32(phy->iobase + addr));
+		memcpy(result, &result_le32, sizeof(u32));
+		break;
+	}
 
 	return 0;
 }
 
 static int tpm_tcg_write_bytes(struct tpm_tis_data *data, u32 addr, u16 len,
-			       const u8 *value)
+			       const u8 *value, enum tpm_tis_io_mode io_mode)
 {
 	struct tpm_tis_tcg_phy *phy = to_tpm_tis_tcg_phy(data);
 
-	while (len--)
-		iowrite8(*value++, phy->iobase + addr);
-
-	return 0;
-}
-
-static int tpm_tcg_read16(struct tpm_tis_data *data, u32 addr, u16 *result)
-{
-	struct tpm_tis_tcg_phy *phy = to_tpm_tis_tcg_phy(data);
-
-	*result = ioread16(phy->iobase + addr);
-
-	return 0;
-}
-
-static int tpm_tcg_read32(struct tpm_tis_data *data, u32 addr, u32 *result)
-{
-	struct tpm_tis_tcg_phy *phy = to_tpm_tis_tcg_phy(data);
-
-	*result = ioread32(phy->iobase + addr);
-
-	return 0;
-}
-
-static int tpm_tcg_write32(struct tpm_tis_data *data, u32 addr, u32 value)
-{
-	struct tpm_tis_tcg_phy *phy = to_tpm_tis_tcg_phy(data);
-
-	iowrite32(value, phy->iobase + addr);
+	switch (io_mode) {
+	case TPM_TIS_PHYS_8:
+		while (len--)
+			tpm_tis_iowrite8(*value++, phy->iobase, addr);
+		break;
+	case TPM_TIS_PHYS_16:
+		return -EINVAL;
+	case TPM_TIS_PHYS_32:
+		tpm_tis_iowrite32(le32_to_cpu(*((__le32 *)value)), phy->iobase, addr);
+		break;
+	}
 
 	return 0;
 }
@@ -225,9 +216,6 @@ static int tpm_tcg_write32(struct tpm_tis_data *data, u32 addr, u32 value)
 static const struct tpm_tis_phy_ops tpm_tcg = {
 	.read_bytes = tpm_tcg_read_bytes,
 	.write_bytes = tpm_tcg_write_bytes,
-	.read16 = tpm_tcg_read16,
-	.read32 = tpm_tcg_read32,
-	.write32 = tpm_tcg_write32,
 };
 
 static int tpm_tis_init(struct device *dev, struct tpm_info *tpm_info)
@@ -235,8 +223,6 @@ static int tpm_tis_init(struct device *dev, struct tpm_info *tpm_info)
 	struct tpm_tis_tcg_phy *phy;
 	int irq = -1;
 	int rc;
-
-	dmi_check_system(tpm_tis_dmi_table);
 
 	rc = check_acpi_tpm2(dev);
 	if (rc)
@@ -254,7 +240,7 @@ static int tpm_tis_init(struct device *dev, struct tpm_info *tpm_info)
 		irq = tpm_info->irq;
 
 	if (itpm || is_itpm(ACPI_COMPANION(dev)))
-		phy->priv.flags |= TPM_TIS_ITPM_WORKAROUND;
+		set_bit(TPM_TIS_ITPM_WORKAROUND, &phy->priv.flags);
 
 	return tpm_tis_core_init(dev, &phy->priv, irq, &tpm_tcg,
 				 ACPI_HANDLE(dev));
@@ -280,6 +266,13 @@ static int tpm_tis_pnp_init(struct pnp_dev *pnp_dev,
 
 	return tpm_tis_init(&pnp_dev->dev, &tpm_info);
 }
+
+/*
+ * There is a known bug caused by 93e1b7d42e1e ("[PATCH] tpm: add HID module
+ * parameter"). This commit added IFX0102 device ID, which is also used by
+ * tpm_infineon but ignored to add quirks to probe which driver ought to be
+ * used.
+ */
 
 static struct pnp_device_id tpm_pnp_tbl[] = {
 	{"PNP0C31", 0},		/* TPM */
@@ -332,7 +325,7 @@ static int tpm_tis_plat_probe(struct platform_device *pdev)
 	}
 	tpm_info.res = *res;
 
-	tpm_info.irq = platform_get_irq(pdev, 0);
+	tpm_info.irq = platform_get_irq_optional(pdev, 0);
 	if (tpm_info.irq <= 0) {
 		if (pdev != force_pdev)
 			tpm_info.irq = -1;
@@ -344,18 +337,17 @@ static int tpm_tis_plat_probe(struct platform_device *pdev)
 	return tpm_tis_init(&pdev->dev, &tpm_info);
 }
 
-static int tpm_tis_plat_remove(struct platform_device *pdev)
+static void tpm_tis_plat_remove(struct platform_device *pdev)
 {
 	struct tpm_chip *chip = dev_get_drvdata(&pdev->dev);
 
 	tpm_chip_unregister(chip);
 	tpm_tis_remove(chip);
-
-	return 0;
 }
 
 #ifdef CONFIG_OF
 static const struct of_device_id tis_of_platform_match[] = {
+	{.compatible = "atmel,at97sc3204"},
 	{.compatible = "tcg,tpm-tis-mmio"},
 	{},
 };
@@ -377,11 +369,7 @@ static int tpm_tis_force_device(void)
 {
 	struct platform_device *pdev;
 	static const struct resource x86_resources[] = {
-		{
-			.start = 0xFED40000,
-			.end = 0xFED40000 + TIS_MEM_LEN - 1,
-			.flags = IORESOURCE_MEM,
-		},
+		DEFINE_RES_MEM(0xFED40000, TIS_MEM_LEN)
 	};
 
 	if (!force)
@@ -441,7 +429,7 @@ static void __exit cleanup_tis(void)
 
 module_init(init_tis);
 module_exit(cleanup_tis);
-MODULE_AUTHOR("Leendert van Doorn (leendert@watson.ibm.com)");
+MODULE_AUTHOR("Leendert van Doorn <leendert@watson.ibm.com>");
 MODULE_DESCRIPTION("TPM Driver");
 MODULE_VERSION("2.0");
 MODULE_LICENSE("GPL");

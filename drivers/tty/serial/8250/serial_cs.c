@@ -90,12 +90,6 @@ struct serial_info {
 	const struct serial_quirk *quirk;
 };
 
-struct serial_cfg_mem {
-	tuple_t tuple;
-	cisparse_t parse;
-	u_char buf[256];
-};
-
 /*
  * vers_1 5.0, "Brain Boxes", "2-Port RS232 card", "r6"
  * manfid 0x0160, 0x0104
@@ -449,7 +443,7 @@ static int simple_config_check_notpicky(struct pcmcia_device *p_dev,
 static int simple_config(struct pcmcia_device *link)
 {
 	struct serial_info *info = link->priv;
-	int i = -ENODEV, try;
+	int ret, try;
 
 	/*
 	 * First pass: look for a config entry that looks normal.
@@ -465,11 +459,11 @@ static int simple_config(struct pcmcia_device *link)
 	 * its base address, then try to grab any standard serial port
 	 * address, and finally try to get any free port.
 	 */
-	if (!pcmcia_loop_config(link, simple_config_check_notpicky, NULL))
-		goto found_port;
-
-	dev_warn(&link->dev, "no usable port range found, giving up\n");
-	return -1;
+	ret = pcmcia_loop_config(link, simple_config_check_notpicky, NULL);
+	if (ret) {
+		dev_warn(&link->dev, "no usable port range found, giving up\n");
+		return ret;
+	}
 
 found_port:
 	if (info->multi && (info->manfid == MANFID_3COM))
@@ -481,9 +475,9 @@ found_port:
 	if (info->quirk && info->quirk->config)
 		info->quirk->config(link);
 
-	i = pcmcia_enable_device(link);
-	if (i != 0)
-		return -1;
+	ret = pcmcia_enable_device(link);
+	if (ret != 0)
+		return ret;
 	return setup_serial(link, info, link->resource[0]->start, link->irq);
 }
 
@@ -568,16 +562,13 @@ static int multi_config(struct pcmcia_device *link)
 	 */
 	if (info->manfid == MANFID_OXSEMI || (info->manfid == MANFID_POSSIO &&
 				info->prodid == PRODID_POSSIO_GCC)) {
-		int err;
-
 		if (link->config_index == 1 ||
 		    link->config_index == 3) {
-			err = setup_serial(link, info, base2,
-					link->irq);
+			setup_serial(link, info, base2, link->irq);
 			base2 = link->resource[0]->start;
 		} else {
-			err = setup_serial(link, info, link->resource[0]->start,
-					link->irq);
+			setup_serial(link, info, link->resource[0]->start,
+				     link->irq);
 		}
 		info->c950ctrl = base2;
 
@@ -873,4 +864,5 @@ static struct pcmcia_driver serial_cs_driver = {
 };
 module_pcmcia_driver(serial_cs_driver);
 
+MODULE_DESCRIPTION("driver for PCMCIA serial devices");
 MODULE_LICENSE("GPL");

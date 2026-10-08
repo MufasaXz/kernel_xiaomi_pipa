@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * DRA752 bandgap registers, bitfields and temperature definitions
  *
@@ -7,21 +8,6 @@
  *   Tero Kristo <t-kristo@ti.com>
  *
  * This is an auto generated file.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
- *
  */
 #ifndef __DRA752_BANDGAP_H
 #define __DRA752_BANDGAP_H
@@ -88,7 +74,7 @@
 /**
  * Register bitfields for DRA752
  *
- * All the macros bellow define the required bits for
+ * All the macros below define the required bits for
  * controlling temperature on DRA752. Bit defines are
  * grouped by register.
  */
@@ -139,7 +125,7 @@
 /**
  * Temperature limits and thresholds for DRA752
  *
- * All the macros bellow are definitions for handling the
+ * All the macros below are definitions for handling the
  * ADC conversions and representation of temperature limits
  * and thresholds for DRA752. Definitions are grouped
  * by temperature domain.

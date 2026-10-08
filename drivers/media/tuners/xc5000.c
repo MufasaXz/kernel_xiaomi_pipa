@@ -1,20 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Driver for Xceive XC5000 "QAM/8VSB single chip tuner"
  *
  *  Copyright (c) 2007 Xceive Corporation
  *  Copyright (c) 2007 Steven Toth <stoth@linuxtv.org>
  *  Copyright (c) 2009 Devin Heitmueller <dheitmueller@kernellabs.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *
- *  GNU General Public License for more details.
  */
 
 #include <linux/module.h>
@@ -632,14 +622,14 @@ static int xc5000_fwupload(struct dvb_frontend *fe,
 
 static void xc_debug_dump(struct xc5000_priv *priv)
 {
-	u16 adc_envelope;
+	u16 adc_envelope = 0;
 	u32 freq_error_hz = 0;
-	u16 lock_status;
+	u16 lock_status = 0;
 	u32 hsync_freq_hz = 0;
-	u16 frame_lines;
-	u16 quality;
-	u16 snr;
-	u16 totalgain;
+	u16 frame_lines = 0;
+	u16 quality = 0;
+	u16 snr = 0;
+	u16 totalgain = 0;
 	u8 hw_majorversion = 0, hw_minorversion = 0;
 	u8 fw_majorversion = 0, fw_minorversion = 0;
 	u16 fw_buildversion = 0;
@@ -766,7 +756,7 @@ static int xc5000_set_digital_params(struct dvb_frontend *fe)
 		if (!bw)
 			bw = 6000000;
 		/* fall to OFDM handling */
-		/* fall through */
+		fallthrough;
 	case SYS_DMBTH:
 	case SYS_DVBT:
 	case SYS_DVBT2:
@@ -907,7 +897,7 @@ static void xc5000_config_tv(struct dvb_frontend *fe,
 static int xc5000_set_tv_freq(struct dvb_frontend *fe)
 {
 	struct xc5000_priv *priv = fe->tuner_priv;
-	u16 pll_lock_status = 0;
+	u16 pll_lock_status;
 	int ret;
 
 tune_channel:
@@ -1112,7 +1102,7 @@ static int xc_load_fw_and_init_tuner(struct dvb_frontend *fe, int force)
 	const struct xc5000_fw_cfg *desired_fw = xc5000_assign_firmware(priv->chip_id);
 	const struct firmware *fw;
 	int ret, i;
-	u16 pll_lock_status = 0;
+	u16 pll_lock_status;
 	u16 fw_ck;
 
 	cancel_delayed_work(&priv->timer_sleep);

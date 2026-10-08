@@ -8,12 +8,10 @@
 #include <linux/wait.h>
 #include <linux/string.h>
 #include <linux/fs.h>
-#include <linux/sysctl.h>
 #include <linux/uaccess.h>
 #include <uapi/linux/poll.h>
 #include <uapi/linux/eventpoll.h>
 
-extern struct ctl_table epoll_table[]; /* for sysctl */
 /* ~832 bytes of stack space used max in sys_select/sys_poll before allocating
    additional memory. */
 #define MAX_STACK_ALLOC 832
@@ -27,14 +25,14 @@ extern struct ctl_table epoll_table[]; /* for sysctl */
 
 struct poll_table_struct;
 
-/* 
+/*
  * structures and helpers for f_op->poll implementations
  */
 typedef void (*poll_queue_proc)(struct file *, wait_queue_head_t *, struct poll_table_struct *);
 
 /*
- * Do not touch the structure directly, use the access functions
- * poll_does_not_wait() and poll_requested_events() instead.
+ * Do not touch the structure directly, use the access function
+ * poll_requested_events() instead.
  */
 typedef struct poll_table_struct {
 	poll_queue_proc _qproc;
@@ -43,7 +41,7 @@ typedef struct poll_table_struct {
 
 static inline void poll_wait(struct file * filp, wait_queue_head_t * wait_address, poll_table *p)
 {
-	if (p && p->_qproc && wait_address) {
+	if (p && p->_qproc) {
 		p->_qproc(filp, wait_address, p);
 		/*
 		 * This memory barrier is paired in the wq_has_sleeper().
@@ -53,16 +51,6 @@ static inline void poll_wait(struct file * filp, wait_queue_head_t * wait_addres
 		 */
 		smp_mb();
 	}
-}
-
-/*
- * Return true if it is guaranteed that poll will not wait. This is the case
- * if the poll() of another file descriptor in the set got an event, so there
- * is no need for waiting.
- */
-static inline bool poll_does_not_wait(const poll_table *p)
-{
-	return p == NULL || p->_qproc == NULL;
 }
 
 /*

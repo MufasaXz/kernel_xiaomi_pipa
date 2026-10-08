@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * This file is part of UBIFS.
  *
  * Copyright (C) 2006-2008 Nokia Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc., 51
- * Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  *
  * Authors: Adrian Hunter
  *          Artem Bityutskiy (Битюцкий Артём)
@@ -589,7 +577,7 @@ static struct ubifs_pnode *next_pnode_to_dirty(struct ubifs_info *c,
 	/* Go right */
 	nnode = ubifs_get_nnode(c, nnode, iip);
 	if (IS_ERR(nnode))
-		return (void *)nnode;
+		return ERR_CAST(nnode);
 
 	/* Go down to level 1 */
 	while (nnode->level > 1) {
@@ -606,7 +594,7 @@ static struct ubifs_pnode *next_pnode_to_dirty(struct ubifs_info *c,
 		}
 		nnode = ubifs_get_nnode(c, nnode, iip);
 		if (IS_ERR(nnode))
-			return (void *)nnode;
+			return ERR_CAST(nnode);
 	}
 
 	for (iip = 0; iip < UBIFS_LPT_FANOUT; iip++)
@@ -615,38 +603,6 @@ static struct ubifs_pnode *next_pnode_to_dirty(struct ubifs_info *c,
 	if (iip >= UBIFS_LPT_FANOUT)
 		/* Should not happen, but we need to keep going if it does */
 		iip = 0;
-	return ubifs_get_pnode(c, nnode, iip);
-}
-
-/**
- * pnode_lookup - lookup a pnode in the LPT.
- * @c: UBIFS file-system description object
- * @i: pnode number (0 to (main_lebs - 1) / UBIFS_LPT_FANOUT))
- *
- * This function returns a pointer to the pnode on success or a negative
- * error code on failure.
- */
-static struct ubifs_pnode *pnode_lookup(struct ubifs_info *c, int i)
-{
-	int err, h, iip, shft;
-	struct ubifs_nnode *nnode;
-
-	if (!c->nroot) {
-		err = ubifs_read_nnode(c, NULL, 0);
-		if (err)
-			return ERR_PTR(err);
-	}
-	i <<= UBIFS_LPT_FANOUT_SHIFT;
-	nnode = c->nroot;
-	shft = c->lpt_hght * UBIFS_LPT_FANOUT_SHIFT;
-	for (h = 1; h < c->lpt_hght; h++) {
-		iip = ((i >> shft) & (UBIFS_LPT_FANOUT - 1));
-		shft -= UBIFS_LPT_FANOUT_SHIFT;
-		nnode = ubifs_get_nnode(c, nnode, iip);
-		if (IS_ERR(nnode))
-			return ERR_CAST(nnode);
-	}
-	iip = ((i >> shft) & (UBIFS_LPT_FANOUT - 1));
 	return ubifs_get_pnode(c, nnode, iip);
 }
 
@@ -702,7 +658,7 @@ static int make_tree_dirty(struct ubifs_info *c)
 {
 	struct ubifs_pnode *pnode;
 
-	pnode = pnode_lookup(c, 0);
+	pnode = ubifs_pnode_lookup(c, 0);
 	if (IS_ERR(pnode))
 		return PTR_ERR(pnode);
 
@@ -956,7 +912,7 @@ static int make_pnode_dirty(struct ubifs_info *c, int node_num, int lnum,
 	struct ubifs_pnode *pnode;
 	struct ubifs_nbranch *branch;
 
-	pnode = pnode_lookup(c, node_num);
+	pnode = ubifs_pnode_lookup(c, node_num);
 	if (IS_ERR(pnode))
 		return PTR_ERR(pnode);
 	branch = &pnode->parent->nbranch[pnode->iip];
@@ -1279,6 +1235,10 @@ int ubifs_lpt_start_commit(struct ubifs_info *c)
 	if (err)
 		goto out;
 
+	err = ubifs_lpt_calc_hash(c, c->mst_node->hash_lpt);
+	if (err)
+		goto out;
+
 	/* Copy the LPT's own lprops for end commit to write */
 	memcpy(c->ltab_cmt, c->ltab,
 	       sizeof(struct ubifs_lpt_lprops) * c->lpt_lebs);
@@ -1558,7 +1518,7 @@ static int dbg_is_pnode_dirty(struct ubifs_info *c, int lnum, int offs)
 		struct ubifs_nbranch *branch;
 
 		cond_resched();
-		pnode = pnode_lookup(c, i);
+		pnode = ubifs_pnode_lookup(c, i);
 		if (IS_ERR(pnode))
 			return PTR_ERR(pnode);
 		branch = &pnode->parent->nbranch[pnode->iip];
@@ -1686,7 +1646,6 @@ static int dbg_check_ltab_lnum(struct ubifs_info *c, int lnum)
 		len -= node_len;
 	}
 
-	err = 0;
 out:
 	vfree(buf);
 	return err;
@@ -1710,7 +1669,7 @@ int dbg_check_ltab(struct ubifs_info *c)
 	for (i = 0; i < cnt; i++) {
 		struct ubifs_pnode *pnode;
 
-		pnode = pnode_lookup(c, i);
+		pnode = ubifs_pnode_lookup(c, i);
 		if (IS_ERR(pnode))
 			return PTR_ERR(pnode);
 		cond_resched();
@@ -1973,7 +1932,6 @@ static void dump_lpt_leb(const struct ubifs_info *c, int lnum)
 	pr_err("(pid %d) finish dumping LEB %d\n", current->pid, lnum);
 out:
 	vfree(buf);
-	return;
 }
 
 /**
@@ -2010,28 +1968,28 @@ static int dbg_populate_lsave(struct ubifs_info *c)
 
 	if (!dbg_is_chk_gen(c))
 		return 0;
-	if (prandom_u32() & 3)
+	if (get_random_u32_below(4))
 		return 0;
 
 	for (i = 0; i < c->lsave_cnt; i++)
 		c->lsave[i] = c->main_first;
 
 	list_for_each_entry(lprops, &c->empty_list, list)
-		c->lsave[prandom_u32() % c->lsave_cnt] = lprops->lnum;
+		c->lsave[get_random_u32_below(c->lsave_cnt)] = lprops->lnum;
 	list_for_each_entry(lprops, &c->freeable_list, list)
-		c->lsave[prandom_u32() % c->lsave_cnt] = lprops->lnum;
+		c->lsave[get_random_u32_below(c->lsave_cnt)] = lprops->lnum;
 	list_for_each_entry(lprops, &c->frdi_idx_list, list)
-		c->lsave[prandom_u32() % c->lsave_cnt] = lprops->lnum;
+		c->lsave[get_random_u32_below(c->lsave_cnt)] = lprops->lnum;
 
 	heap = &c->lpt_heap[LPROPS_DIRTY_IDX - 1];
 	for (i = 0; i < heap->cnt; i++)
-		c->lsave[prandom_u32() % c->lsave_cnt] = heap->arr[i]->lnum;
+		c->lsave[get_random_u32_below(c->lsave_cnt)] = heap->arr[i]->lnum;
 	heap = &c->lpt_heap[LPROPS_DIRTY - 1];
 	for (i = 0; i < heap->cnt; i++)
-		c->lsave[prandom_u32() % c->lsave_cnt] = heap->arr[i]->lnum;
+		c->lsave[get_random_u32_below(c->lsave_cnt)] = heap->arr[i]->lnum;
 	heap = &c->lpt_heap[LPROPS_FREE - 1];
 	for (i = 0; i < heap->cnt; i++)
-		c->lsave[prandom_u32() % c->lsave_cnt] = heap->arr[i]->lnum;
+		c->lsave[get_random_u32_below(c->lsave_cnt)] = heap->arr[i]->lnum;
 
 	return 1;
 }

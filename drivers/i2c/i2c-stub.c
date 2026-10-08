@@ -1,21 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
     i2c-stub.c - I2C/SMBus chip emulator
 
     Copyright (c) 2004 Mark M. Hoffman <mhoffman@lightlink.com>
     Copyright (C) 2007-2014 Jean Delvare <jdelvare@suse.de>
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
 */
 
-#define DEBUG 1
 #define pr_fmt(fmt) "i2c-stub: " fmt
 
 #include <linux/errno.h>
@@ -317,7 +308,7 @@ static const struct i2c_algorithm smbus_algorithm = {
 
 static struct i2c_adapter stub_adapter = {
 	.owner		= THIS_MODULE,
-	.class		= I2C_CLASS_HWMON | I2C_CLASS_SPD,
+	.class		= I2C_CLASS_HWMON,
 	.algo		= &smbus_algorithm,
 	.name		= "SMBus stub driver",
 };

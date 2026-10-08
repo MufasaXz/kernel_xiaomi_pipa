@@ -1,16 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
  * Copyright (C) 2009, 2010 ARM Limited
  *
@@ -28,6 +17,7 @@
 #include <linux/perf_event.h>
 #include <linux/hw_breakpoint.h>
 #include <linux/smp.h>
+#include <linux/cfi.h>
 #include <linux/cpu_pm.h>
 #include <linux/coresight.h>
 
@@ -257,6 +247,9 @@ static int enable_monitor_mode(void)
 	case ARM_DEBUG_ARCH_V7_ECP14:
 	case ARM_DEBUG_ARCH_V7_1:
 	case ARM_DEBUG_ARCH_V8:
+	case ARM_DEBUG_ARCH_V8_1:
+	case ARM_DEBUG_ARCH_V8_2:
+	case ARM_DEBUG_ARCH_V8_4:
 		ARM_DBG_WRITE(c0, c2, 2, (dscr | ARM_DSCR_MDBGEN));
 		isb();
 		break;
@@ -555,6 +548,7 @@ static int arch_build_bp_info(struct perf_event *bp,
 		if ((hw->ctrl.type != ARM_BREAKPOINT_EXECUTE)
 			&& max_watchpoint_len >= 8)
 			break;
+		fallthrough;
 	default:
 		return -EINVAL;
 	}
@@ -619,10 +613,12 @@ int hw_breakpoint_arch_parse(struct perf_event *bp,
 		/* Allow halfword watchpoints and breakpoints. */
 		if (hw->ctrl.len == ARM_BREAKPOINT_LEN_2)
 			break;
+		fallthrough;
 	case 3:
 		/* Allow single byte watchpoint. */
 		if (hw->ctrl.len == ARM_BREAKPOINT_LEN_1)
 			break;
+		fallthrough;
 	default:
 		ret = -EINVAL;
 		goto out;
@@ -631,7 +627,7 @@ int hw_breakpoint_arch_parse(struct perf_event *bp,
 	hw->address &= ~alignment_mask;
 	hw->ctrl.len <<= offset;
 
-	if (uses_default_overflow_handler(bp)) {
+	if (is_default_overflow_handler(bp)) {
 		/*
 		 * Mismatch breakpoints are required for single-stepping
 		 * breakpoints.
@@ -803,7 +799,7 @@ static void watchpoint_handler(unsigned long addr, unsigned int fsr,
 		 * Otherwise, insert a temporary mismatch breakpoint so that
 		 * we can single-step over the watchpoint trigger.
 		 */
-		if (!uses_default_overflow_handler(wp))
+		if (!is_default_overflow_handler(wp))
 			continue;
 step:
 		enable_single_step(wp, instruction_pointer(regs));
@@ -816,7 +812,7 @@ step:
 		info->trigger = addr;
 		pr_debug("watchpoint fired: address = 0x%x\n", info->trigger);
 		perf_bp_event(wp, regs);
-		if (uses_default_overflow_handler(wp))
+		if (is_default_overflow_handler(wp))
 			enable_single_step(wp, instruction_pointer(regs));
 	}
 
@@ -891,7 +887,7 @@ static void breakpoint_handler(unsigned long unknown, struct pt_regs *regs)
 			info->trigger = addr;
 			pr_debug("breakpoint fired: address = 0x%x\n", addr);
 			perf_bp_event(bp, regs);
-			if (uses_default_overflow_handler(bp))
+			if (is_default_overflow_handler(bp))
 				enable_single_step(bp, addr);
 			goto unlock;
 		}
@@ -907,6 +903,37 @@ unlock:
 	/* Handle any pending watchpoint single-step breakpoints. */
 	watchpoint_single_step_handler(addr);
 }
+
+#ifdef CONFIG_CFI
+static void hw_breakpoint_cfi_handler(struct pt_regs *regs)
+{
+	/*
+	 * TODO: implementing target and type to pass to CFI using the more
+	 * elaborate report_cfi_failure() requires compiler work. To be able
+	 * to properly extract target information the compiler needs to
+	 * emit a stable instructions sequence for the CFI checks so we can
+	 * decode the instructions preceding the trap and figure out which
+	 * registers were used.
+	 */
+
+	switch (report_cfi_failure_noaddr(regs, instruction_pointer(regs))) {
+	case BUG_TRAP_TYPE_BUG:
+		die("Oops - CFI", regs, 0);
+		break;
+	case BUG_TRAP_TYPE_WARN:
+		/* Skip the breaking instruction */
+		instruction_pointer(regs) += 4;
+		break;
+	default:
+		die("Unknown CFI error", regs, 0);
+		break;
+	}
+}
+#else
+static void hw_breakpoint_cfi_handler(struct pt_regs *regs)
+{
+}
+#endif
 
 /*
  * Called from either the Data Abort Handler [watchpoint] or the
@@ -933,8 +960,12 @@ static int hw_breakpoint_pending(unsigned long addr, unsigned int fsr,
 		break;
 	case ARM_ENTRY_ASYNC_WATCHPOINT:
 		WARN(1, "Asynchronous watchpoint exception taken. Debugging results may be unreliable\n");
+		fallthrough;
 	case ARM_ENTRY_SYNC_WATCHPOINT:
 		watchpoint_handler(addr, fsr, regs);
+		break;
+	case ARM_ENTRY_CFI_BREAKPOINT:
+		hw_breakpoint_cfi_handler(regs);
 		break;
 	default:
 		ret = 1; /* Unhandled fault. */
@@ -944,6 +975,23 @@ static int hw_breakpoint_pending(unsigned long addr, unsigned int fsr,
 
 	return ret;
 }
+
+#ifdef CONFIG_ARM_ERRATA_764319
+static int oslsr_fault;
+
+static int debug_oslsr_trap(struct pt_regs *regs, unsigned int instr)
+{
+	oslsr_fault = 1;
+	instruction_pointer(regs) += 4;
+	return 0;
+}
+
+static struct undef_hook debug_oslsr_hook = {
+	.instr_mask  = 0xffffffff,
+	.instr_val = 0xee115e91,
+	.fn = debug_oslsr_trap,
+};
+#endif
 
 /*
  * One-time initialisation.
@@ -978,9 +1026,19 @@ static bool core_has_os_save_restore(void)
 	case ARM_DEBUG_ARCH_V7_1:
 		return true;
 	case ARM_DEBUG_ARCH_V7_ECP14:
+#ifdef CONFIG_ARM_ERRATA_764319
+		oslsr_fault = 0;
+		register_undef_hook(&debug_oslsr_hook);
 		ARM_DBG_READ(c1, c1, 4, oslsr);
+		unregister_undef_hook(&debug_oslsr_hook);
+		if (oslsr_fault)
+			return false;
+#else
+		ARM_DBG_READ(c1, c1, 4, oslsr);
+#endif
 		if (oslsr & ARM_OSLSR_OSLM0)
 			return true;
+		fallthrough;
 	default:
 		return false;
 	}

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * SN Platform GRU Driver
  *
@@ -8,20 +9,6 @@
  * the user CB.
  *
  *  Copyright (c) 2008 Silicon Graphics, Inc.  All Rights Reserved.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <linux/kernel.h>
@@ -33,8 +20,8 @@
 #include <linux/io.h>
 #include <linux/uaccess.h>
 #include <linux/security.h>
+#include <linux/sync_core.h>
 #include <linux/prefetch.h>
-#include <linux/pgtable.h>
 #include "gru.h"
 #include "grutables.h"
 #include "grulib.h"
@@ -56,14 +43,14 @@ static inline int is_gru_paddr(unsigned long paddr)
 }
 
 /*
- * Find the vma of a GRU segment. Caller must hold mmap_sem.
+ * Find the vma of a GRU segment. Caller must hold mmap_lock.
  */
 struct vm_area_struct *gru_find_vma(unsigned long vaddr)
 {
 	struct vm_area_struct *vma;
 
-	vma = find_vma(current->mm, vaddr);
-	if (vma && vma->vm_start <= vaddr && vma->vm_ops == &gru_vm_ops)
+	vma = vma_lookup(current->mm, vaddr);
+	if (vma && vma->vm_ops == &gru_vm_ops)
 		return vma;
 	return NULL;
 }
@@ -72,7 +59,7 @@ struct vm_area_struct *gru_find_vma(unsigned long vaddr)
  * Find and lock the gts that contains the specified user vaddr.
  *
  * Returns:
- * 	- *gts with the mmap_sem locked for read and the GTS locked.
+ * 	- *gts with the mmap_lock locked for read and the GTS locked.
  *	- NULL if vaddr invalid OR is not a valid GSEG vaddr.
  */
 
@@ -198,7 +185,7 @@ static int non_atomic_pte_lookup(struct vm_area_struct *vma,
 #else
 	*pageshift = PAGE_SHIFT;
 #endif
-	if (get_user_pages(vaddr, 1, write ? FOLL_WRITE : 0, &page, NULL) <= 0)
+	if (get_user_pages(vaddr, 1, write ? FOLL_WRITE : 0, &page) <= 0)
 		return -EFAULT;
 	*paddr = page_to_phys(page);
 	put_page(page);
@@ -212,7 +199,7 @@ static int non_atomic_pte_lookup(struct vm_area_struct *vma,
  * Only supports Intel large pages (2MB only) on x86_64.
  *	ZZZ - hugepage support is incomplete
  *
- * NOTE: mmap_sem is already held on entry to this function. This
+ * NOTE: mmap_lock is already held on entry to this function. This
  * guarantees existence of the page tables.
  */
 static int atomic_pte_lookup(struct vm_area_struct *vma, unsigned long vaddr,
@@ -240,8 +227,8 @@ static int atomic_pte_lookup(struct vm_area_struct *vma, unsigned long vaddr,
 	if (unlikely(pmd_none(*pmdp)))
 		goto err;
 #ifdef CONFIG_X86_64
-	if (unlikely(pmd_large(*pmdp)))
-		pte = *(pte_t *) pmdp;
+	if (unlikely(pmd_leaf(*pmdp)))
+		pte = ptep_get((pte_t *)pmdp);
 	else
 #endif
 		pte = *pte_offset_kernel(pmdp, vaddr);
@@ -583,7 +570,7 @@ static irqreturn_t gru_intr(int chiplet, int blade)
 		}
 
 		/*
-		 * This is running in interrupt context. Trylock the mmap_sem.
+		 * This is running in interrupt context. Trylock the mmap_lock.
 		 * If it fails, retry the fault in user context.
 		 */
 		gts->ustats.fmm_tlbmiss++;
@@ -616,8 +603,8 @@ irqreturn_t gru_intr_mblade(int irq, void *dev_id)
 	for_each_possible_blade(blade) {
 		if (uv_blade_nr_possible_cpus(blade))
 			continue;
-		 gru_intr(0, blade);
-		 gru_intr(1, blade);
+		gru_intr(0, blade);
+		gru_intr(1, blade);
 	}
 	return IRQ_HANDLED;
 }

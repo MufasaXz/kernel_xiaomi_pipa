@@ -1,32 +1,16 @@
+.. SPDX-License-Identifier: GPL-2.0
+
 .. _it_linux_doc:
 
-===================
-Traduzione italiana
-===================
-
-L'obiettivo di questa traduzione è di rendere più facile la lettura e
-la comprensione per chi preferisce leggere in lingua italiana.
-Tenete presente che la documentazione di riferimento rimane comunque
-quella in lingua inglese: :ref:`linux_doc`
-
-Questa traduzione cerca di essere il più fedele possibile all'originale ma
-è ovvio che alcune frasi vadano trasformate: non aspettatevi una traduzione
-letterale. Quando possibile, si eviteranno gli inglesismi ed al loro posto
-verranno utilizzate le corrispettive parole italiane.
-
-Se notate che la traduzione non è più aggiornata potete contattare
-direttamente il manutentore della traduzione italiana.
-
-Se notate che la documentazione contiene errori o dimenticanze, allora
-verificate la documentazione di riferimento in lingua inglese. Se il problema
-è presente anche nella documentazione di riferimento, contattate il suo
-manutentore. Se avete problemi a scrivere in inglese, potete comunque
-riportare il problema al manutentore della traduzione italiana.
-
-Manutentore della traduzione italiana: Federico Vaga <federico.vaga@vaga.pv.it>
-
+==================================
 La documentazione del kernel Linux
 ==================================
+
+.. raw:: latex
+
+	\kerneldocCJKoff
+
+:manutentore: Federico Vaga <federico.vaga@vaga.pv.it>
 
 Questo è il livello principale della documentazione del kernel in
 lingua italiana. La traduzione è incompleta, noterete degli avvisi
@@ -40,79 +24,114 @@ I miglioramenti alla documentazione sono sempre i benvenuti; per cui,
 se vuoi aiutare, iscriviti alla lista di discussione linux-doc presso
 vger.kernel.org.
 
-Documentazione sulla licenza dei sorgenti
------------------------------------------
+.. _it_disclaimer:
 
-I seguenti documenti descrivono la licenza usata nei sorgenti del kernel Linux
-(GPLv2), come licenziare i singoli file; inoltre troverete i riferimenti al
-testo integrale della licenza.
+Avvertenze
+==========
 
-.. warning::
+L'obiettivo di questa traduzione è di rendere più facile la lettura e
+la comprensione per chi non capisce l'inglese o ha dubbi sulla sua
+interpretazione, oppure semplicemente per chi preferisce leggere in lingua
+italiana. Tuttavia, tenete ben presente che l'*unica* documentazione
+ufficiale è quella in lingua inglese: :ref:`linux_doc`
 
-    TODO ancora da tradurre
+La propagazione simultanea a tutte le traduzioni di una modifica in
+:ref:`linux_doc` è altamente improbabile. I manutentori delle traduzioni -
+e i contributori - seguono l'evolversi della documentazione ufficiale e
+cercano di mantenere le rispettive traduzioni allineate nel limite del
+possibile.  Per questo motivo non c'è garanzia che una traduzione sia
+aggiornata all'ultima modifica.  Se quello che leggete in una traduzione
+non corrisponde a quello che leggete nel codice, informate il manutentore
+della traduzione e - se potete - verificate anche la documentazione in
+inglese.
 
-Documentazione per gli utenti
------------------------------
+Una traduzione non è un *fork* della documentazione ufficiale, perciò gli
+utenti non vi troveranno alcuna informazione diversa rispetto alla versione
+ufficiale.  Ogni aggiunta, rimozione o modifica dei contenuti deve essere
+fatta prima nei documenti in inglese. In seguito, e quando è possibile, la
+stessa modifica dovrebbe essere applicata anche alle traduzioni.  I manutentori
+delle traduzioni accettano contributi che interessano prettamente l'attività
+di traduzione (per esempio, nuove traduzioni, aggiornamenti, correzioni).
 
-I seguenti manuali sono scritti per gli *utenti* del kernel - ovvero,
-coloro che cercano di farlo funzionare in modo ottimale su un dato sistema
+Le traduzioni cercano di essere il più possibile accurate ma non è possibile
+mappare direttamente una lingua in un'altra. Ogni lingua ha la sua grammatica
+e una sua cultura alle spalle, quindi la traduzione di una frase in inglese
+potrebbe essere modificata per adattarla all'italiano. Per questo motivo,
+quando leggete questa traduzione, potreste trovare alcune differenze di forma
+ma che trasmettono comunque il messaggio originale.  Nonostante la grande
+diffusione di inglesismi nella lingua parlata, quando possibile, questi
+verranno sostituiti dalle corrispettive parole italiane
 
-.. warning::
+Se avete bisogno d'aiuto per comunicare con la comunità Linux ma non vi sentite
+a vostro agio nello scrivere in inglese, potete chiedere aiuto al manutentore
+della traduzione.
 
-    TODO ancora da tradurre
+Lavorare con la comunità di sviluppo
+====================================
 
-Documentazione per gli sviluppatori di applicazioni
----------------------------------------------------
-
-Il manuale delle API verso lo spazio utente è una collezione di documenti
-che descrivono le interfacce del kernel viste dagli sviluppatori
-di applicazioni.
-
-.. warning::
-
-    TODO ancora da tradurre
-
-
-Introduzione allo sviluppo del kernel
--------------------------------------
-
-Questi manuali contengono informazioni su come contribuire allo sviluppo
-del kernel.
-Attorno al kernel Linux gira una comunità molto grande con migliaia di
-sviluppatori che contribuiscono ogni anno. Come in ogni grande comunità,
-sapere come le cose vengono fatte renderà il processo di integrazione delle
-vostre modifiche molto più semplice
+Le guide fondamentali per l'interazione con la comunità di sviluppo del kernel e
+su come vedere il proprio lavoro integrato.
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
 
-   doc-guide/index
-   kernel-hacking/index
+   process/development-process
+   process/submitting-patches
+   Code of conduct <process/code-of-conduct>
+   All development-process docs <process/index>
 
-.. warning::
 
-    TODO ancora da tradurre
+Manuali sull'API interna
+========================
 
-Documentazione della API del kernel
------------------------------------
+Di seguito una serie di manuali per gli sviluppatori che hanno bisogno di
+interfacciarsi con il resto del kernel.
 
-Questi manuali forniscono dettagli su come funzionano i sottosistemi del
-kernel dal punto di vista degli sviluppatori del kernel. Molte delle
-informazioni contenute in questi manuali sono prese direttamente dai
-file sorgenti, informazioni aggiuntive vengono aggiunte solo se necessarie
-(o almeno ci proviamo — probabilmente *non* tutto quello che è davvero
-necessario).
+.. toctree::
+   :maxdepth: 1
 
-.. warning::
+   core-api/index
+   Sincronizzazione nel kernel <locking/index>
+   subsystem-apis
 
-    TODO ancora da tradurre
+Strumenti e processi per lo sviluppo
+====================================
+
+Di seguito una serie di manuali contenenti informazioni utili a tutti gli
+sviluppatori del kernel.
+
+.. toctree::
+   :maxdepth: 1
+
+   Regole sulle licenze <process/license-rules>
+   Scrivere la documentazione <doc-guide/index>
+   Strumenti di sviluppo <dev-tools/index>
+   La guida all'*hacking*<kernel-hacking/index>
+
+
+Documentazione per gli utenti
+=============================
+
+Di seguito una serie di manuali per gli *utenti* del kernel - ovvero coloro che
+stanno cercando di farlo funzionare al meglio per un dato sistema, ma anche
+coloro che stanno sviluppando applicazioni che sfruttano l'API verso lo
+spazio-utente.
+
+Consultate anche `Linux man pages <https://www.kernel.org/doc/man-pages/>`_, che
+vengono mantenuti separatamente dalla documentazione del kernel Linux
+
+Documentazione relativa ai firmware
+===================================
+Di seguito informazioni sulle aspettative del kernel circa i firmware.
+
 
 Documentazione specifica per architettura
------------------------------------------
+=========================================
 
-Questi manuali forniscono dettagli di programmazione per le diverse
-implementazioni d'architettura.
 
-.. warning::
+Documentazione varia
+====================
 
-    TODO ancora da tradurre
+Ci sono documenti che sono difficili da inserire nell'attuale organizzazione
+della documentazione; altri hanno bisogno di essere migliorati e/o convertiti
+nel formato *reStructuredText*; altri sono semplicamente troppo vecchi.

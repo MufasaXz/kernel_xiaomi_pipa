@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * ALPS touchpad PS/2 mouse driver
  *
@@ -9,10 +10,6 @@
  *
  * ALPS detection, tap switching and status querying info is taken from
  * tpconfig utility (by C. Scott Ananian and Bruce Kall).
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  */
 
 #include <linux/slab.h>
@@ -989,7 +986,7 @@ static void alps_get_finger_coordinate_v7(struct input_mt_pos *mt,
 	case V7_PACKET_ID_TWO:
 		mt[1].x &= ~0x000F;
 		mt[1].y |= 0x000F;
-		/* Detect false-postive touches where x & y report max value */
+		/* Detect false-positive touches where x & y report max value */
 		if (mt[1].y == 0x7ff && mt[1].x == 0xff0) {
 			mt[1].x = 0;
 			/* y gets set to 0 at the end of this function */
@@ -1399,29 +1396,21 @@ static bool alps_is_valid_package_ss4_v2(struct psmouse *psmouse)
 
 static DEFINE_MUTEX(alps_mutex);
 
-static void alps_register_bare_ps2_mouse(struct work_struct *work)
+static int alps_do_register_bare_ps2_mouse(struct alps_data *priv)
 {
-	struct alps_data *priv =
-		container_of(work, struct alps_data, dev3_register_work.work);
 	struct psmouse *psmouse = priv->psmouse;
 	struct input_dev *dev3;
-	int error = 0;
-
-	mutex_lock(&alps_mutex);
-
-	if (priv->dev3)
-		goto out;
+	int error;
 
 	dev3 = input_allocate_device();
 	if (!dev3) {
 		psmouse_err(psmouse, "failed to allocate secondary device\n");
-		error = -ENOMEM;
-		goto out;
+		return -ENOMEM;
 	}
 
-	snprintf(priv->phys3, sizeof(priv->phys3), "%s/%s",
-		 psmouse->ps2dev.serio->phys,
-		 (priv->dev2 ? "input2" : "input1"));
+	scnprintf(priv->phys3, sizeof(priv->phys3), "%s/%s",
+		  psmouse->ps2dev.serio->phys,
+		  (priv->dev2 ? "input2" : "input1"));
 	dev3->phys = priv->phys3;
 
 	/*
@@ -1449,21 +1438,35 @@ static void alps_register_bare_ps2_mouse(struct work_struct *work)
 		psmouse_err(psmouse,
 			    "failed to register secondary device: %d\n",
 			    error);
-		input_free_device(dev3);
-		goto out;
+		goto err_free_input;
 	}
 
 	priv->dev3 = dev3;
+	return 0;
 
-out:
-	/*
-	 * Save the error code so that we can detect that we
-	 * already tried to create the device.
-	 */
-	if (error)
-		priv->dev3 = ERR_PTR(error);
+err_free_input:
+	input_free_device(dev3);
+	return error;
+}
 
-	mutex_unlock(&alps_mutex);
+static void alps_register_bare_ps2_mouse(struct work_struct *work)
+{
+	struct alps_data *priv = container_of(work, struct alps_data,
+					      dev3_register_work.work);
+	int error;
+
+	guard(mutex)(&alps_mutex);
+
+	if (!priv->dev3) {
+		error = alps_do_register_bare_ps2_mouse(priv);
+		if (error) {
+			/*
+			 * Save the error code so that we can detect that we
+			 * already tried to create the device.
+			 */
+			priv->dev3 = ERR_PTR(error);
+		}
+	}
 }
 
 static void alps_report_bare_ps2_packet(struct psmouse *psmouse,
@@ -1516,7 +1519,7 @@ static psmouse_ret_t alps_handle_interleaved_ps2(struct psmouse *psmouse)
 		return PSMOUSE_GOOD_DATA;
 	}
 
-	del_timer(&priv->timer);
+	timer_delete(&priv->timer);
 
 	if (psmouse->packet[6] & 0x80) {
 
@@ -1579,10 +1582,10 @@ static psmouse_ret_t alps_handle_interleaved_ps2(struct psmouse *psmouse)
 
 static void alps_flush_packet(struct timer_list *t)
 {
-	struct alps_data *priv = from_timer(priv, t, timer);
+	struct alps_data *priv = timer_container_of(priv, t, timer);
 	struct psmouse *psmouse = priv->psmouse;
 
-	serio_pause_rx(psmouse->ps2dev.serio);
+	guard(serio_pause_rx)(psmouse->ps2dev.serio);
 
 	if (psmouse->pktcnt == psmouse->pktsize) {
 
@@ -1602,8 +1605,6 @@ static void alps_flush_packet(struct timer_list *t)
 		}
 		psmouse->pktcnt = 0;
 	}
-
-	serio_continue_rx(psmouse->ps2dev.serio);
 }
 
 static psmouse_ret_t alps_process_byte(struct psmouse *psmouse)
@@ -1932,7 +1933,7 @@ static int alps_monitor_mode(struct psmouse *psmouse, bool enable)
 static int alps_absolute_mode_v6(struct psmouse *psmouse)
 {
 	u16 reg_val = 0x181;
-	int ret = -1;
+	int ret;
 
 	/* enter monitor mode, to write the register */
 	if (alps_monitor_mode(psmouse, true))
@@ -2973,7 +2974,8 @@ static void alps_disconnect(struct psmouse *psmouse)
 	struct alps_data *priv = psmouse->private;
 
 	psmouse_reset(psmouse);
-	del_timer_sync(&priv->timer);
+	timer_shutdown_sync(&priv->timer);
+	disable_delayed_work_sync(&priv->dev3_register_work);
 	if (priv->dev2)
 		input_unregister_device(priv->dev2);
 	if (!IS_ERR_OR_NULL(priv->dev3))
@@ -3102,8 +3104,8 @@ int alps_init(struct psmouse *psmouse)
 			goto init_fail;
 		}
 
-		snprintf(priv->phys2, sizeof(priv->phys2), "%s/input1",
-			 psmouse->ps2dev.serio->phys);
+		scnprintf(priv->phys2, sizeof(priv->phys2), "%s/input1",
+			  psmouse->ps2dev.serio->phys);
 		dev2->phys = priv->phys2;
 
 		/*
@@ -3204,7 +3206,7 @@ int alps_detect(struct psmouse *psmouse, bool set_properties)
 	 */
 	psmouse_reset(psmouse);
 
-	priv = kzalloc(sizeof(struct alps_data), GFP_KERNEL);
+	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 

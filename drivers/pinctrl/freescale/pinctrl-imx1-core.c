@@ -15,12 +15,15 @@
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
+#include <linux/seq_file.h>
+#include <linux/slab.h>
+
 #include <linux/pinctrl/machine.h>
 #include <linux/pinctrl/pinconf.h>
 #include <linux/pinctrl/pinctrl.h>
 #include <linux/pinctrl/pinmux.h>
-#include <linux/slab.h>
 
 #include "../core.h"
 #include "pinctrl-imx1.h"
@@ -60,7 +63,7 @@ struct imx1_pinctrl {
 
 /*
  * IMX1 IOMUXC manages the pins based on ports. Each port has 32 pins. IOMUX
- * control register are seperated into function, output configuration, input
+ * control registers are separated into function, output configuration, input
  * configuration A, input configuration B, GPIO in use and data direction.
  *
  * Those controls that are represented by 1 bit have a direct mapping between
@@ -233,8 +236,8 @@ static int imx1_dt_node_to_map(struct pinctrl_dev *pctldev,
 	 */
 	grp = imx1_pinctrl_find_group_by_name(info, np->name);
 	if (!grp) {
-		dev_err(info->dev, "unable to find group for node %s\n",
-			np->name);
+		dev_err(info->dev, "unable to find group for node %pOFn\n",
+			np);
 		return -EINVAL;
 	}
 
@@ -290,7 +293,6 @@ static const struct pinctrl_ops imx1_pctrl_ops = {
 	.pin_dbg_show = imx1_pin_dbg_show,
 	.dt_node_to_map = imx1_dt_node_to_map,
 	.dt_free_map = imx1_dt_free_map,
-
 };
 
 static int imx1_pmx_set(struct pinctrl_dev *pctldev, unsigned selector,
@@ -466,7 +468,7 @@ static int imx1_pinctrl_parse_groups(struct device_node *np,
 	const __be32 *list;
 	int i;
 
-	dev_dbg(info->dev, "group(%d): %s\n", index, np->name);
+	dev_dbg(info->dev, "group(%d): %pOFn\n", index, np);
 
 	/* Initialise group */
 	grp->name = np->name;
@@ -477,8 +479,8 @@ static int imx1_pinctrl_parse_groups(struct device_node *np,
 	list = of_get_property(np, "fsl,pins", &size);
 	/* we do not check return since it's safe node passed down */
 	if (!size || size % 12) {
-		dev_notice(info->dev, "Not a valid fsl,pins property (%s)\n",
-				np->name);
+		dev_notice(info->dev, "Not a valid fsl,pins property (%pOFn)\n",
+				np);
 		return -EINVAL;
 	}
 
@@ -506,14 +508,13 @@ static int imx1_pinctrl_parse_functions(struct device_node *np,
 				       struct imx1_pinctrl_soc_info *info,
 				       u32 index)
 {
-	struct device_node *child;
 	struct imx1_pmx_func *func;
 	struct imx1_pin_group *grp;
 	int ret;
 	static u32 grp_index;
 	u32 i = 0;
 
-	dev_dbg(info->dev, "parse function(%d): %s\n", index, np->name);
+	dev_dbg(info->dev, "parse function(%d): %pOFn\n", index, np);
 
 	func = &info->functions[index];
 
@@ -529,14 +530,12 @@ static int imx1_pinctrl_parse_functions(struct device_node *np,
 	if (!func->groups)
 		return -ENOMEM;
 
-	for_each_child_of_node(np, child) {
+	for_each_child_of_node_scoped(np, child) {
 		func->groups[i] = child->name;
 		grp = &info->groups[grp_index++];
 		ret = imx1_pinctrl_parse_groups(child, grp, info, i++);
-		if (ret == -ENOMEM) {
-			of_node_put(child);
+		if (ret == -ENOMEM)
 			return ret;
-		}
 	}
 
 	return 0;
@@ -546,7 +545,6 @@ static int imx1_pinctrl_parse_dt(struct platform_device *pdev,
 		struct imx1_pinctrl *pctl, struct imx1_pinctrl_soc_info *info)
 {
 	struct device_node *np = pdev->dev.of_node;
-	struct device_node *child;
 	int ret;
 	u32 nfuncs = 0;
 	u32 ngroups = 0;
@@ -555,7 +553,7 @@ static int imx1_pinctrl_parse_dt(struct platform_device *pdev,
 	if (!np)
 		return -ENODEV;
 
-	for_each_child_of_node(np, child) {
+	for_each_child_of_node_scoped(np, child) {
 		++nfuncs;
 		ngroups += of_get_child_count(child);
 	}
@@ -577,12 +575,10 @@ static int imx1_pinctrl_parse_dt(struct platform_device *pdev,
 	if (!info->functions || !info->groups)
 		return -ENOMEM;
 
-	for_each_child_of_node(np, child) {
+	for_each_child_of_node_scoped(np, child) {
 		ret = imx1_pinctrl_parse_functions(child, info, ifunc++);
-		if (ret == -ENOMEM) {
-			of_node_put(child);
+		if (ret == -ENOMEM)
 			return -ENOMEM;
-		}
 	}
 
 	return 0;
@@ -611,7 +607,7 @@ int imx1_pinctrl_core_probe(struct platform_device *pdev,
 	if (!res)
 		return -ENOENT;
 
-	ipctl->base = devm_ioremap_nocache(&pdev->dev, res->start,
+	ipctl->base = devm_ioremap(&pdev->dev, res->start,
 			resource_size(res));
 	if (!ipctl->base)
 		return -ENOMEM;

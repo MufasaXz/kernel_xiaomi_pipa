@@ -1,19 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2008-2014 Mathieu Desnoyers
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -28,11 +15,49 @@
 #include <linux/sched/task.h>
 #include <linux/static_key.h>
 
+enum tp_func_state {
+	TP_FUNC_0,
+	TP_FUNC_1,
+	TP_FUNC_2,
+	TP_FUNC_N,
+};
+
 extern tracepoint_ptr_t __start___tracepoints_ptrs[];
 extern tracepoint_ptr_t __stop___tracepoints_ptrs[];
 
-DEFINE_SRCU(tracepoint_srcu);
-EXPORT_SYMBOL_GPL(tracepoint_srcu);
+enum tp_transition_sync {
+	TP_TRANSITION_SYNC_1_0_1,
+	TP_TRANSITION_SYNC_N_2_1,
+
+	_NR_TP_TRANSITION_SYNC,
+};
+
+struct tp_transition_snapshot {
+	unsigned long rcu;
+	bool ongoing;
+};
+
+/* Protected by tracepoints_mutex */
+static struct tp_transition_snapshot tp_transition_snapshot[_NR_TP_TRANSITION_SYNC];
+
+static void tp_rcu_get_state(enum tp_transition_sync sync)
+{
+	struct tp_transition_snapshot *snapshot = &tp_transition_snapshot[sync];
+
+	/* Keep the latest get_state snapshot. */
+	snapshot->rcu = get_state_synchronize_rcu();
+	snapshot->ongoing = true;
+}
+
+static void tp_rcu_cond_sync(enum tp_transition_sync sync)
+{
+	struct tp_transition_snapshot *snapshot = &tp_transition_snapshot[sync];
+
+	if (!snapshot->ongoing)
+		return;
+	cond_synchronize_rcu(snapshot->rcu);
+	snapshot->ongoing = false;
+}
 
 /* Set to 1 to enable tracepoint debug output */
 static const int tracepoint_debug;
@@ -53,9 +78,6 @@ static LIST_HEAD(tracepoint_module_list);
  */
 static DEFINE_MUTEX(tracepoints_mutex);
 
-static struct rcu_head *early_probes;
-static bool ok_to_free_tracepoints;
-
 /*
  * Note about RCU :
  * It is used to delay the free of multiple probes array until a quiescent
@@ -63,7 +85,7 @@ static bool ok_to_free_tracepoints;
  */
 struct tp_probes {
 	struct rcu_head rcu;
-	struct tracepoint_func probes[0];
+	struct tracepoint_func probes[];
 };
 
 /* Called in removal of a func but failed to allocate a new tp_funcs */
@@ -74,62 +96,26 @@ static void tp_stub_func(void)
 
 static inline void *allocate_probes(int count)
 {
-	struct tp_probes *p  = kmalloc(count * sizeof(struct tracepoint_func)
-			+ sizeof(struct tp_probes), GFP_KERNEL);
+	struct tp_probes *p  = kmalloc(struct_size(p, probes, count),
+				       GFP_KERNEL);
 	return p == NULL ? NULL : p->probes;
-}
-
-static void srcu_free_old_probes(struct rcu_head *head)
-{
-	kfree(container_of(head, struct tp_probes, rcu));
 }
 
 static void rcu_free_old_probes(struct rcu_head *head)
 {
-	call_srcu(&tracepoint_srcu, head, srcu_free_old_probes);
+	kfree(container_of(head, struct tp_probes, rcu));
 }
 
-static __init int release_early_probes(void)
-{
-	struct rcu_head *tmp;
-
-	ok_to_free_tracepoints = true;
-
-	while (early_probes) {
-		tmp = early_probes;
-		early_probes = tmp->next;
-		call_rcu_sched(tmp, rcu_free_old_probes);
-	}
-
-	return 0;
-}
-
-/* SRCU is initialized at core_initcall */
-postcore_initcall(release_early_probes);
-
-static inline void release_probes(struct tracepoint_func *old)
+static inline void release_probes(struct tracepoint *tp, struct tracepoint_func *old)
 {
 	if (old) {
 		struct tp_probes *tp_probes = container_of(old,
 			struct tp_probes, probes[0]);
 
-		/*
-		 * We can't free probes if SRCU is not initialized yet.
-		 * Postpone the freeing till after SRCU is initialized.
-		 */
-		if (unlikely(!ok_to_free_tracepoints)) {
-			tp_probes->rcu.next = early_probes;
-			early_probes = &tp_probes->rcu;
-			return;
-		}
-
-		/*
-		 * Tracepoint probes are protected by both sched RCU and SRCU,
-		 * by calling the SRCU callback in the sched RCU callback we
-		 * cover both cases. So let us chain the SRCU and sched RCU
-		 * callbacks to wait for both grace periods.
-		 */
-		call_rcu_sched(&tp_probes->rcu, rcu_free_old_probes);
+		if (tracepoint_is_faultable(tp))
+			call_rcu_tasks_trace(&tp_probes->rcu, rcu_free_old_probes);
+		else
+			call_rcu(&tp_probes->rcu, rcu_free_old_probes);
 	}
 }
 
@@ -141,7 +127,7 @@ static void debug_print_probes(struct tracepoint_func *funcs)
 		return;
 
 	for (i = 0; funcs[i].func; i++)
-		printk(KERN_DEBUG "Probe %d : %p\n", i, funcs[i].func);
+		printk(KERN_DEBUG "Probe %d : %pSb\n", i, funcs[i].func);
 }
 
 static struct tracepoint_func *
@@ -149,9 +135,9 @@ func_add(struct tracepoint_func **funcs, struct tracepoint_func *tp_func,
 	 int prio)
 {
 	struct tracepoint_func *old, *new;
-	int nr_probes = 0;
-	int stub_funcs = 0;
-	int pos = -1;
+	int iter_probes;	/* Iterate over old probe array. */
+	int nr_probes = 0;	/* Counter for probes */
+	int pos = -1;		/* Insertion position into new array */
 
 	if (WARN_ON(!tp_func->func))
 		return ERR_PTR(-EINVAL);
@@ -160,54 +146,38 @@ func_add(struct tracepoint_func **funcs, struct tracepoint_func *tp_func,
 	old = *funcs;
 	if (old) {
 		/* (N -> N+1), (N != 0, 1) probes */
-		for (nr_probes = 0; old[nr_probes].func; nr_probes++) {
-			/* Insert before probes of lower priority */
-			if (pos < 0 && old[nr_probes].prio < prio)
-				pos = nr_probes;
-			if (old[nr_probes].func == tp_func->func &&
-			    old[nr_probes].data == tp_func->data)
+		for (iter_probes = 0; old[iter_probes].func; iter_probes++) {
+			if (old[iter_probes].func == tp_stub_func)
+				continue;	/* Skip stub functions. */
+			if (old[iter_probes].func == tp_func->func &&
+			    old[iter_probes].data == tp_func->data)
 				return ERR_PTR(-EEXIST);
-			if (old[nr_probes].func == tp_stub_func)
-				stub_funcs++;
+			nr_probes++;
 		}
 	}
-	/* + 2 : one for new probe, one for NULL func - stub functions */
-	new = allocate_probes(nr_probes + 2 - stub_funcs);
+	/* + 2 : one for new probe, one for NULL func */
+	new = allocate_probes(nr_probes + 2);
 	if (new == NULL)
 		return ERR_PTR(-ENOMEM);
 	if (old) {
-		if (stub_funcs) {
-			/* Need to copy one at a time to remove stubs */
-			int probes = 0;
-
-			pos = -1;
-			for (nr_probes = 0; old[nr_probes].func; nr_probes++) {
-				if (old[nr_probes].func == tp_stub_func)
-					continue;
-				if (pos < 0 && old[nr_probes].prio < prio)
-					pos = probes++;
-				new[probes++] = old[nr_probes];
-			}
-			nr_probes = probes;
-			if (pos < 0)
-				pos = probes;
-			else
-				nr_probes--; /* Account for insertion */
-
-		} else if (pos < 0) {
-			pos = nr_probes;
-			memcpy(new, old, nr_probes * sizeof(struct tracepoint_func));
-		} else {
-			/* Copy higher priority probes ahead of the new probe */
-			memcpy(new, old, pos * sizeof(struct tracepoint_func));
-			/* Copy the rest after it. */
-			memcpy(new + pos + 1, old + pos,
-			       (nr_probes - pos) * sizeof(struct tracepoint_func));
+		nr_probes = 0;
+		for (iter_probes = 0; old[iter_probes].func; iter_probes++) {
+			if (old[iter_probes].func == tp_stub_func)
+				continue;
+			/* Insert before probes of lower priority */
+			if (pos < 0 && old[iter_probes].prio < prio)
+				pos = nr_probes++;
+			new[nr_probes++] = old[iter_probes];
 		}
-	} else
+		if (pos < 0)
+			pos = nr_probes++;
+		/* nr_probes now points to the end of the new array */
+	} else {
 		pos = 0;
+		nr_probes = 1; /* must point at end of array */
+	}
 	new[pos] = *tp_func;
-	new[nr_probes + 1].func = NULL;
+	new[nr_probes].func = NULL;
 	*funcs = new;
 	debug_print_probes(*funcs);
 	return old;
@@ -250,11 +220,12 @@ static void *func_remove(struct tracepoint_func **funcs,
 		/* + 1 for NULL */
 		new = allocate_probes(nr_probes - nr_del + 1);
 		if (new) {
-			for (i = 0; old[i].func; i++)
-				if ((old[i].func != tp_func->func
-				     || old[i].data != tp_func->data)
-				    && old[i].func != tp_stub_func)
+			for (i = 0; old[i].func; i++) {
+				if ((old[i].func != tp_func->func ||
+				     old[i].data != tp_func->data) &&
+				    old[i].func != tp_stub_func)
 					new[j++] = old[i];
+			}
 			new[nr_probes - nr_del].func = NULL;
 			*funcs = new;
 		} else {
@@ -262,22 +233,42 @@ static void *func_remove(struct tracepoint_func **funcs,
 			 * Failed to allocate, replace the old function
 			 * with calls to tp_stub_func.
 			 */
-			for (i = 0; old[i].func; i++)
+			for (i = 0; old[i].func; i++) {
 				if (old[i].func == tp_func->func &&
-				    old[i].data == tp_func->data) {
-					old[i].func = tp_stub_func;
-					/* Set the prio to the next event. */
-					if (old[i + 1].func)
-						old[i].prio =
-							old[i + 1].prio;
-					else
-						old[i].prio = -1;
-				}
+				    old[i].data == tp_func->data)
+					WRITE_ONCE(old[i].func, tp_stub_func);
+			}
 			*funcs = old;
 		}
 	}
 	debug_print_probes(*funcs);
 	return old;
+}
+
+/*
+ * Count the number of functions (enum tp_func_state) in a tp_funcs array.
+ */
+static enum tp_func_state nr_func_state(const struct tracepoint_func *tp_funcs)
+{
+	if (!tp_funcs)
+		return TP_FUNC_0;
+	if (!tp_funcs[1].func)
+		return TP_FUNC_1;
+	if (!tp_funcs[2].func)
+		return TP_FUNC_2;
+	return TP_FUNC_N;	/* 3 or more */
+}
+
+static void tracepoint_update_call(struct tracepoint *tp, struct tracepoint_func *tp_funcs)
+{
+	void *func = tp->iterator;
+
+	/* Synthetic events do not have static call sites */
+	if (!tp->static_call_key)
+		return;
+	if (nr_func_state(tp_funcs) == TP_FUNC_1)
+		func = tp_funcs[0].func;
+	__static_call_update(tp->static_call_key, tp->static_call_tramp, func);
 }
 
 /*
@@ -290,8 +281,8 @@ static int tracepoint_add_func(struct tracepoint *tp,
 	struct tracepoint_func *old, *tp_funcs;
 	int ret;
 
-	if (tp->regfunc && !static_key_enabled(&tp->key)) {
-		ret = tp->regfunc();
+	if (tp->ext && tp->ext->regfunc && !static_key_enabled(&tp->key)) {
+		ret = tp->ext->regfunc();
 		if (ret < 0)
 			return ret;
 	}
@@ -310,10 +301,43 @@ static int tracepoint_add_func(struct tracepoint *tp,
 	 * a pointer to it.  This array is referenced by __DO_TRACE from
 	 * include/linux/tracepoint.h using rcu_dereference_sched().
 	 */
-	rcu_assign_pointer(tp->funcs, tp_funcs);
-	if (!static_key_enabled(&tp->key))
-		static_key_slow_inc(&tp->key);
-	release_probes(old);
+	switch (nr_func_state(tp_funcs)) {
+	case TP_FUNC_1:		/* 0->1 */
+		/*
+		 * Make sure new static func never uses old data after a
+		 * 1->0->1 transition sequence.
+		 */
+		tp_rcu_cond_sync(TP_TRANSITION_SYNC_1_0_1);
+		/* Set static call to first function */
+		tracepoint_update_call(tp, tp_funcs);
+		/* Both iterator and static call handle NULL tp->funcs */
+		rcu_assign_pointer(tp->funcs, tp_funcs);
+		static_branch_enable(&tp->key);
+		break;
+	case TP_FUNC_2:		/* 1->2 */
+		/* Set iterator static call */
+		tracepoint_update_call(tp, tp_funcs);
+		/*
+		 * Iterator callback installed before updating tp->funcs.
+		 * Requires ordering between RCU assign/dereference and
+		 * static call update/call.
+		 */
+		fallthrough;
+	case TP_FUNC_N:		/* N->N+1 (N>1) */
+		rcu_assign_pointer(tp->funcs, tp_funcs);
+		/*
+		 * Make sure static func never uses incorrect data after a
+		 * N->...->2->1 (N>1) transition sequence.
+		 */
+		if (tp_funcs[0].data != old[0].data)
+			tp_rcu_get_state(TP_TRANSITION_SYNC_N_2_1);
+		break;
+	default:
+		WARN_ON_ONCE(1);
+		break;
+	}
+
+	release_probes(tp, old);
 	return 0;
 }
 
@@ -338,16 +362,53 @@ static int tracepoint_remove_func(struct tracepoint *tp,
 		/* Failed allocating new tp_funcs, replaced func with stub */
 		return 0;
 
-	if (!tp_funcs) {
+	switch (nr_func_state(tp_funcs)) {
+	case TP_FUNC_0:		/* 1->0 */
 		/* Removed last function */
-		if (tp->unregfunc && static_key_enabled(&tp->key))
-			tp->unregfunc();
-
-		if (static_key_enabled(&tp->key))
-			static_key_slow_dec(&tp->key);
+		if (tp->ext && tp->ext->unregfunc && static_key_enabled(&tp->key))
+			tp->ext->unregfunc();
+		static_branch_disable(&tp->key);
+		/* Set iterator static call */
+		tracepoint_update_call(tp, tp_funcs);
+		/* Both iterator and static call handle NULL tp->funcs */
+		rcu_assign_pointer(tp->funcs, NULL);
+		/*
+		 * Make sure new static func never uses old data after a
+		 * 1->0->1 transition sequence.
+		 */
+		tp_rcu_get_state(TP_TRANSITION_SYNC_1_0_1);
+		break;
+	case TP_FUNC_1:		/* 2->1 */
+		rcu_assign_pointer(tp->funcs, tp_funcs);
+		/*
+		 * Make sure static func never uses incorrect data after a
+		 * N->...->2->1 (N>2) transition sequence. If the first
+		 * element's data has changed, then force the synchronization
+		 * to prevent current readers that have loaded the old data
+		 * from calling the new function.
+		 */
+		if (tp_funcs[0].data != old[0].data)
+			tp_rcu_get_state(TP_TRANSITION_SYNC_N_2_1);
+		tp_rcu_cond_sync(TP_TRANSITION_SYNC_N_2_1);
+		/* Set static call to first function */
+		tracepoint_update_call(tp, tp_funcs);
+		break;
+	case TP_FUNC_2:		/* N->N-1 (N>2) */
+		fallthrough;
+	case TP_FUNC_N:
+		rcu_assign_pointer(tp->funcs, tp_funcs);
+		/*
+		 * Make sure static func never uses incorrect data after a
+		 * N->...->2->1 (N>2) transition sequence.
+		 */
+		if (tp_funcs[0].data != old[0].data)
+			tp_rcu_get_state(TP_TRANSITION_SYNC_N_2_1);
+		break;
+	default:
+		WARN_ON_ONCE(1);
+		break;
 	}
-	rcu_assign_pointer(tp->funcs, tp_funcs);
-	release_probes(old);
+	release_probes(tp, old);
 	return 0;
 }
 
@@ -463,13 +524,14 @@ static void for_each_tracepoint_range(
 bool trace_module_has_bad_taint(struct module *mod)
 {
 	return mod->taints & ~((1 << TAINT_OOT_MODULE) | (1 << TAINT_CRAP) |
-			       (1 << TAINT_UNSIGNED_MODULE));
+				(1 << TAINT_UNSIGNED_MODULE) | (1 << TAINT_TEST) |
+				(1 << TAINT_LIVEPATCH));
 }
 
 static BLOCKING_NOTIFIER_HEAD(tracepoint_notify_list);
 
 /**
- * register_tracepoint_notifier - register tracepoint coming/going notifier
+ * register_tracepoint_module_notifier - register tracepoint coming/going notifier
  * @nb: notifier block
  *
  * Notifiers registered with this function are called on module
@@ -495,7 +557,7 @@ end:
 EXPORT_SYMBOL_GPL(register_tracepoint_module_notifier);
 
 /**
- * unregister_tracepoint_notifier - unregister tracepoint coming/going notifier
+ * unregister_tracepoint_module_notifier - unregister tracepoint coming/going notifier
  * @nb: notifier block
  *
  * The notifier block callback should expect a "struct tp_module" data
@@ -531,7 +593,6 @@ static void tp_module_going_check_quiescent(struct tracepoint *tp, void *priv)
 static int tracepoint_module_coming(struct module *mod)
 {
 	struct tp_module *tp_mod;
-	int ret = 0;
 
 	if (!mod->num_tracepoints)
 		return 0;
@@ -539,23 +600,22 @@ static int tracepoint_module_coming(struct module *mod)
 	/*
 	 * We skip modules that taint the kernel, especially those with different
 	 * module headers (for forced load), to make sure we don't cause a crash.
-	 * Staging, out-of-tree, and unsigned GPL modules are fine.
+	 * Staging, out-of-tree, unsigned GPL, and test modules are fine.
 	 */
 	if (trace_module_has_bad_taint(mod))
 		return 0;
-	mutex_lock(&tracepoint_module_list_mutex);
+
 	tp_mod = kmalloc(sizeof(struct tp_module), GFP_KERNEL);
-	if (!tp_mod) {
-		ret = -ENOMEM;
-		goto end;
-	}
+	if (!tp_mod)
+		return -ENOMEM;
 	tp_mod->mod = mod;
+
+	mutex_lock(&tracepoint_module_list_mutex);
 	list_add_tail(&tp_mod->list, &tracepoint_module_list);
 	blocking_notifier_call_chain(&tracepoint_notify_list,
 			MODULE_STATE_COMING, tp_mod);
-end:
 	mutex_unlock(&tracepoint_module_list_mutex);
-	return ret;
+	return 0;
 }
 
 static void tracepoint_module_going(struct module *mod)
@@ -628,6 +688,48 @@ static __init int init_tracepoints(void)
 	return ret;
 }
 __initcall(init_tracepoints);
+
+/**
+ * for_each_tracepoint_in_module - iteration on all tracepoints in a module
+ * @mod: module
+ * @fct: callback
+ * @priv: private data
+ */
+void for_each_tracepoint_in_module(struct module *mod,
+				   void (*fct)(struct tracepoint *tp,
+				    struct module *mod, void *priv),
+				   void *priv)
+{
+	tracepoint_ptr_t *begin, *end, *iter;
+
+	lockdep_assert_held(&tracepoint_module_list_mutex);
+
+	if (!mod)
+		return;
+
+	begin = mod->tracepoints_ptrs;
+	end = mod->tracepoints_ptrs + mod->num_tracepoints;
+
+	for (iter = begin; iter < end; iter++)
+		fct(tracepoint_ptr_deref(iter), mod, priv);
+}
+
+/**
+ * for_each_module_tracepoint - iteration on all tracepoints in all modules
+ * @fct: callback
+ * @priv: private data
+ */
+void for_each_module_tracepoint(void (*fct)(struct tracepoint *tp,
+				 struct module *mod, void *priv),
+				void *priv)
+{
+	struct tp_module *tp_mod;
+
+	mutex_lock(&tracepoint_module_list_mutex);
+	list_for_each_entry(tp_mod, &tracepoint_module_list, list)
+		for_each_tracepoint_in_module(tp_mod->mod, fct, priv);
+	mutex_unlock(&tracepoint_module_list_mutex);
+}
 #endif /* CONFIG_MODULES */
 
 /**
@@ -655,7 +757,7 @@ int syscall_regfunc(void)
 	if (!sys_tracepoint_refcount) {
 		read_lock(&tasklist_lock);
 		for_each_process_thread(p, t) {
-			set_tsk_thread_flag(t, TIF_SYSCALL_TRACEPOINT);
+			set_task_syscall_work(t, SYSCALL_TRACEPOINT);
 		}
 		read_unlock(&tasklist_lock);
 	}
@@ -672,7 +774,7 @@ void syscall_unregfunc(void)
 	if (!sys_tracepoint_refcount) {
 		read_lock(&tasklist_lock);
 		for_each_process_thread(p, t) {
-			clear_tsk_thread_flag(t, TIF_SYSCALL_TRACEPOINT);
+			clear_task_syscall_work(t, SYSCALL_TRACEPOINT);
 		}
 		read_unlock(&tasklist_lock);
 	}

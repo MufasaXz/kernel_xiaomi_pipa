@@ -1,11 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* -*- linux-c -*- ------------------------------------------------------- *
  *
  *   Copyright (C) 1991, 1992 Linus Torvalds
  *   Copyright 2007 rPath, Inc. - All Rights Reserved
  *   Copyright 2009 Intel Corporation; author H. Peter Anvin
- *
- *   This file is part of the Linux kernel, and is made available under
- *   the terms of the GNU General Public License version 2.
  *
  * ----------------------------------------------------------------------- */
 
@@ -18,9 +16,9 @@
 
 #define STACK_SIZE	1024	/* Minimum number of bytes for stack */
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
-#include <stdarg.h>
+#include <linux/stdarg.h>
 #include <linux/types.h>
 #include <linux/edd.h>
 #include <asm/setup.h>
@@ -28,55 +26,20 @@
 #include "bitops.h"
 #include "ctype.h"
 #include "cpuflags.h"
+#include "io.h"
 
 /* Useful macros */
-#define BUILD_BUG_ON(condition) ((void)sizeof(char[1 - 2*!!(condition)]))
-
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(*(x)))
 
 extern struct setup_header hdr;
 extern struct boot_params boot_params;
 
-#define cpu_relax()	asm volatile("rep; nop")
-
-/* Basic port I/O */
-static inline void outb(u8 v, u16 port)
-{
-	asm volatile("outb %0,%1" : : "a" (v), "dN" (port));
-}
-static inline u8 inb(u16 port)
-{
-	u8 v;
-	asm volatile("inb %1,%0" : "=a" (v) : "dN" (port));
-	return v;
-}
-
-static inline void outw(u16 v, u16 port)
-{
-	asm volatile("outw %0,%1" : : "a" (v), "dN" (port));
-}
-static inline u16 inw(u16 port)
-{
-	u16 v;
-	asm volatile("inw %1,%0" : "=a" (v) : "dN" (port));
-	return v;
-}
-
-static inline void outl(u32 v, u16 port)
-{
-	asm volatile("outl %0,%1" : : "a" (v), "dN" (port));
-}
-static inline u32 inl(u16 port)
-{
-	u32 v;
-	asm volatile("inl %1,%0" : "=a" (v) : "dN" (port));
-	return v;
-}
+#define cpu_relax()	asm volatile("pause")
 
 static inline void io_delay(void)
 {
 	const u16 DELAY_PORT = 0x80;
-	asm volatile("outb %%al,%0" : : "dN" (DELAY_PORT));
+	outb(0, DELAY_PORT);
 }
 
 /* These functions are used to reference data in other segments. */
@@ -192,15 +155,15 @@ static inline void wrgs32(u32 v, addr_t addr)
 static inline bool memcmp_fs(const void *s1, addr_t s2, size_t len)
 {
 	bool diff;
-	asm volatile("fs; repe; cmpsb" CC_SET(nz)
-		     : CC_OUT(nz) (diff), "+D" (s1), "+S" (s2), "+c" (len));
+	asm volatile("fs repe cmpsb"
+		     : "=@ccnz" (diff), "+D" (s1), "+S" (s2), "+c" (len));
 	return diff;
 }
 static inline bool memcmp_gs(const void *s1, addr_t s2, size_t len)
 {
 	bool diff;
-	asm volatile("gs; repe; cmpsb" CC_SET(nz)
-		     : CC_OUT(nz) (diff), "+D" (s1), "+S" (s2), "+c" (len));
+	asm volatile("gs repe cmpsb"
+		     : "=@ccnz" (diff), "+D" (s1), "+S" (s2), "+c" (len));
 	return diff;
 }
 
@@ -321,7 +284,7 @@ void query_edd(void);
 void __attribute__((noreturn)) die(void);
 
 /* memory.c */
-int detect_memory(void);
+void detect_memory(void);
 
 /* pm.c */
 void __attribute__((noreturn)) go_to_protected_mode(void);
@@ -342,7 +305,6 @@ void initregs(struct biosregs *regs);
 int strcmp(const char *str1, const char *str2);
 int strncmp(const char *cs, const char *ct, size_t count);
 size_t strnlen(const char *s, size_t maxlen);
-unsigned int atou(const char *s);
 unsigned long long simple_strtoull(const char *cp, char **endp, unsigned int base);
 size_t strlen(const char *s);
 char *strchr(const char *s, int c);
@@ -365,6 +327,6 @@ void probe_cards(int unsafe);
 /* video-vesa.c */
 void vesa_store_edid(void);
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif /* BOOT_BOOT_H */

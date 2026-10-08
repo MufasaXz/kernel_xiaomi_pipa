@@ -1,9 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <net/ip.h>
 #include <net/ipv6.h>
-#include <net/sctp/sctp.h>
 #include <linux/sctp.h>
 
 #include <linux/netfilter/x_tables.h>

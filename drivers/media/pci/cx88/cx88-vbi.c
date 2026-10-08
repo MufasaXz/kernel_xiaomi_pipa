@@ -158,7 +158,8 @@ static void buffer_finish(struct vb2_buffer *vb)
 	struct cx88_riscmem *risc = &buf->risc;
 
 	if (risc->cpu)
-		pci_free_consistent(dev->pci, risc->size, risc->cpu, risc->dma);
+		dma_free_coherent(&dev->pci->dev, risc->size, risc->cpu,
+				  risc->dma);
 	memset(risc, 0, sizeof(*risc));
 }
 
@@ -227,8 +228,6 @@ const struct vb2_ops cx8800_vbi_qops = {
 	.buf_prepare  = buffer_prepare,
 	.buf_finish = buffer_finish,
 	.buf_queue    = buffer_queue,
-	.wait_prepare = vb2_ops_wait_prepare,
-	.wait_finish = vb2_ops_wait_finish,
 	.start_streaming = start_streaming,
 	.stop_streaming = stop_streaming,
 };

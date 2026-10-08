@@ -16,7 +16,7 @@
  * OHCI is the main "non-Intel/VIA" standard for USB 1.1 host controller
  * interfaces (though some non-x86 Intel chips use it).  It supports
  * smarter hardware than UHCI.  A download link for the spec available
- * through the http://www.usb.org website.
+ * through the https://www.usb.org website.
  *
  * This file is licenced under the GPL.
  */
@@ -40,10 +40,11 @@
 #include <linux/dmapool.h>
 #include <linux/workqueue.h>
 #include <linux/debugfs.h>
+#include <linux/genalloc.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <asm/byteorder.h>
 
 
@@ -170,7 +171,7 @@ static int ohci_urb_enqueue (
 
 			/* 1 TD for setup, 1 for ACK, plus ... */
 			size = 2;
-			/* FALLTHROUGH */
+			fallthrough;
 		// case PIPE_INTERRUPT:
 		// case PIPE_BULK:
 		default:
@@ -180,8 +181,7 @@ static int ohci_urb_enqueue (
 				size++;
 			else if ((urb->transfer_flags & URB_ZERO_PACKET) != 0
 				&& (urb->transfer_buffer_length
-					% usb_maxpacket (urb->dev, pipe,
-						usb_pipeout (pipe))) == 0)
+					% usb_maxpacket(urb->dev, pipe)) == 0)
 				size++;
 			break;
 		case PIPE_ISOCHRONOUS: /* number of packets from URB */
@@ -190,8 +190,7 @@ static int ohci_urb_enqueue (
 	}
 
 	/* allocate the private part of the URB */
-	urb_priv = kzalloc (sizeof (urb_priv_t) + size * sizeof (struct td *),
-			mem_flags);
+	urb_priv = kzalloc(struct_size(urb_priv, td, size), mem_flags);
 	if (!urb_priv)
 		return -ENOMEM;
 	INIT_LIST_HEAD (&urb_priv->pending);
@@ -384,7 +383,7 @@ sanitize:
 			ed_free (ohci, ed);
 			break;
 		}
-		/* fall through */
+		fallthrough;
 	default:
 		/* caller was supposed to have unlinked any requests;
 		 * that's not our job.  can't recover; must leak ed.
@@ -456,7 +455,7 @@ static int ohci_init (struct ohci_hcd *ohci)
 	struct usb_hcd *hcd = ohci_to_hcd(ohci);
 
 	/* Accept arbitrarily long scatter-gather lists */
-	if (!(hcd->driver->flags & HCD_LOCAL_MEM))
+	if (!hcd->localmem_pool)
 		hcd->self.sg_tablesize = ~0;
 
 	if (distrust_firmware)
@@ -514,8 +513,15 @@ static int ohci_init (struct ohci_hcd *ohci)
 	timer_setup(&ohci->io_watchdog, io_watchdog_func, 0);
 	ohci->prev_frame_no = IO_WATCHDOG_OFF;
 
-	ohci->hcca = dma_alloc_coherent (hcd->self.controller,
-			sizeof(*ohci->hcca), &ohci->hcca_dma, GFP_KERNEL);
+	if (hcd->localmem_pool)
+		ohci->hcca = gen_pool_dma_alloc_align(hcd->localmem_pool,
+						sizeof(*ohci->hcca),
+						&ohci->hcca_dma, 256);
+	else
+		ohci->hcca = dma_alloc_coherent(hcd->self.controller,
+						sizeof(*ohci->hcca),
+						&ohci->hcca_dma,
+						GFP_KERNEL);
 	if (!ohci->hcca)
 		return -ENOMEM;
 
@@ -740,7 +746,8 @@ static int ohci_start(struct usb_hcd *hcd)
  */
 static void io_watchdog_func(struct timer_list *t)
 {
-	struct ohci_hcd	*ohci = from_timer(ohci, t, io_watchdog);
+	struct ohci_hcd	*ohci = timer_container_of(ohci, t,
+							  io_watchdog);
 	bool		takeback_all_pending = false;
 	u32		status;
 	u32		head;
@@ -882,6 +889,7 @@ static irqreturn_t ohci_irq (struct usb_hcd *hcd)
 	/* Check for an all 1's result which is a typical consequence
 	 * of dead, unclocked, or unplugged (CardBus...) devices
 	 */
+again:
 	if (ints == ~(u32)0) {
 		ohci->rh_state = OHCI_RH_HALTED;
 		ohci_dbg (ohci, "device removed!\n");
@@ -976,6 +984,13 @@ static irqreturn_t ohci_irq (struct usb_hcd *hcd)
 	}
 	spin_unlock(&ohci->lock);
 
+	/* repeat until all enabled interrupts are handled */
+	if (ohci->rh_state != OHCI_RH_HALTED) {
+		ints = ohci_readl(ohci, &regs->intrstatus);
+		if (ints && (ints & ohci_readl(ohci, &regs->intrenable)))
+			goto again;
+	}
+
 	return IRQ_HANDLED;
 }
 
@@ -989,7 +1004,7 @@ static void ohci_stop (struct usb_hcd *hcd)
 
 	if (quirk_nec(ohci))
 		flush_work(&ohci->nec_work);
-	del_timer_sync(&ohci->io_watchdog);
+	timer_delete_sync(&ohci->io_watchdog);
 	ohci->prev_frame_no = IO_WATCHDOG_OFF;
 
 	ohci_writel (ohci, OHCI_INTR_MIE, &ohci->regs->intrdisable);
@@ -1003,9 +1018,14 @@ static void ohci_stop (struct usb_hcd *hcd)
 	remove_debug_files (ohci);
 	ohci_mem_cleanup (ohci);
 	if (ohci->hcca) {
-		dma_free_coherent (hcd->self.controller,
-				sizeof *ohci->hcca,
-				ohci->hcca, ohci->hcca_dma);
+		if (hcd->localmem_pool)
+			gen_pool_free(hcd->localmem_pool,
+				      (unsigned long)ohci->hcca,
+				      sizeof(*ohci->hcca));
+		else
+			dma_free_coherent(hcd->self.controller,
+					  sizeof(*ohci->hcca),
+					  ohci->hcca, ohci->hcca_dma);
 		ohci->hcca = NULL;
 		ohci->hcca_dma = 0;
 	}
@@ -1042,7 +1062,7 @@ int ohci_restart(struct ohci_hcd *ohci)
 			ed->ed_next = ohci->ed_rm_list;
 			ed->ed_prev = NULL;
 			ohci->ed_rm_list = ed;
-			/* FALLTHROUGH */
+			fallthrough;
 		case ED_UNLINK:
 			break;
 		default:
@@ -1178,7 +1198,7 @@ static const struct hc_driver ohci_hc_driver = {
 	 * generic hardware linkage
 	*/
 	.irq =                  ohci_irq,
-	.flags =                HCD_MEMORY | HCD_USB11,
+	.flags =                HCD_MEMORY | HCD_DMA | HCD_USB11,
 
 	/*
 	* basic lifecycle operations
@@ -1253,11 +1273,6 @@ MODULE_LICENSE ("GPL");
 #define SM501_OHCI_DRIVER	ohci_hcd_sm501_driver
 #endif
 
-#ifdef CONFIG_MFD_TC6393XB
-#include "ohci-tmio.c"
-#define TMIO_OHCI_DRIVER	ohci_hcd_tmio_driver
-#endif
-
 static int __init ohci_hcd_mod_init(void)
 {
 	int retval = 0;
@@ -1265,7 +1280,6 @@ static int __init ohci_hcd_mod_init(void)
 	if (usb_disabled())
 		return -ENODEV;
 
-	printk(KERN_INFO "%s: " DRIVER_DESC "\n", hcd_name);
 	pr_debug ("%s: block sizes: ed %zd td %zd\n", hcd_name,
 		sizeof (struct ed), sizeof (struct td));
 	set_bit(USB_OHCI_LOADED, &usb_hcds_loaded);
@@ -1296,19 +1310,9 @@ static int __init ohci_hcd_mod_init(void)
 		goto error_sm501;
 #endif
 
-#ifdef TMIO_OHCI_DRIVER
-	retval = platform_driver_register(&TMIO_OHCI_DRIVER);
-	if (retval < 0)
-		goto error_tmio;
-#endif
-
 	return retval;
 
 	/* Error path */
-#ifdef TMIO_OHCI_DRIVER
-	platform_driver_unregister(&TMIO_OHCI_DRIVER);
- error_tmio:
-#endif
 #ifdef SM501_OHCI_DRIVER
 	platform_driver_unregister(&SM501_OHCI_DRIVER);
  error_sm501:
@@ -1335,9 +1339,6 @@ module_init(ohci_hcd_mod_init);
 
 static void __exit ohci_hcd_mod_exit(void)
 {
-#ifdef TMIO_OHCI_DRIVER
-	platform_driver_unregister(&TMIO_OHCI_DRIVER);
-#endif
 #ifdef SM501_OHCI_DRIVER
 	platform_driver_unregister(&SM501_OHCI_DRIVER);
 #endif

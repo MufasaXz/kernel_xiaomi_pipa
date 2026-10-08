@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Core driver for ams AS3722 PMICs
  *
@@ -6,20 +7,6 @@
  *
  * Author: Florian Lobmaier <florian.lobmaier@ams.com>
  * Author: Laxman Dewangan <ldewangan@nvidia.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <linux/err.h>
@@ -37,21 +24,11 @@
 #define AS3722_DEVICE_ID	0x0C
 
 static const struct resource as3722_rtc_resource[] = {
-	{
-		.name = "as3722-rtc-alarm",
-		.start = AS3722_IRQ_RTC_ALARM,
-		.end = AS3722_IRQ_RTC_ALARM,
-		.flags = IORESOURCE_IRQ,
-	},
+	DEFINE_RES_IRQ_NAMED(AS3722_IRQ_RTC_ALARM, "as3722-rtc-alarm"),
 };
 
 static const struct resource as3722_adc_resource[] = {
-	{
-		.name = "as3722-adc",
-		.start = AS3722_IRQ_ADC,
-		.end = AS3722_IRQ_ADC,
-		.flags = IORESOURCE_IRQ,
-	},
+	DEFINE_RES_IRQ_NAMED(AS3722_IRQ_ADC, "as3722-adc"),
 };
 
 static const struct mfd_cell as3722_devs[] = {
@@ -322,7 +299,7 @@ static const struct regmap_config as3722_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
 	.max_register = AS3722_MAX_REGISTER,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 	.rd_table = &as3722_readable_table,
 	.wr_table = &as3722_writable_table,
 	.volatile_table = &as3722_volatile_table,
@@ -356,8 +333,7 @@ static int as3722_i2c_of_probe(struct i2c_client *i2c,
 	return 0;
 }
 
-static int as3722_i2c_probe(struct i2c_client *i2c,
-			const struct i2c_device_id *id)
+static int as3722_i2c_probe(struct i2c_client *i2c)
 {
 	struct as3722 *as3722;
 	unsigned long irq_flags;
@@ -418,7 +394,9 @@ static int as3722_i2c_probe(struct i2c_client *i2c,
 		return ret;
 	}
 
-	device_init_wakeup(as3722->dev, true);
+	ret = devm_device_init_wakeup(as3722->dev);
+	if (ret)
+		return dev_err_probe(as3722->dev, ret, "Failed to init wakeup\n");
 
 	dev_dbg(as3722->dev, "AS3722 core driver initialized successfully\n");
 	return 0;
@@ -454,8 +432,8 @@ static const struct of_device_id as3722_of_match[] = {
 MODULE_DEVICE_TABLE(of, as3722_of_match);
 
 static const struct i2c_device_id as3722_i2c_id[] = {
-	{ "as3722", 0 },
-	{},
+	{ "as3722" },
+	{}
 };
 MODULE_DEVICE_TABLE(i2c, as3722_i2c_id);
 

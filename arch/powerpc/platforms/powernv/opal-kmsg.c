@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * kmsg dumper that ensures the OPAL console fully flushes panic messages
  *
  * Author: Russell Currey <ruscur@russell.cc>
  *
  * Copyright 2015 IBM Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the License, or (at your
- * option) any later version.
  */
 
 #include <linux/kmsg_dump.h>
@@ -24,13 +20,13 @@
  * message, it just ensures that OPAL completely flushes the console buffer.
  */
 static void kmsg_dump_opal_console_flush(struct kmsg_dumper *dumper,
-				     enum kmsg_dump_reason reason)
+				     struct kmsg_dump_detail *detail)
 {
 	/*
 	 * Outside of a panic context the pollers will continue to run,
 	 * so we don't need to do any special flushing.
 	 */
-	if (reason != KMSG_DUMP_PANIC)
+	if (detail->reason != KMSG_DUMP_PANIC)
 		return;
 
 	opal_flush_console(0);

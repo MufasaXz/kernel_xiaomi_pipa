@@ -33,8 +33,6 @@ struct camss_video_ops {
 			     enum vb2_buffer_state state);
 };
 
-struct camss_format_info;
-
 struct camss_video {
 	struct camss *camss;
 	struct vb2_queue vb2_q;
@@ -52,10 +50,8 @@ struct camss_video {
 	unsigned int nformats;
 };
 
-void msm_video_stop_streaming(struct camss_video *video);
-
 int msm_video_register(struct camss_video *video, struct v4l2_device *v4l2_dev,
-		       const char *name, int is_pix);
+		       const char *name);
 
 void msm_video_unregister(struct camss_video *video);
 

@@ -1,14 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2013, 2019, The Linux Foundation. All rights reserved.
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Copyright (c) 2013, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/kernel.h>
@@ -422,8 +414,6 @@ static int _freq_tbl_determine_rate(struct clk_hw *hw, const struct freq_tbl *f,
 
 	clk_flags = clk_hw_get_flags(hw);
 	p = clk_hw_get_parent_by_index(hw, index);
-	if (!p)
-		return -EINVAL;
 	if (clk_flags & CLK_SET_RATE_PARENT) {
 		rate = rate * f->pre_div;
 		if (f->n) {
@@ -433,7 +423,7 @@ static int _freq_tbl_determine_rate(struct clk_hw *hw, const struct freq_tbl *f,
 			rate = tmp;
 		}
 	} else {
-		rate =  clk_hw_get_rate(p);
+		rate = clk_hw_get_rate(p);
 	}
 	req->best_parent_hw = p;
 	req->best_parent_rate = rate;
@@ -475,8 +465,6 @@ static int clk_rcg_bypass_determine_rate(struct clk_hw *hw,
 	int index = qcom_find_src_index(hw, rcg->s.parent_map, f->src);
 
 	req->best_parent_hw = p = clk_hw_get_parent_by_index(hw, index);
-	if (!p)
-		return -EINVAL;
 	req->best_parent_rate = clk_hw_round_rate(p, req->rate);
 	req->rate = req->best_parent_rate;
 
@@ -532,6 +520,19 @@ static int clk_rcg_set_rate(struct clk_hw *hw, unsigned long rate,
 	const struct freq_tbl *f;
 
 	f = qcom_find_freq(rcg->freq_tbl, rate);
+	if (!f)
+		return -EINVAL;
+
+	return __clk_rcg_set_rate(rcg, f);
+}
+
+static int clk_rcg_set_floor_rate(struct clk_hw *hw, unsigned long rate,
+				  unsigned long parent_rate)
+{
+	struct clk_rcg *rcg = to_clk_rcg(hw);
+	const struct freq_tbl *f;
+
+	f = qcom_find_freq_floor(rcg->freq_tbl, rate);
 	if (!f)
 		return -EINVAL;
 
@@ -596,6 +597,7 @@ struct frac_entry {
 };
 
 static const struct frac_entry pixel_table[] = {
+	{ 1, 1 },
 	{ 1, 2 },
 	{ 1, 3 },
 	{ 3, 16 },
@@ -827,6 +829,17 @@ const struct clk_ops clk_rcg_ops = {
 	.set_rate = clk_rcg_set_rate,
 };
 EXPORT_SYMBOL_GPL(clk_rcg_ops);
+
+const struct clk_ops clk_rcg_floor_ops = {
+	.enable = clk_enable_regmap,
+	.disable = clk_disable_regmap,
+	.get_parent = clk_rcg_get_parent,
+	.set_parent = clk_rcg_set_parent,
+	.recalc_rate = clk_rcg_recalc_rate,
+	.determine_rate = clk_rcg_determine_rate,
+	.set_rate = clk_rcg_set_floor_rate,
+};
+EXPORT_SYMBOL_GPL(clk_rcg_floor_ops);
 
 const struct clk_ops clk_rcg_bypass_ops = {
 	.enable = clk_enable_regmap,

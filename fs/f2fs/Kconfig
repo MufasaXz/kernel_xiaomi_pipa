@@ -1,11 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0-only
 config F2FS_FS
 	tristate "F2FS filesystem support"
 	depends on BLOCK
+	select BUFFER_HEAD
 	select NLS
-	select CRYPTO
-	select CRYPTO_CRC32
+	select CRC32
 	select F2FS_FS_XATTR if FS_ENCRYPTION
 	select FS_ENCRYPTION_ALGS if FS_ENCRYPTION
+	select FS_IOMAP
 	select LZ4_COMPRESS if F2FS_FS_LZ4
 	select LZ4_DECOMPRESS if F2FS_FS_LZ4
 	select LZ4HC_COMPRESS if F2FS_FS_LZ4HC
@@ -81,15 +83,6 @@ config F2FS_CHECK_FS
 	  Enables BUG_ONs which check the filesystem consistency in runtime.
 
 	  If you want to improve the performance, say N.
-
-config F2FS_FS_ENCRYPTION
-	bool "F2FS Encryption"
-	depends on F2FS_FS
-	select FS_ENCRYPTION
-	help
-	  This kconfig symbol is deprecated; now it just selects
-	  FS_ENCRYPTION.  Use CONFIG_FS_ENCRYPTION=y in new config
-	  files.
 
 config F2FS_FAULT_INJECTION
 	bool "F2FS fault injection facility"

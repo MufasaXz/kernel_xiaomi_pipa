@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	AARP:		An implementation of the AppleTalk AARP protocol for
  *			Ethernet 'ELAP'.
@@ -13,12 +14,6 @@
  *		Use neighbour discovery code.
  *		Token Ring Support.
  *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
- *
- *
  *	References:
  *		Inside AppleTalk (2nd Ed).
  *	Fixes:
@@ -26,7 +21,6 @@
  *		Rob Newberry	-	Added proxy AARP and AARP proc fs,
  *					moved probing from DDP module.
  *		Arnaldo C. Melo -	don't mangle rx packets
- *
  */
 
 #include <linux/if_arp.h>
@@ -454,49 +448,18 @@ static struct atalk_addr *__aarp_proxy_find(struct net_device *dev,
 	return a ? sa : NULL;
 }
 
-/*
- * Probe a Phase 1 device or a device that requires its Net:Node to
- * be set via an ioctl.
- */
-static void aarp_send_probe_phase1(struct atalk_iface *iface)
-{
-	struct ifreq atreq;
-	struct sockaddr_at *sa = (struct sockaddr_at *)&atreq.ifr_addr;
-	const struct net_device_ops *ops = iface->dev->netdev_ops;
-
-	sa->sat_addr.s_node = iface->address.s_node;
-	sa->sat_addr.s_net = ntohs(iface->address.s_net);
-
-	/* We pass the Net:Node to the drivers/cards by a Device ioctl. */
-	if (!(ops->ndo_do_ioctl(iface->dev, &atreq, SIOCSIFADDR))) {
-		ops->ndo_do_ioctl(iface->dev, &atreq, SIOCGIFADDR);
-		if (iface->address.s_net != htons(sa->sat_addr.s_net) ||
-		    iface->address.s_node != sa->sat_addr.s_node)
-			iface->status |= ATIF_PROBE_FAIL;
-
-		iface->address.s_net  = htons(sa->sat_addr.s_net);
-		iface->address.s_node = sa->sat_addr.s_node;
-	}
-}
-
-
 void aarp_probe_network(struct atalk_iface *atif)
 {
-	if (atif->dev->type == ARPHRD_LOCALTLK ||
-	    atif->dev->type == ARPHRD_PPP)
-		aarp_send_probe_phase1(atif);
-	else {
-		unsigned int count;
+	unsigned int count;
 
-		for (count = 0; count < AARP_RETRANSMIT_LIMIT; count++) {
-			aarp_send_probe(atif->dev, &atif->address);
+	for (count = 0; count < AARP_RETRANSMIT_LIMIT; count++) {
+		aarp_send_probe(atif->dev, &atif->address);
 
-			/* Defer 1/10th */
-			msleep(100);
+		/* Defer 1/10th */
+		msleep(100);
 
-			if (atif->status & ATIF_PROBE_FAIL)
-				break;
-		}
+		if (atif->status & ATIF_PROBE_FAIL)
+			break;
 	}
 }
 
@@ -688,7 +651,7 @@ out_unlock:
 
 sendit:
 	if (skb->sk)
-		skb->priority = skb->sk->sk_priority;
+		skb->priority = READ_ONCE(skb->sk->sk_priority);
 	if (dev_queue_xmit(skb))
 		goto drop;
 sent:
@@ -792,7 +755,7 @@ static int aarp_rcv(struct sk_buff *skb, struct net_device *dev,
 	if (a && a->status & ATIF_PROBE) {
 		a->status |= ATIF_PROBE_FAIL;
 		/*
-		 * we do not respond to probe or request packets for
+		 * we do not respond to probe or request packets of
 		 * this address while we are probing this address
 		 */
 		goto unlock;
@@ -911,7 +874,7 @@ int __init aarp_proto_init(void)
 	add_timer(&aarp_timer);
 	rc = register_netdevice_notifier(&aarp_notifier);
 	if (rc) {
-		del_timer_sync(&aarp_timer);
+		timer_delete_sync(&aarp_timer);
 		unregister_snap_client(aarp_dl);
 	}
 	return rc;
@@ -1066,7 +1029,7 @@ const struct seq_operations aarp_seq_ops = {
 /* General module cleanup. Called from cleanup_module() in ddp.c. */
 void aarp_cleanup_module(void)
 {
-	del_timer_sync(&aarp_timer);
+	timer_delete_sync(&aarp_timer);
 	unregister_netdevice_notifier(&aarp_notifier);
 	unregister_snap_client(aarp_dl);
 	aarp_purge();

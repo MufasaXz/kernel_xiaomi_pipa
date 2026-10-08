@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* AFS client file system
  *
  * Copyright (C) 2002,5 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/module.h>
@@ -45,8 +41,6 @@ const char afs_init_sysname[] = "arm_linux26";
 const char afs_init_sysname[] = "aarch64_linux26";
 #elif defined(CONFIG_X86_32)
 const char afs_init_sysname[] = "i386_linux26";
-#elif defined(CONFIG_IA64)
-const char afs_init_sysname[] = "ia64_linux26";
 #elif defined(CONFIG_PPC64)
 const char afs_init_sysname[] = "ppc64_linux26";
 #elif defined(CONFIG_PPC32)
@@ -79,27 +73,24 @@ static int __net_init afs_net_init(struct net *net_ns)
 	generate_random_uuid((unsigned char *)&net->uuid);
 
 	INIT_WORK(&net->charge_preallocation_work, afs_charge_preallocation);
+	INIT_WORK(&net->rx_oob_work, afs_process_oob_queue);
 	mutex_init(&net->socket_mutex);
 
 	net->cells = RB_ROOT;
-	seqlock_init(&net->cells_lock);
-	INIT_WORK(&net->cells_manager, afs_manage_cells);
-	timer_setup(&net->cells_timer, afs_cells_timer, 0);
-
+	idr_init(&net->cells_dyn_ino);
+	init_rwsem(&net->cells_lock);
+	mutex_init(&net->cells_alias_lock);
 	mutex_init(&net->proc_cells_lock);
 	INIT_HLIST_HEAD(&net->proc_cells);
 
 	seqlock_init(&net->fs_lock);
-	net->fs_servers = RB_ROOT;
-	INIT_LIST_HEAD(&net->fs_updates);
+	INIT_LIST_HEAD(&net->fs_probe_fast);
+	INIT_LIST_HEAD(&net->fs_probe_slow);
 	INIT_HLIST_HEAD(&net->fs_proc);
 
-	INIT_HLIST_HEAD(&net->fs_addresses4);
-	INIT_HLIST_HEAD(&net->fs_addresses6);
-	seqlock_init(&net->fs_addr_lock);
-
-	INIT_WORK(&net->fs_manager, afs_manage_servers);
-	timer_setup(&net->fs_timer, afs_servers_timer, 0);
+	INIT_WORK(&net->fs_prober, afs_fs_probe_dispatcher);
+	timer_setup(&net->fs_probe_timer, afs_fs_probe_timer, 0);
+	atomic_set(&net->servers_outstanding, 1);
 
 	ret = -ENOMEM;
 	sysnames = kzalloc(sizeof(*sysnames), GFP_KERNEL);
@@ -130,14 +121,16 @@ static int __net_init afs_net_init(struct net *net_ns)
 
 error_open_socket:
 	net->live = false;
+	afs_fs_probe_cleanup(net);
 	afs_cell_purge(net);
-	afs_purge_servers(net);
+	afs_wait_for_servers(net);
 error_cell_init:
 	net->live = false;
 	afs_proc_cleanup(net);
 error_proc:
 	afs_put_sysnames(net->sysnames);
 error_sysnames:
+	idr_destroy(&net->cells_dyn_ino);
 	net->live = false;
 	return ret;
 }
@@ -150,11 +143,14 @@ static void __net_exit afs_net_exit(struct net *net_ns)
 	struct afs_net *net = afs_net(net_ns);
 
 	net->live = false;
+	afs_fs_probe_cleanup(net);
 	afs_cell_purge(net);
-	afs_purge_servers(net);
+	afs_wait_for_servers(net);
 	afs_close_socket(net);
 	afs_proc_cleanup(net);
 	afs_put_sysnames(net->sysnames);
+	idr_destroy(&net->cells_dyn_ino);
+	kfree_rcu(rcu_access_pointer(net->address_prefs), rcu);
 }
 
 static struct pernet_operations afs_net_ops = {
@@ -173,22 +169,15 @@ static int __init afs_init(void)
 
 	printk(KERN_INFO "kAFS: Red Hat AFS client v0.1 registering.\n");
 
-	afs_wq = alloc_workqueue("afs", 0, 0);
+	afs_wq = alloc_workqueue("afs", WQ_PERCPU, 0);
 	if (!afs_wq)
 		goto error_afs_wq;
-	afs_async_calls = alloc_workqueue("kafsd", WQ_MEM_RECLAIM, 0);
+	afs_async_calls = alloc_workqueue("kafsd", WQ_MEM_RECLAIM | WQ_UNBOUND, 0);
 	if (!afs_async_calls)
 		goto error_async;
-	afs_lock_manager = alloc_workqueue("kafs_lockd", WQ_MEM_RECLAIM, 0);
+	afs_lock_manager = alloc_workqueue("kafs_lockd", WQ_MEM_RECLAIM | WQ_PERCPU, 0);
 	if (!afs_lock_manager)
 		goto error_lockmgr;
-
-#ifdef CONFIG_AFS_FSCACHE
-	/* we want to be able to cache */
-	ret = fscache_register_netfs(&afs_cache_netfs);
-	if (ret < 0)
-		goto error_cache;
-#endif
 
 	ret = register_pernet_device(&afs_net_ops);
 	if (ret < 0)
@@ -212,10 +201,6 @@ error_proc:
 error_fs:
 	unregister_pernet_device(&afs_net_ops);
 error_net:
-#ifdef CONFIG_AFS_FSCACHE
-	fscache_unregister_netfs(&afs_cache_netfs);
-error_cache:
-#endif
 	destroy_workqueue(afs_lock_manager);
 error_lockmgr:
 	destroy_workqueue(afs_async_calls);
@@ -242,9 +227,6 @@ static void __exit afs_exit(void)
 	proc_remove(afs_proc_symlink);
 	afs_fs_exit();
 	unregister_pernet_device(&afs_net_ops);
-#ifdef CONFIG_AFS_FSCACHE
-	fscache_unregister_netfs(&afs_cache_netfs);
-#endif
 	destroy_workqueue(afs_lock_manager);
 	destroy_workqueue(afs_async_calls);
 	destroy_workqueue(afs_wq);

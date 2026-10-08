@@ -33,46 +33,52 @@
 #include <rdma/uverbs_std_types.h>
 #include "rdma_core.h"
 #include "uverbs.h"
+#include "restrack.h"
 
 static int uverbs_free_cq(struct ib_uobject *uobject,
-			  enum rdma_remove_reason why)
+			  enum rdma_remove_reason why,
+			  struct uverbs_attr_bundle *attrs)
 {
 	struct ib_cq *cq = uobject->object;
 	struct ib_uverbs_event_queue *ev_queue = cq->cq_context;
 	struct ib_ucq_object *ucq =
-		container_of(uobject, struct ib_ucq_object, uobject);
+		container_of(uobject, struct ib_ucq_object, uevent.uobject);
 	int ret;
 
-	ret = ib_destroy_cq(cq);
-	if (ib_is_destroy_retryable(ret, why, uobject))
+	ret = ib_destroy_cq_user(cq, &attrs->driver_udata);
+	if (ret)
 		return ret;
 
 	ib_uverbs_release_ucq(
-		uobject->context->ufile,
 		ev_queue ? container_of(ev_queue,
 					struct ib_uverbs_completion_event_file,
 					ev_queue) :
 			   NULL,
 		ucq);
-	return ret;
+	return 0;
 }
 
 static int UVERBS_HANDLER(UVERBS_METHOD_CQ_CREATE)(
-	struct ib_uverbs_file *file, struct uverbs_attr_bundle *attrs)
+	struct uverbs_attr_bundle *attrs)
 {
 	struct ib_ucq_object *obj = container_of(
 		uverbs_attr_get_uobject(attrs, UVERBS_ATTR_CREATE_CQ_HANDLE),
-		typeof(*obj), uobject);
-	struct ib_device *ib_dev = obj->uobject.context->device;
-	struct ib_udata uhw;
-	int ret;
-	u64 user_handle;
+		typeof(*obj), uevent.uobject);
+	struct ib_uverbs_completion_event_file *ev_file = NULL;
+	struct ib_device *ib_dev = attrs->context->device;
+	struct ib_umem_dmabuf *umem_dmabuf;
 	struct ib_cq_init_attr attr = {};
-	struct ib_cq                   *cq;
-	struct ib_uverbs_completion_event_file    *ev_file = NULL;
 	struct ib_uobject *ev_file_uobj;
+	struct ib_umem *umem = NULL;
+	u64 buffer_length;
+	u64 buffer_offset;
+	struct ib_cq *cq;
+	u64 user_handle;
+	u64 buffer_va;
+	int buffer_fd;
+	int ret;
 
-	if (!ib_dev->create_cq || !ib_dev->destroy_cq)
+	if ((!ib_dev->ops.create_cq && !ib_dev->ops.create_cq_umem) || !ib_dev->ops.destroy_cq)
 		return -EOPNOTSUPP;
 
 	ret = uverbs_copy_from(&attr.comp_vector, attrs,
@@ -101,46 +107,111 @@ static int UVERBS_HANDLER(UVERBS_METHOD_CQ_CREATE)(
 		uverbs_uobject_get(ev_file_uobj);
 	}
 
-	if (attr.comp_vector >= file->device->num_comp_vectors) {
+	obj->uevent.event_file = ib_uverbs_get_async_event(
+		attrs, UVERBS_ATTR_CREATE_CQ_EVENT_FD);
+
+	if (attr.comp_vector >= attrs->ufile->device->num_comp_vectors) {
 		ret = -EINVAL;
 		goto err_event_file;
 	}
 
-	obj->comp_events_reported  = 0;
-	obj->async_events_reported = 0;
 	INIT_LIST_HEAD(&obj->comp_list);
-	INIT_LIST_HEAD(&obj->async_list);
+	INIT_LIST_HEAD(&obj->uevent.event_list);
 
-	/* Temporary, only until drivers get the new uverbs_attr_bundle */
-	create_udata(attrs, &uhw);
+	if (uverbs_attr_is_valid(attrs, UVERBS_ATTR_CREATE_CQ_BUFFER_VA)) {
 
-	cq = ib_dev->create_cq(ib_dev, &attr, obj->uobject.context, &uhw);
-	if (IS_ERR(cq)) {
-		ret = PTR_ERR(cq);
+		ret = uverbs_copy_from(&buffer_va, attrs, UVERBS_ATTR_CREATE_CQ_BUFFER_VA);
+		if (ret)
+			goto err_event_file;
+
+		ret = uverbs_copy_from(&buffer_length, attrs, UVERBS_ATTR_CREATE_CQ_BUFFER_LENGTH);
+		if (ret)
+			goto err_event_file;
+
+		if (uverbs_attr_is_valid(attrs, UVERBS_ATTR_CREATE_CQ_BUFFER_FD) ||
+		    uverbs_attr_is_valid(attrs, UVERBS_ATTR_CREATE_CQ_BUFFER_OFFSET) ||
+		    !ib_dev->ops.create_cq_umem) {
+			ret = -EINVAL;
+			goto err_event_file;
+		}
+
+		umem = ib_umem_get(ib_dev, buffer_va, buffer_length, IB_ACCESS_LOCAL_WRITE);
+		if (IS_ERR(umem)) {
+			ret = PTR_ERR(umem);
+			goto err_event_file;
+		}
+	} else if (uverbs_attr_is_valid(attrs, UVERBS_ATTR_CREATE_CQ_BUFFER_FD)) {
+
+		ret = uverbs_get_raw_fd(&buffer_fd, attrs, UVERBS_ATTR_CREATE_CQ_BUFFER_FD);
+		if (ret)
+			goto err_event_file;
+
+		ret = uverbs_copy_from(&buffer_offset, attrs, UVERBS_ATTR_CREATE_CQ_BUFFER_OFFSET);
+		if (ret)
+			goto err_event_file;
+
+		ret = uverbs_copy_from(&buffer_length, attrs, UVERBS_ATTR_CREATE_CQ_BUFFER_LENGTH);
+		if (ret)
+			goto err_event_file;
+
+		if (uverbs_attr_is_valid(attrs, UVERBS_ATTR_CREATE_CQ_BUFFER_VA) ||
+		    !ib_dev->ops.create_cq_umem) {
+			ret = -EINVAL;
+			goto err_event_file;
+		}
+
+		umem_dmabuf = ib_umem_dmabuf_get_pinned(ib_dev, buffer_offset, buffer_length,
+							buffer_fd, IB_ACCESS_LOCAL_WRITE);
+		if (IS_ERR(umem_dmabuf)) {
+			ret = PTR_ERR(umem_dmabuf);
+			goto err_event_file;
+		}
+		umem = &umem_dmabuf->umem;
+	} else if (uverbs_attr_is_valid(attrs, UVERBS_ATTR_CREATE_CQ_BUFFER_OFFSET) ||
+		   uverbs_attr_is_valid(attrs, UVERBS_ATTR_CREATE_CQ_BUFFER_LENGTH) ||
+		   !ib_dev->ops.create_cq) {
+		ret = -EINVAL;
+		goto err_event_file;
+	}
+
+	cq = rdma_zalloc_drv_obj(ib_dev, ib_cq);
+	if (!cq) {
+		ret = -ENOMEM;
+		ib_umem_release(umem);
 		goto err_event_file;
 	}
 
 	cq->device        = ib_dev;
-	cq->uobject       = &obj->uobject;
+	cq->uobject       = obj;
 	cq->comp_handler  = ib_uverbs_comp_handler;
 	cq->event_handler = ib_uverbs_cq_event_handler;
 	cq->cq_context    = ev_file ? &ev_file->ev_queue : NULL;
-	obj->uobject.object = cq;
-	obj->uobject.user_handle = user_handle;
 	atomic_set(&cq->usecnt, 0);
-	cq->res.type = RDMA_RESTRACK_CQ;
+
+	rdma_restrack_new(&cq->res, RDMA_RESTRACK_CQ);
+	rdma_restrack_set_name(&cq->res, NULL);
+
+	ret = umem ? ib_dev->ops.create_cq_umem(cq, &attr, umem, attrs) :
+		ib_dev->ops.create_cq(cq, &attr, attrs);
+	if (ret)
+		goto err_free;
+
+	obj->uevent.uobject.object = cq;
+	obj->uevent.uobject.user_handle = user_handle;
 	rdma_restrack_add(&cq->res);
+	uverbs_finalize_uobj_create(attrs, UVERBS_ATTR_CREATE_CQ_HANDLE);
 
 	ret = uverbs_copy_to(attrs, UVERBS_ATTR_CREATE_CQ_RESP_CQE, &cq->cqe,
 			     sizeof(cq->cqe));
-	if (ret)
-		goto err_cq;
+	return ret;
 
-	return 0;
-err_cq:
-	ib_destroy_cq(cq);
-
+err_free:
+	ib_umem_release(umem);
+	rdma_restrack_put(&cq->res);
+	kfree(cq);
 err_event_file:
+	if (obj->uevent.event_file)
+		uverbs_uobject_put(&obj->uevent.event_file->uobj);
 	if (ev_file)
 		uverbs_uobject_put(ev_file_uobj);
 	return ret;
@@ -170,18 +241,33 @@ DECLARE_UVERBS_NAMED_METHOD(
 	UVERBS_ATTR_PTR_OUT(UVERBS_ATTR_CREATE_CQ_RESP_CQE,
 			    UVERBS_ATTR_TYPE(u32),
 			    UA_MANDATORY),
+	UVERBS_ATTR_FD(UVERBS_ATTR_CREATE_CQ_EVENT_FD,
+		       UVERBS_OBJECT_ASYNC_EVENT,
+		       UVERBS_ACCESS_READ,
+		       UA_OPTIONAL),
+	UVERBS_ATTR_PTR_IN(UVERBS_ATTR_CREATE_CQ_BUFFER_VA,
+			   UVERBS_ATTR_TYPE(u64),
+			   UA_OPTIONAL),
+	UVERBS_ATTR_PTR_IN(UVERBS_ATTR_CREATE_CQ_BUFFER_LENGTH,
+			   UVERBS_ATTR_TYPE(u64),
+			   UA_OPTIONAL),
+	UVERBS_ATTR_RAW_FD(UVERBS_ATTR_CREATE_CQ_BUFFER_FD,
+			   UA_OPTIONAL),
+	UVERBS_ATTR_PTR_IN(UVERBS_ATTR_CREATE_CQ_BUFFER_OFFSET,
+			   UVERBS_ATTR_TYPE(u64),
+			   UA_OPTIONAL),
 	UVERBS_ATTR_UHW());
 
 static int UVERBS_HANDLER(UVERBS_METHOD_CQ_DESTROY)(
-	struct ib_uverbs_file *file, struct uverbs_attr_bundle *attrs)
+	struct uverbs_attr_bundle *attrs)
 {
 	struct ib_uobject *uobj =
 		uverbs_attr_get_uobject(attrs, UVERBS_ATTR_DESTROY_CQ_HANDLE);
 	struct ib_ucq_object *obj =
-		container_of(uobj, struct ib_ucq_object, uobject);
+		container_of(uobj, struct ib_ucq_object, uevent.uobject);
 	struct ib_uverbs_destroy_cq_resp resp = {
 		.comp_events_reported = obj->comp_events_reported,
-		.async_events_reported = obj->async_events_reported
+		.async_events_reported = obj->uevent.events_reported
 	};
 
 	return uverbs_copy_to(attrs, UVERBS_ATTR_DESTROY_CQ_RESP, &resp,
@@ -201,9 +287,12 @@ DECLARE_UVERBS_NAMED_METHOD(
 DECLARE_UVERBS_NAMED_OBJECT(
 	UVERBS_OBJECT_CQ,
 	UVERBS_TYPE_ALLOC_IDR_SZ(sizeof(struct ib_ucq_object), uverbs_free_cq),
-
-#if IS_ENABLED(CONFIG_INFINIBAND_EXP_LEGACY_VERBS_NEW_UAPI)
 	&UVERBS_METHOD(UVERBS_METHOD_CQ_CREATE),
 	&UVERBS_METHOD(UVERBS_METHOD_CQ_DESTROY)
-#endif
 );
+
+const struct uapi_definition uverbs_def_obj_cq[] = {
+	UAPI_DEF_CHAIN_OBJ_TREE_NAMED(UVERBS_OBJECT_CQ,
+				      UAPI_DEF_OBJ_NEEDS_FN(destroy_cq)),
+	{}
+};

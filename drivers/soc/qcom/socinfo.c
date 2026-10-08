@@ -1,2198 +1,857 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2009-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2009-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2019, Linaro Ltd.
  */
 
-#define pr_fmt(fmt) "%s: " fmt, __func__
-
-#include <linux/export.h>
-#include <linux/module.h>
+#include <linux/debugfs.h>
 #include <linux/err.h>
-#include <linux/of.h>
+#include <linux/module.h>
 #include <linux/platform_device.h>
-#include <linux/sys_soc.h>
+#include <linux/random.h>
 #include <linux/slab.h>
-#include <linux/stat.h>
+#include <linux/soc/qcom/smem.h>
+#include <linux/soc/qcom/socinfo.h>
 #include <linux/string.h>
+#include <linux/stringify.h>
+#include <linux/sys_soc.h>
 #include <linux/types.h>
 
-#include <asm/system_misc.h>
+#include <linux/unaligned.h>
 
-#include <soc/qcom/socinfo.h>
-#include <linux/soc/qcom/smem.h>
-#include <soc/qcom/boot_stats.h>
-#include <asm/unaligned.h>
+#include <dt-bindings/arm/qcom,ids.h>
 
-#define BUILD_ID_LENGTH 32
-#define CHIP_ID_LENGTH 32
-#define SMEM_IMAGE_VERSION_BLOCKS_COUNT 32
-#define SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE 128
-#define SMEM_IMAGE_VERSION_SIZE 4096
-#define SMEM_IMAGE_VERSION_NAME_SIZE 75
-#define SMEM_IMAGE_VERSION_VARIANT_SIZE 20
-#define SMEM_IMAGE_VERSION_VARIANT_OFFSET 75
-#define SMEM_IMAGE_VERSION_OEM_SIZE 33
-#define SMEM_IMAGE_VERSION_OEM_OFFSET 95
-#define SMEM_IMAGE_VERSION_PARTITION_APPS 10
+/* Helper macros to create soc_id table */
+#define qcom_board_id(id) QCOM_ID_ ## id, __stringify(id)
+#define qcom_board_id_named(id, name) QCOM_ID_ ## id, (name)
 
-static DECLARE_RWSEM(current_image_rwsem);
-enum {
-	HW_PLATFORM_UNKNOWN = 0,
-	HW_PLATFORM_SURF    = 1,
-	HW_PLATFORM_FFA     = 2,
-	HW_PLATFORM_FLUID   = 3,
-	HW_PLATFORM_SVLTE_FFA	= 4,
-	HW_PLATFORM_SVLTE_SURF	= 5,
-	HW_PLATFORM_MTP_MDM = 7,
-	HW_PLATFORM_MTP  = 8,
-	HW_PLATFORM_LIQUID  = 9,
-	/* Dragonboard platform id is assigned as 10 in CDT */
-	HW_PLATFORM_DRAGON	= 10,
-	HW_PLATFORM_QRD	= 11,
-	HW_PLATFORM_HRD	= 13,
-	HW_PLATFORM_DTV	= 14,
-	HW_PLATFORM_RCM	= 21,
-	HW_PLATFORM_STP = 23,
-	HW_PLATFORM_SBC = 24,
-	HW_PLATFORM_HDK = 31,
-	HW_PLATFORM_IDP = 34,
-	HW_PLATFORM_J1  = 36,
-	HW_PLATFORM_J11 = 37,
-	HW_PLATFORM_J1S = 41,
-	HW_PLATFORM_J3S = 42,
-	HW_PLATFORM_J2  = 43,
-	HW_PLATFORM_K11A = 44,
-	HW_PLATFORM_J2S = 45,
-	HW_PLATFORM_K81 = 46,
-	HW_PLATFORM_K81A = 47,
-	HW_PLATFORM_L3A = 48,
-    HW_PLATFORM_L11R = 50,
-	HW_PLATFORM_L81A = 51,
-	HW_PLATFORM_M82 = 52,
-	HW_PLATFORM_INVALID
+#ifdef CONFIG_DEBUG_FS
+#define SMEM_IMAGE_VERSION_BLOCKS_COUNT        32
+#define SMEM_IMAGE_VERSION_SIZE                4096
+#define SMEM_IMAGE_VERSION_NAME_SIZE           75
+#define SMEM_IMAGE_VERSION_VARIANT_SIZE        20
+#define SMEM_IMAGE_VERSION_OEM_SIZE            32
+
+/*
+ * SMEM Image table indices
+ */
+#define SMEM_IMAGE_TABLE_BOOT_INDEX     0
+#define SMEM_IMAGE_TABLE_TZ_INDEX       1
+#define SMEM_IMAGE_TABLE_RPM_INDEX      3
+#define SMEM_IMAGE_TABLE_APPSBL_INDEX	9
+#define SMEM_IMAGE_TABLE_APPS_INDEX     10
+#define SMEM_IMAGE_TABLE_MPSS_INDEX     11
+#define SMEM_IMAGE_TABLE_ADSP_INDEX     12
+#define SMEM_IMAGE_TABLE_CNSS_INDEX     13
+#define SMEM_IMAGE_TABLE_VIDEO_INDEX    14
+#define SMEM_IMAGE_TABLE_DSPS_INDEX     15
+#define SMEM_IMAGE_TABLE_CDSP_INDEX     16
+#define SMEM_IMAGE_TABLE_CDSP1_INDEX    19
+#define SMEM_IMAGE_TABLE_GPDSP_INDEX    20
+#define SMEM_IMAGE_TABLE_GPDSP1_INDEX   21
+#define SMEM_IMAGE_TABLE_TME_INDEX	28
+#define SMEM_IMAGE_VERSION_TABLE       469
+
+/*
+ * SMEM Image table names
+ */
+static const char *const socinfo_image_names[] = {
+	[SMEM_IMAGE_TABLE_ADSP_INDEX] = "adsp",
+	[SMEM_IMAGE_TABLE_APPSBL_INDEX] = "appsbl",
+	[SMEM_IMAGE_TABLE_APPS_INDEX] = "apps",
+	[SMEM_IMAGE_TABLE_BOOT_INDEX] = "boot",
+	[SMEM_IMAGE_TABLE_CNSS_INDEX] = "cnss",
+	[SMEM_IMAGE_TABLE_MPSS_INDEX] = "mpss",
+	[SMEM_IMAGE_TABLE_RPM_INDEX] = "rpm",
+	[SMEM_IMAGE_TABLE_TZ_INDEX] = "tz",
+	[SMEM_IMAGE_TABLE_VIDEO_INDEX] = "video",
+	[SMEM_IMAGE_TABLE_DSPS_INDEX] = "dsps",
+	[SMEM_IMAGE_TABLE_CDSP_INDEX] = "cdsp",
+	[SMEM_IMAGE_TABLE_CDSP1_INDEX] = "cdsp1",
+	[SMEM_IMAGE_TABLE_GPDSP_INDEX] = "gpdsp",
+	[SMEM_IMAGE_TABLE_GPDSP1_INDEX] = "gpdsp1",
+	[SMEM_IMAGE_TABLE_TME_INDEX] = "tme",
 };
 
-const char *hw_platform[] = {
-	[HW_PLATFORM_UNKNOWN] = "Unknown",
-	[HW_PLATFORM_SURF] = "Surf",
-	[HW_PLATFORM_FFA] = "FFA",
-	[HW_PLATFORM_FLUID] = "Fluid",
-	[HW_PLATFORM_SVLTE_FFA] = "SVLTE_FFA",
-	[HW_PLATFORM_SVLTE_SURF] = "SLVTE_SURF",
-	[HW_PLATFORM_MTP_MDM] = "MDM_MTP_NO_DISPLAY",
-	[HW_PLATFORM_MTP] = "MTP",
-	[HW_PLATFORM_RCM] = "RCM",
-	[HW_PLATFORM_LIQUID] = "Liquid",
-	[HW_PLATFORM_DRAGON] = "Dragon",
-	[HW_PLATFORM_QRD] = "QRD",
-	[HW_PLATFORM_HRD] = "HRD",
-	[HW_PLATFORM_DTV] = "DTV",
-	[HW_PLATFORM_STP] = "STP",
-	[HW_PLATFORM_SBC] = "SBC",
-	[HW_PLATFORM_HDK] = "HDK",
-	[HW_PLATFORM_IDP] = "IDP",
-	[HW_PLATFORM_J2] = "UMI",
-	[HW_PLATFORM_J1] = "CMI",
-	[HW_PLATFORM_J11] = "LMI",
-	[HW_PLATFORM_J1S] = "CAS",
-	[HW_PLATFORM_J3S] = "APOLLO",
-	[HW_PLATFORM_K11A] = "ALIOTH",
-	[HW_PLATFORM_J2S] = "THYME",
-	[HW_PLATFORM_K81] = "ENUMA",
-	[HW_PLATFORM_K81A] = "ELISH",
-	[HW_PLATFORM_L3A] = "PSYCHE",
-    [HW_PLATFORM_L11R] = "MUNCH",
-    [HW_PLATFORM_L81A] = "DAGU",
-    [HW_PLATFORM_M82] = "PIPA",
+static const char *const pmic_models[] = {
+	[0]  = "Unknown PMIC model",
+	[1]  = "PM8941",
+	[2]  = "PM8841",
+	[3]  = "PM8019",
+	[4]  = "PM8226",
+	[5]  = "PM8110",
+	[6]  = "PMA8084",
+	[7]  = "PMI8962",
+	[8]  = "PMD9635",
+	[9]  = "PM8994",
+	[10] = "PMI8994",
+	[11] = "PM8916",
+	[12] = "PM8004",
+	[13] = "PM8909/PM8058",
+	[14] = "PM8028",
+	[15] = "PM8901",
+	[16] = "PM8950/PM8027",
+	[17] = "PMI8950/ISL9519",
+	[18] = "PMK8001/PM8921",
+	[19] = "PMI8996/PM8018",
+	[20] = "PM8998/PM8015",
+	[21] = "PMI8998/PM8014",
+	[22] = "PM8821",
+	[23] = "PM8038",
+	[24] = "PM8005/PM8922",
+	[25] = "PM8917/PM8937",
+	[26] = "PM660L",
+	[27] = "PM660",
+	[30] = "PM8150",
+	[31] = "PM8150L",
+	[32] = "PM8150B",
+	[33] = "PMK8002",
+	[36] = "PM8009",
+	[37] = "PMI632",
+	[38] = "PM8150C",
+	[40] = "PM6150",
+	[41] = "SMB2351",
+	[44] = "PM8008",
+	[45] = "PM6125",
+	[46] = "PM7250B",
+	[47] = "PMK8350",
+	[48] = "PM8350",
+	[49] = "PM8350C",
+	[50] = "PM8350B",
+	[51] = "PMR735A",
+	[52] = "PMR735B",
+	[54] = "PM6350",
+	[55] = "PM4125",
+	[58] = "PM8450",
+	[65] = "PM8010",
+	[69] = "PM8550VS",
+	[70] = "PM8550VE",
+	[71] = "PM8550B",
+	[72] = "PMR735D",
+	[73] = "PM8550",
+	[74] = "PMK8550",
+	[78] = "PMM8650AU",
+	[79] = "PMM8650AU_PSAIL",
+	[80] = "PM7550",
+	[82] = "PMC8380",
+	[83] = "SMB2360",
+	[91] = "PMIV0108",
 };
 
-enum {
-	ACCESSORY_CHIP_UNKNOWN = 0,
-	ACCESSORY_CHIP_CHARM = 58,
+struct socinfo_params {
+	u32 raw_device_family;
+	u32 hw_plat_subtype;
+	u32 accessory_chip;
+	u32 raw_device_num;
+	u32 chip_family;
+	u32 foundry_id;
+	u32 plat_ver;
+	u32 raw_ver;
+	u32 hw_plat;
+	u32 fmt;
+	u32 nproduct_id;
+	u32 num_clusters;
+	u32 ncluster_array_offset;
+	u32 num_subset_parts;
+	u32 nsubset_parts_array_offset;
+	u32 nmodem_supported;
+	u32 feature_code;
+	u32 pcode;
+	u32 oem_variant;
+	u32 num_func_clusters;
+	u32 boot_cluster;
+	u32 boot_core;
 };
 
-enum {
-	PLATFORM_SUBTYPE_QRD = 0x0,
-	PLATFORM_SUBTYPE_SKUAA = 0x1,
-	PLATFORM_SUBTYPE_SKUF = 0x2,
-	PLATFORM_SUBTYPE_SKUAB = 0x3,
-	PLATFORM_SUBTYPE_SKUG = 0x5,
-	PLATFORM_SUBTYPE_QRD_INVALID,
+struct smem_image_version {
+	char name[SMEM_IMAGE_VERSION_NAME_SIZE];
+	char variant[SMEM_IMAGE_VERSION_VARIANT_SIZE];
+	char pad;
+	char oem[SMEM_IMAGE_VERSION_OEM_SIZE];
+};
+#endif /* CONFIG_DEBUG_FS */
+
+struct qcom_socinfo {
+	struct soc_device *soc_dev;
+	struct soc_device_attribute attr;
+#ifdef CONFIG_DEBUG_FS
+	struct dentry *dbg_root;
+	struct socinfo_params info;
+#endif /* CONFIG_DEBUG_FS */
 };
 
-const char *qrd_hw_platform_subtype[] = {
-	[PLATFORM_SUBTYPE_QRD] = "QRD",
-	[PLATFORM_SUBTYPE_SKUAA] = "SKUAA",
-	[PLATFORM_SUBTYPE_SKUF] = "SKUF",
-	[PLATFORM_SUBTYPE_SKUAB] = "SKUAB",
-	[PLATFORM_SUBTYPE_SKUG] = "SKUG",
-	[PLATFORM_SUBTYPE_QRD_INVALID] = "INVALID",
-};
-
-enum {
-	PLATFORM_SUBTYPE_UNKNOWN = 0x0,
-	PLATFORM_SUBTYPE_CHARM = 0x1,
-	PLATFORM_SUBTYPE_STRANGE = 0x2,
-	PLATFORM_SUBTYPE_STRANGE_2A = 0x3,
-	PLATFORM_SUBTYPE_INVALID,
-};
-
-const char *hw_platform_subtype[] = {
-	[PLATFORM_SUBTYPE_UNKNOWN] = "Unknown",
-	[PLATFORM_SUBTYPE_CHARM] = "charm",
-	[PLATFORM_SUBTYPE_STRANGE] = "strange",
-	[PLATFORM_SUBTYPE_STRANGE_2A] = "strange_2a",
-	[PLATFORM_SUBTYPE_INVALID] = "Invalid",
-};
-
-/* Used to parse shared memory.  Must match the modem. */
-struct socinfo_v0_1 {
-	uint32_t format;
-	uint32_t id;
-	uint32_t version;
-	char build_id[BUILD_ID_LENGTH];
-};
-
-struct socinfo_v0_2 {
-	struct socinfo_v0_1 v0_1;
-	uint32_t raw_id;
-	uint32_t raw_version;
-};
-
-struct socinfo_v0_3 {
-	struct socinfo_v0_2 v0_2;
-	uint32_t hw_platform;
-};
-
-struct socinfo_v0_4 {
-	struct socinfo_v0_3 v0_3;
-	uint32_t platform_version;
-};
-
-struct socinfo_v0_5 {
-	struct socinfo_v0_4 v0_4;
-	uint32_t accessory_chip;
-};
-
-struct socinfo_v0_6 {
-	struct socinfo_v0_5 v0_5;
-	uint32_t hw_platform_subtype;
-};
-
-struct socinfo_v0_7 {
-	struct socinfo_v0_6 v0_6;
-	uint32_t pmic_model;
-	uint32_t pmic_die_revision;
-};
-
-struct socinfo_v0_8 {
-	struct socinfo_v0_7 v0_7;
-	uint32_t pmic_model_1;
-	uint32_t pmic_die_revision_1;
-	uint32_t pmic_model_2;
-	uint32_t pmic_die_revision_2;
-};
-
-struct socinfo_v0_9 {
-	struct socinfo_v0_8 v0_8;
-	uint32_t foundry_id;
-};
-
-struct socinfo_v0_10 {
-	struct socinfo_v0_9 v0_9;
-	uint32_t serial_number;
-};
-
-struct socinfo_v0_11 {
-	struct socinfo_v0_10 v0_10;
-	uint32_t num_pmics;
-	uint32_t pmic_array_offset;
-};
-
-struct socinfo_v0_12 {
-	struct socinfo_v0_11 v0_11;
-	uint32_t chip_family;
-	uint32_t raw_device_family;
-	uint32_t raw_device_number;
-};
-
-struct socinfo_v0_13 {
-	struct socinfo_v0_12 v0_12;
-	uint32_t nproduct_id;
-	char chip_name[CHIP_ID_LENGTH];
-};
-
-struct socinfo_v0_14 {
-	struct socinfo_v0_13 v0_13;
-	uint32_t num_clusters;
-	uint32_t ncluster_array_offset;
-	uint32_t num_subset_parts;
-	uint32_t nsubset_parts_array_offset;
-};
-
-struct socinfo_v0_15 {
-	struct socinfo_v0_14 v0_14;
-	uint32_t nmodem_supported;
-};
-
-struct socinfo_v0_16 {
-	struct socinfo_v0_15 v0_15;
-	__le32  feature_code;
-	__le32  pcode;
-	__le32  npartnamemap_offset;
-	__le32  nnum_partname_mapping;
-};
-
-static union {
-	struct socinfo_v0_1 v0_1;
-	struct socinfo_v0_2 v0_2;
-	struct socinfo_v0_3 v0_3;
-	struct socinfo_v0_4 v0_4;
-	struct socinfo_v0_5 v0_5;
-	struct socinfo_v0_6 v0_6;
-	struct socinfo_v0_7 v0_7;
-	struct socinfo_v0_8 v0_8;
-	struct socinfo_v0_9 v0_9;
-	struct socinfo_v0_10 v0_10;
-	struct socinfo_v0_11 v0_11;
-	struct socinfo_v0_12 v0_12;
-	struct socinfo_v0_13 v0_13;
-	struct socinfo_v0_14 v0_14;
-	struct socinfo_v0_15 v0_15;
-	struct socinfo_v0_16 v0_16;
-} *socinfo;
-
-#define PART_NAME_MAX		32
-struct socinfo_partinfo {
-	__le32 part_type;
-	char part_name[PART_NAME_MAX];
-	__le32 part_name_len;
-};
-struct socinfo_partinfo partinfo[SOCINFO_PART_MAX_PARTTYPE];
-
-/* max socinfo format version supported */
-#define MAX_SOCINFO_FORMAT SOCINFO_VERSION(0, 16)
-
-static const char * const hw_platform_feature_code[] = {
-	[SOCINFO_FC_UNKNOWN] = "Unknown",
-	[SOCINFO_FC_AA] = "AA",
-	[SOCINFO_FC_AB] = "AB",
-	[SOCINFO_FC_AC] = "AC",
-	[SOCINFO_FC_AD] = "AD",
-	[SOCINFO_FC_AE] = "AE",
-	[SOCINFO_FC_AF] = "AF",
-	[SOCINFO_FC_AG] = "AG",
-	[SOCINFO_FC_AH] = "AH",
-};
-
-#define SOCINFO_FC_INT_MASK 0x0f
-static const char * const hw_platform_ifeature_code[] = {
-	[SOCINFO_FC_Y0 - SOCINFO_FC_Y0] = "Y0",
-	[SOCINFO_FC_Y1 - SOCINFO_FC_Y0] = "Y1",
-	[SOCINFO_FC_Y2 - SOCINFO_FC_Y0] = "Y2",
-	[SOCINFO_FC_Y3 - SOCINFO_FC_Y0] = "Y3",
-	[SOCINFO_FC_Y4 - SOCINFO_FC_Y0] = "Y4",
-	[SOCINFO_FC_Y5 - SOCINFO_FC_Y0] = "Y5",
-	[SOCINFO_FC_Y6 - SOCINFO_FC_Y0] = "Y6",
-	[SOCINFO_FC_Y7 - SOCINFO_FC_Y0] = "Y7",
-};
-
-static struct msm_soc_info cpu_of_id[] = {
-	[0]  = {MSM_CPU_UNKNOWN, "Unknown CPU"},
-	/* 8960 IDs */
-	[87] = {MSM_CPU_8960, "MSM8960"},
-
-	/* 8064 IDs */
-	[109] = {MSM_CPU_8064, "APQ8064"},
-	[122] = {MSM_CPU_8960, "MSM8960"},
-
-	/* 8260A ID */
-	[123] = {MSM_CPU_8960, "MSM8960"},
-
-	/* 8060A ID */
-	[124] = {MSM_CPU_8960, "MSM8960"},
-
-	/* 8064 MPQ ID */
-	[130] = {MSM_CPU_8064, "APQ8064"},
-
-	/* 8974 IDs */
-	[126] = {MSM_CPU_8974, "MSM8974"},
-	[184] = {MSM_CPU_8974, "MSM8974"},
-	[185] = {MSM_CPU_8974, "MSM8974"},
-	[186] = {MSM_CPU_8974, "MSM8974"},
-
-	/* 8974AA IDs */
-	[208] = {MSM_CPU_8974PRO_AA, "MSM8974PRO-AA"},
-	[211] = {MSM_CPU_8974PRO_AA, "MSM8974PRO-AA"},
-	[214] = {MSM_CPU_8974PRO_AA, "MSM8974PRO-AA"},
-	[217] = {MSM_CPU_8974PRO_AA, "MSM8974PRO-AA"},
-
-	/* 8974AB IDs */
-	[209] = {MSM_CPU_8974PRO_AB, "MSM8974PRO-AB"},
-	[212] = {MSM_CPU_8974PRO_AB, "MSM8974PRO-AB"},
-	[215] = {MSM_CPU_8974PRO_AB, "MSM8974PRO-AB"},
-	[218] = {MSM_CPU_8974PRO_AB, "MSM8974PRO-AB"},
-
-	/* 8974AC IDs */
-	[194] = {MSM_CPU_8974PRO_AC, "MSM8974PRO-AC"},
-	[210] = {MSM_CPU_8974PRO_AC, "MSM8974PRO-AC"},
-	[213] = {MSM_CPU_8974PRO_AC, "MSM8974PRO-AC"},
-	[216] = {MSM_CPU_8974PRO_AC, "MSM8974PRO-AC"},
-
-	/* 8960AB IDs */
-	[138] = {MSM_CPU_8960AB, "MSM8960AB"},
-	[139] = {MSM_CPU_8960AB, "MSM8960AB"},
-	[140] = {MSM_CPU_8960AB, "MSM8960AB"},
-	[141] = {MSM_CPU_8960AB, "MSM8960AB"},
-
-	/* 8084 IDs */
-	[178] = {MSM_CPU_8084, "APQ8084"},
-
-	/* 8916 IDs */
-	[206] = {MSM_CPU_8916, "MSM8916"},
-	[247] = {MSM_CPU_8916, "APQ8016"},
-	[248] = {MSM_CPU_8916, "MSM8216"},
-	[249] = {MSM_CPU_8916, "MSM8116"},
-	[250] = {MSM_CPU_8916, "MSM8616"},
-
-	/* 8996 IDs */
-	[246] = {MSM_CPU_8996, "MSM8996"},
-	[310] = {MSM_CPU_8996, "MSM8996"},
-	[311] = {MSM_CPU_8996, "APQ8096"},
-	[291] = {MSM_CPU_8996, "APQ8096"},
-	[305] = {MSM_CPU_8996, "MSM8996pro"},
-	[312] = {MSM_CPU_8996, "APQ8096pro"},
-
-	/* SDM660 ID */
-	[317] = {MSM_CPU_SDM660, "SDM660"},
-
-	/* sm8150 ID */
-	[339] = {MSM_CPU_SM8150, "SM8150"},
-
-	/* sa8150 ID */
-	[362] = {MSM_CPU_SA8150, "SA8150"},
-
-	/* sdmshrike ID */
-	[340] = {MSM_CPU_SDMSHRIKE, "SDMSHRIKE"},
-
-	/* sm6150 ID */
-	[355] = {MSM_CPU_SM6150, "SM6150"},
-
-	/* qcs405 ID */
-	[352] = {MSM_CPU_QCS405, "QCS405"},
-
-	/* sdxprairie ID */
-	[357] = {SDX_CPU_SDXPRAIRIE, "SDXPRAIRIE"},
-
-	/* sdmmagpie ID */
-	[365] = {MSM_CPU_SDMMAGPIE, "SDMMAGPIE"},
-
-	/* kona ID */
-	[356] = {MSM_CPU_KONA, "SM8250"},
-	[455] = {MSM_CPU_KONA, "KONA"},
-	[496] = {MSM_CPU_KONA, "KONA"},
-
-	/* kona-7230-iot ID */
-	[548] = {MSM_CPU_KONA_IOT, "KONA-7230-IOT"},
-
-	/* Lito ID */
-	[400] = {MSM_CPU_LITO, "LITO"},
-	[440] = {MSM_CPU_LITO, "LITO"},
-
-	/* Orchid ID */
-	[476] = {MSM_CPU_ORCHID, "ORCHID"},
-
-	/* Bengal ID */
-	[417] = {MSM_CPU_BENGAL, "BENGAL"},
-	[444] = {MSM_CPU_BENGAL, "BENGAL"},
-
-	/* Khaje ID */
-	[518] = {MSM_CPU_KHAJE, "KHAJE"},
-	[586] = {MSM_CPU_KHAJE, "KHAJE"},
-
-	/* Khajep ID */
-	[561] = {MSM_CPU_KHAJEP, "KHAJEP"},
-
-	/* Khajeq ID */
-	[562] = {MSM_CPU_KHAJEQ, "KHAJEQ"},
-
-	/* Khajeg ID */
-	[585] = {MSM_CPU_KHAJEG, "KAHJEG"},
-
-	/* Lagoon ID */
-	[434] = {MSM_CPU_LAGOON, "LAGOON"},
-	[459] = {MSM_CPU_LAGOON, "LAGOON"},
-
-	/* Bengalp ID */
-	[445] = {MSM_CPU_BENGALP, "BENGALP"},
-	[420] = {MSM_CPU_BENGALP, "BENGALP"},
-
-	/* Scuba ID */
-	[441] = {MSM_CPU_SCUBA, "SCUBA"},
-	[471] = {MSM_CPU_SCUBA, "SCUBA"},
-
-	/* Scuba IIOT  ID */
-	[473] = {MSM_CPU_SCUBAIOT, "SCUBAIIOT"},
-	[474] = {MSM_CPU_SCUBAPIOT, "SCUBAPIIOT"},
-
-	/* BENGAL-IOT ID */
-	[469] = {MSM_CPU_BENGAL_IOT, "BENGAL-IOT"},
-
-	/* BENGALP-IOT ID */
-	[470] = {MSM_CPU_BENGALP_IOT, "BENGALP-IOT"},
-
-	/* MSM8937 ID */
-	[294] = {MSM_CPU_8937, "MSM8937"},
-	[295] = {MSM_CPU_8937, "APQ8937"},
-
-	/* MSM8917 IDs */
-	[303] = {MSM_CPU_8917, "MSM8917"},
-	[307] = {MSM_CPU_8917, "APQ8017"},
-	[308] = {MSM_CPU_8917, "MSM8217"},
-	[309] = {MSM_CPU_8917, "MSM8617"},
-
-	/* SDM429 and SDM439 ID */
-	[353] = {MSM_CPU_SDM439, "SDM439"},
-	[354] = {MSM_CPU_SDM429, "SDM429"},
-
-
-	/* QM215 ID */
-	[386] = {MSM_CPU_QM215, "QM215"},
-
-	/* QCM2150 ID */
-	[436] = {MSM_CPU_QCM2150, "QCM2150"},
-
-	/* 8953 ID */
-	[293] = {MSM_CPU_8953, "MSM8953"},
-	[304] = {MSM_CPU_8953, "APQ8053"},
-
-	/* SDM450 ID */
-	[338] = {MSM_CPU_SDM450, "SDM450"},
-
-	/* Uninitialized IDs are not known to run Linux.
-	 * MSM_CPU_UNKNOWN is set to 0 to ensure these IDs are
-	 * considered as unknown CPU.
-	 */
-};
-
-static enum msm_cpu cur_cpu;
-static int current_image;
-static uint32_t socinfo_format;
-static const char *sku;
-
-static struct socinfo_v0_1 dummy_socinfo = {
-	.format = SOCINFO_VERSION(0, 1),
-	.version = 1,
-};
-
-uint32_t socinfo_get_id(void)
-{
-	return (socinfo) ? socinfo->v0_1.id : 0;
-}
-EXPORT_SYMBOL(socinfo_get_id);
-
-char *socinfo_get_id_string(void)
-{
-	return (socinfo) ? cpu_of_id[socinfo->v0_1.id].soc_id_string : NULL;
-}
-EXPORT_SYMBOL(socinfo_get_id_string);
-
-uint32_t socinfo_get_version(void)
-{
-	return (socinfo) ? socinfo->v0_1.version : 0;
-}
-
-char *socinfo_get_build_id(void)
-{
-	return (socinfo) ? socinfo->v0_1.build_id : NULL;
-}
-
-static char *msm_read_hardware_id(void)
-{
-	static char msm_soc_str[256] = "Qualcomm Technologies, Inc ";
-	static bool string_generated;
-	int ret = 0;
-
-	if (string_generated)
-		return msm_soc_str;
-	if (!socinfo)
-		goto err_path;
-	if (!cpu_of_id[socinfo->v0_1.id].soc_id_string)
-		goto err_path;
-
-	ret = strlcat(msm_soc_str, cpu_of_id[socinfo->v0_1.id].soc_id_string,
-			sizeof(msm_soc_str));
-	if (ret > sizeof(msm_soc_str))
-		goto err_path;
-
-	string_generated = true;
-	return msm_soc_str;
-err_path:
-	return "UNKNOWN SOC TYPE";
-}
-
-const char * __init arch_read_machine_name(void)
-{
-	static char msm_machine_name[256] = "Qualcomm Technologies, Inc. ";
-	static bool string_generated;
-	u32 len = 0;
+struct soc_id {
+	unsigned int id;
 	const char *name;
+};
 
-	if (string_generated)
-		return msm_machine_name;
+static const struct soc_id soc_id[] = {
+	{ qcom_board_id(MSM8260) },
+	{ qcom_board_id(MSM8660) },
+	{ qcom_board_id(APQ8060) },
+	{ qcom_board_id(MSM8960) },
+	{ qcom_board_id(APQ8064) },
+	{ qcom_board_id(MSM8930) },
+	{ qcom_board_id(MSM8630) },
+	{ qcom_board_id(MSM8230) },
+	{ qcom_board_id(APQ8030) },
+	{ qcom_board_id(MSM8627) },
+	{ qcom_board_id(MSM8227) },
+	{ qcom_board_id(MSM8660A) },
+	{ qcom_board_id(MSM8260A) },
+	{ qcom_board_id(APQ8060A) },
+	{ qcom_board_id(MSM8974) },
+	{ qcom_board_id(MSM8225) },
+	{ qcom_board_id(MSM8625) },
+	{ qcom_board_id(MPQ8064) },
+	{ qcom_board_id(MSM8960AB) },
+	{ qcom_board_id(APQ8060AB) },
+	{ qcom_board_id(MSM8260AB) },
+	{ qcom_board_id(MSM8660AB) },
+	{ qcom_board_id(MSM8930AA) },
+	{ qcom_board_id(MSM8630AA) },
+	{ qcom_board_id(MSM8230AA) },
+	{ qcom_board_id(MSM8626) },
+	{ qcom_board_id(MSM8610) },
+	{ qcom_board_id(APQ8064AB) },
+	{ qcom_board_id(MSM8930AB) },
+	{ qcom_board_id(MSM8630AB) },
+	{ qcom_board_id(MSM8230AB) },
+	{ qcom_board_id(APQ8030AB) },
+	{ qcom_board_id(MSM8226) },
+	{ qcom_board_id(MSM8526) },
+	{ qcom_board_id(APQ8030AA) },
+	{ qcom_board_id(MSM8110) },
+	{ qcom_board_id(MSM8210) },
+	{ qcom_board_id(MSM8810) },
+	{ qcom_board_id(MSM8212) },
+	{ qcom_board_id(MSM8612) },
+	{ qcom_board_id(MSM8112) },
+	{ qcom_board_id(MSM8125) },
+	{ qcom_board_id(MSM8225Q) },
+	{ qcom_board_id(MSM8625Q) },
+	{ qcom_board_id(MSM8125Q) },
+	{ qcom_board_id(APQ8064AA) },
+	{ qcom_board_id(APQ8084) },
+	{ qcom_board_id(MSM8130) },
+	{ qcom_board_id(MSM8130AA) },
+	{ qcom_board_id(MSM8130AB) },
+	{ qcom_board_id(MSM8627AA) },
+	{ qcom_board_id(MSM8227AA) },
+	{ qcom_board_id(APQ8074) },
+	{ qcom_board_id(MSM8274) },
+	{ qcom_board_id(MSM8674) },
+	{ qcom_board_id(MDM9635) },
+	{ qcom_board_id_named(MSM8974PRO_AC, "MSM8974PRO-AC") },
+	{ qcom_board_id(MSM8126) },
+	{ qcom_board_id(APQ8026) },
+	{ qcom_board_id(MSM8926) },
+	{ qcom_board_id(IPQ8062) },
+	{ qcom_board_id(IPQ8064) },
+	{ qcom_board_id(IPQ8066) },
+	{ qcom_board_id(IPQ8068) },
+	{ qcom_board_id(MSM8326) },
+	{ qcom_board_id(MSM8916) },
+	{ qcom_board_id(MSM8994) },
+	{ qcom_board_id_named(APQ8074PRO_AA, "APQ8074PRO-AA") },
+	{ qcom_board_id_named(APQ8074PRO_AB, "APQ8074PRO-AB") },
+	{ qcom_board_id_named(APQ8074PRO_AC, "APQ8074PRO-AC") },
+	{ qcom_board_id_named(MSM8274PRO_AA, "MSM8274PRO-AA") },
+	{ qcom_board_id_named(MSM8274PRO_AB, "MSM8274PRO-AB") },
+	{ qcom_board_id_named(MSM8274PRO_AC, "MSM8274PRO-AC") },
+	{ qcom_board_id_named(MSM8674PRO_AA, "MSM8674PRO-AA") },
+	{ qcom_board_id_named(MSM8674PRO_AB, "MSM8674PRO-AB") },
+	{ qcom_board_id_named(MSM8674PRO_AC, "MSM8674PRO-AC") },
+	{ qcom_board_id_named(MSM8974PRO_AA, "MSM8974PRO-AA") },
+	{ qcom_board_id_named(MSM8974PRO_AB, "MSM8974PRO-AB") },
+	{ qcom_board_id(APQ8028) },
+	{ qcom_board_id(MSM8128) },
+	{ qcom_board_id(MSM8228) },
+	{ qcom_board_id(MSM8528) },
+	{ qcom_board_id(MSM8628) },
+	{ qcom_board_id(MSM8928) },
+	{ qcom_board_id(MSM8510) },
+	{ qcom_board_id(MSM8512) },
+	{ qcom_board_id(MSM8936) },
+	{ qcom_board_id(MDM9640) },
+	{ qcom_board_id(MSM8939) },
+	{ qcom_board_id(APQ8036) },
+	{ qcom_board_id(APQ8039) },
+	{ qcom_board_id(MSM8236) },
+	{ qcom_board_id(MSM8636) },
+	{ qcom_board_id(MSM8909) },
+	{ qcom_board_id(MSM8996) },
+	{ qcom_board_id(APQ8016) },
+	{ qcom_board_id(MSM8216) },
+	{ qcom_board_id(MSM8116) },
+	{ qcom_board_id(MSM8616) },
+	{ qcom_board_id(MSM8992) },
+	{ qcom_board_id(APQ8092) },
+	{ qcom_board_id(APQ8094) },
+	{ qcom_board_id(MSM8209) },
+	{ qcom_board_id(MSM8208) },
+	{ qcom_board_id(MDM9209) },
+	{ qcom_board_id(MDM9309) },
+	{ qcom_board_id(MDM9609) },
+	{ qcom_board_id(MSM8239) },
+	{ qcom_board_id(MSM8952) },
+	{ qcom_board_id(APQ8009) },
+	{ qcom_board_id(MSM8956) },
+	{ qcom_board_id(MSM8929) },
+	{ qcom_board_id(MSM8629) },
+	{ qcom_board_id(MSM8229) },
+	{ qcom_board_id(APQ8029) },
+	{ qcom_board_id(APQ8056) },
+	{ qcom_board_id(MSM8609) },
+	{ qcom_board_id(APQ8076) },
+	{ qcom_board_id(MSM8976) },
+	{ qcom_board_id(IPQ8065) },
+	{ qcom_board_id(IPQ8069) },
+	{ qcom_board_id(MDM9650) },
+	{ qcom_board_id(MDM9655) },
+	{ qcom_board_id(MDM9250) },
+	{ qcom_board_id(MDM9255) },
+	{ qcom_board_id(MDM9350) },
+	{ qcom_board_id(APQ8052) },
+	{ qcom_board_id(MDM9607) },
+	{ qcom_board_id(APQ8096) },
+	{ qcom_board_id(MSM8998) },
+	{ qcom_board_id(MSM8953) },
+	{ qcom_board_id(MSM8937) },
+	{ qcom_board_id(APQ8037) },
+	{ qcom_board_id(MDM8207) },
+	{ qcom_board_id(MDM9207) },
+	{ qcom_board_id(MDM9307) },
+	{ qcom_board_id(MDM9628) },
+	{ qcom_board_id(MSM8909W) },
+	{ qcom_board_id(APQ8009W) },
+	{ qcom_board_id(MSM8996L) },
+	{ qcom_board_id(MSM8917) },
+	{ qcom_board_id(APQ8053) },
+	{ qcom_board_id(MSM8996SG) },
+	{ qcom_board_id(APQ8017) },
+	{ qcom_board_id(MSM8217) },
+	{ qcom_board_id(MSM8617) },
+	{ qcom_board_id(MSM8996AU) },
+	{ qcom_board_id(APQ8096AU) },
+	{ qcom_board_id(APQ8096SG) },
+	{ qcom_board_id(MSM8940) },
+	{ qcom_board_id(SDX201) },
+	{ qcom_board_id(SDM660) },
+	{ qcom_board_id(SDM630) },
+	{ qcom_board_id(APQ8098) },
+	{ qcom_board_id(MSM8920) },
+	{ qcom_board_id(SDM845) },
+	{ qcom_board_id(MDM9206) },
+	{ qcom_board_id(IPQ8074) },
+	{ qcom_board_id(SDA660) },
+	{ qcom_board_id(SDM658) },
+	{ qcom_board_id(SDA658) },
+	{ qcom_board_id(SDA630) },
+	{ qcom_board_id(MSM8905) },
+	{ qcom_board_id(SDX202) },
+	{ qcom_board_id(SDM670) },
+	{ qcom_board_id(SDM450) },
+	{ qcom_board_id(SM8150) },
+	{ qcom_board_id(SDA845) },
+	{ qcom_board_id(IPQ8072) },
+	{ qcom_board_id(IPQ8076) },
+	{ qcom_board_id(IPQ8078) },
+	{ qcom_board_id(SDM636) },
+	{ qcom_board_id(SDA636) },
+	{ qcom_board_id(SDM632) },
+	{ qcom_board_id(SDA632) },
+	{ qcom_board_id(SDA450) },
+	{ qcom_board_id(SDM439) },
+	{ qcom_board_id(SDM429) },
+	{ qcom_board_id(SM8250) },
+	{ qcom_board_id(SA8155) },
+	{ qcom_board_id(SDA439) },
+	{ qcom_board_id(SDA429) },
+	{ qcom_board_id(SM7150) },
+	{ qcom_board_id(SM7150P) },
+	{ qcom_board_id(IPQ8070) },
+	{ qcom_board_id(IPQ8071) },
+	{ qcom_board_id(QM215) },
+	{ qcom_board_id(IPQ8072A) },
+	{ qcom_board_id(IPQ8074A) },
+	{ qcom_board_id(IPQ8076A) },
+	{ qcom_board_id(IPQ8078A) },
+	{ qcom_board_id(SM6125) },
+	{ qcom_board_id(IPQ8070A) },
+	{ qcom_board_id(IPQ8071A) },
+	{ qcom_board_id(IPQ8172) },
+	{ qcom_board_id(IPQ8173) },
+	{ qcom_board_id(IPQ8174) },
+	{ qcom_board_id(IPQ6018) },
+	{ qcom_board_id(IPQ6028) },
+	{ qcom_board_id(SDM429W) },
+	{ qcom_board_id(SM4250) },
+	{ qcom_board_id(IPQ6000) },
+	{ qcom_board_id(IPQ6010) },
+	{ qcom_board_id(SC7180) },
+	{ qcom_board_id(SM6350) },
+	{ qcom_board_id(QCM2150) },
+	{ qcom_board_id(SDA429W) },
+	{ qcom_board_id(SM8350) },
+	{ qcom_board_id(QCM2290) },
+	{ qcom_board_id(SM7125) },
+	{ qcom_board_id(SM6115) },
+	{ qcom_board_id(IPQ5010) },
+	{ qcom_board_id(IPQ5018) },
+	{ qcom_board_id(IPQ5028) },
+	{ qcom_board_id(SC8280XP) },
+	{ qcom_board_id(IPQ6005) },
+	{ qcom_board_id(QRB5165) },
+	{ qcom_board_id(SM8450) },
+	{ qcom_board_id(SM7225) },
+	{ qcom_board_id(SA8295P) },
+	{ qcom_board_id(SA8540P) },
+	{ qcom_board_id(QCM4290) },
+	{ qcom_board_id(QCS4290) },
+	{ qcom_board_id(SM7325) },
+	{ qcom_board_id_named(SM8450_2, "SM8450") },
+	{ qcom_board_id_named(SM8450_3, "SM8450") },
+	{ qcom_board_id(SC7280) },
+	{ qcom_board_id(SC7180P) },
+	{ qcom_board_id(QCM6490) },
+	{ qcom_board_id(SM7325P) },
+	{ qcom_board_id(IPQ5000) },
+	{ qcom_board_id(IPQ0509) },
+	{ qcom_board_id(IPQ0518) },
+	{ qcom_board_id(SM6375) },
+	{ qcom_board_id(IPQ9514) },
+	{ qcom_board_id(IPQ9550) },
+	{ qcom_board_id(IPQ9554) },
+	{ qcom_board_id(IPQ9570) },
+	{ qcom_board_id(IPQ9574) },
+	{ qcom_board_id(SM8550) },
+	{ qcom_board_id(IPQ5016) },
+	{ qcom_board_id(IPQ9510) },
+	{ qcom_board_id(QRB4210) },
+	{ qcom_board_id(QRB2210) },
+	{ qcom_board_id(SAR2130P) },
+	{ qcom_board_id(SM8475) },
+	{ qcom_board_id(SM8475P) },
+	{ qcom_board_id(SA8255P) },
+	{ qcom_board_id(SA8775P) },
+	{ qcom_board_id(QRU1000) },
+	{ qcom_board_id(SM8475_2) },
+	{ qcom_board_id(QDU1000) },
+	{ qcom_board_id(X1E80100) },
+	{ qcom_board_id(SM8650) },
+	{ qcom_board_id(SM4450) },
+	{ qcom_board_id(SAR1130P) },
+	{ qcom_board_id(QDU1010) },
+	{ qcom_board_id(QRU1032) },
+	{ qcom_board_id(QRU1052) },
+	{ qcom_board_id(QRU1062) },
+	{ qcom_board_id(IPQ5332) },
+	{ qcom_board_id(IPQ5322) },
+	{ qcom_board_id(IPQ5312) },
+	{ qcom_board_id(IPQ5302) },
+	{ qcom_board_id(QCS8550) },
+	{ qcom_board_id(QCM8550) },
+	{ qcom_board_id(SM8750)  },
+	{ qcom_board_id(IPQ5300) },
+	{ qcom_board_id(SM7635) },
+	{ qcom_board_id(SM6650) },
+	{ qcom_board_id(SM6650P) },
+	{ qcom_board_id(IPQ5321) },
+	{ qcom_board_id(IPQ5424) },
+	{ qcom_board_id(QCM6690) },
+	{ qcom_board_id(QCS6690) },
+	{ qcom_board_id(IPQ5404) },
+	{ qcom_board_id(QCS9100) },
+	{ qcom_board_id(QCS8300) },
+	{ qcom_board_id(QCS8275) },
+	{ qcom_board_id(QCS9075) },
+	{ qcom_board_id(QCS615) },
+};
 
-	len = strlen(msm_machine_name);
-	name = of_get_flat_dt_prop(of_get_flat_dt_root(),
-				"qcom,msm-name", NULL);
-	if (name)
-		len += snprintf(msm_machine_name + len,
-					sizeof(msm_machine_name) - len,
-					"%s", name);
-	else
-		goto no_prop_path;
-
-	name = of_get_flat_dt_prop(of_get_flat_dt_root(),
-				"qcom,pmic-name", NULL);
-	if (name) {
-		len += snprintf(msm_machine_name + len,
-					sizeof(msm_machine_name) - len,
-					"%s", " ");
-		len += snprintf(msm_machine_name + len,
-					sizeof(msm_machine_name) - len,
-					"%s", name);
-	} else
-		goto no_prop_path;
-
-	name = of_flat_dt_get_machine_name();
-	if (name) {
-		len += snprintf(msm_machine_name + len,
-					sizeof(msm_machine_name) - len,
-					"%s", " ");
-		len += snprintf(msm_machine_name + len,
-					sizeof(msm_machine_name) - len,
-					"%s", name);
-	} else
-		goto no_prop_path;
-
-	string_generated = true;
-	return msm_machine_name;
-no_prop_path:
-	return of_flat_dt_get_machine_name();
-}
-
-uint32_t socinfo_get_raw_id(void)
+static const char *socinfo_machine(struct device *dev, unsigned int id)
 {
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 2) ?
-			socinfo->v0_2.raw_id : 0)
-		: 0;
-}
+	int idx;
 
-uint32_t socinfo_get_raw_version(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 2) ?
-			socinfo->v0_2.raw_version : 0)
-		: 0;
-}
-
-uint32_t socinfo_get_platform_type(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 3) ?
-			socinfo->v0_3.hw_platform : 0)
-		: 0;
-}
-
-
-uint32_t socinfo_get_platform_version(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 4) ?
-			socinfo->v0_4.platform_version : 0)
-		: 0;
-}
-
-/* This information is directly encoded by the machine id */
-/* Thus no external callers rely on this information at the moment */
-static uint32_t socinfo_get_accessory_chip(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 5) ?
-			socinfo->v0_5.accessory_chip : 0)
-		: 0;
-}
-
-uint32_t socinfo_get_platform_subtype(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 6) ?
-			socinfo->v0_6.hw_platform_subtype : 0)
-		: 0;
-}
-
-static uint32_t socinfo_get_foundry_id(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 9) ?
-			socinfo->v0_9.foundry_id : 0)
-		: 0;
-}
-
-uint32_t socinfo_get_serial_number(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 10) ?
-			socinfo->v0_10.serial_number : 0)
-		: 0;
-}
-EXPORT_SYMBOL(socinfo_get_serial_number);
-
-static uint32_t socinfo_get_chip_family(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 12) ?
-			socinfo->v0_12.chip_family : 0)
-		: 0;
-}
-
-static uint32_t socinfo_get_raw_device_family(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 12) ?
-			socinfo->v0_12.raw_device_family : 0)
-		: 0;
-}
-
-static uint32_t socinfo_get_raw_device_number(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 12) ?
-			socinfo->v0_12.raw_device_number : 0)
-		: 0;
-}
-
-static char *socinfo_get_chip_name(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 13) ?
-			socinfo->v0_13.chip_name : "N/A")
-		: "N/A";
-}
-
-static uint32_t socinfo_get_nproduct_id(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 13) ?
-			socinfo->v0_13.nproduct_id : 0)
-		: 0;
-}
-
-static uint32_t socinfo_get_num_clusters(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 14) ?
-			socinfo->v0_14.num_clusters : 0)
-		: 0;
-}
-
-static uint32_t socinfo_get_ncluster_array_offset(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 14) ?
-			socinfo->v0_14.ncluster_array_offset : 0)
-		: 0;
-}
-
-static uint32_t socinfo_get_num_subset_parts(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 14) ?
-			socinfo->v0_14.num_subset_parts : 0)
-		: 0;
-}
-
-static uint32_t socinfo_get_nsubset_parts_array_offset(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 14) ?
-			socinfo->v0_14.nsubset_parts_array_offset : 0)
-		: 0;
-}
-
-static uint32_t socinfo_get_nmodem_supported(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 15) ?
-			socinfo->v0_15.nmodem_supported : 0)
-		: 0;
-}
-
-static uint32_t socinfo_get_feature_code_id(void)
-{
-	uint32_t fc_id;
-
-	if (!socinfo || socinfo_format < SOCINFO_VERSION(0, 16))
-		return SOCINFO_FC_UNKNOWN;
-
-	fc_id = le32_to_cpu(socinfo->v0_16.feature_code);
-	if (fc_id <= SOCINFO_FC_UNKNOWN || fc_id >= SOCINFO_FC_INT_RESERVE)
-		return SOCINFO_FC_UNKNOWN;
-
-	return fc_id;
-}
-
-static const char *socinfo_get_feature_code_mapping(void)
-{
-	uint32_t id = socinfo_get_feature_code_id();
-
-	if (id > SOCINFO_FC_UNKNOWN && id < SOCINFO_FC_EXT_RESERVE)
-		return hw_platform_feature_code[id];
-	else if (id >= SOCINFO_FC_Y0 && id < SOCINFO_FC_INT_RESERVE)
-		return hw_platform_ifeature_code[id & SOCINFO_FC_INT_MASK];
+	for (idx = 0; idx < ARRAY_SIZE(soc_id); idx++) {
+		if (soc_id[idx].id == id)
+			return soc_id[idx].name;
+	}
 
 	return NULL;
 }
 
-static uint32_t socinfo_get_pcode_id(void)
-{
-	uint32_t pcode;
+#ifdef CONFIG_DEBUG_FS
 
-	if (!socinfo || socinfo_format < SOCINFO_VERSION(0, 16))
-		return SOCINFO_PCODE_RESERVE;
-
-	pcode = le32_to_cpu(socinfo->v0_16.pcode);
-	if (pcode <= SOCINFO_PCODE_UNKNOWN || pcode >= SOCINFO_PCODE_RESERVE)
-		return SOCINFO_PCODE_UNKNOWN;
-
-	return pcode;
+#define QCOM_OPEN(name, _func)						\
+static int qcom_open_##name(struct inode *inode, struct file *file)	\
+{									\
+	return single_open(file, _func, inode->i_private);		\
+}									\
+									\
+static const struct file_operations qcom_ ##name## _ops = {		\
+	.open = qcom_open_##name,					\
+	.read = seq_read,						\
+	.llseek = seq_lseek,						\
+	.release = single_release,					\
 }
 
-int socinfo_get_feature_code(void)
+#define DEBUGFS_ADD(info, name)						\
+	debugfs_create_file(__stringify(name), 0444,			\
+			    qcom_socinfo->dbg_root,			\
+			    info, &qcom_ ##name## _ops)
+
+
+static int qcom_show_build_id(struct seq_file *seq, void *p)
 {
-	if (socinfo_format < SOCINFO_VERSION(0, 16)) {
-		pr_warn("socinfo: Feature code is not supported by bootloaders\n");
-		return -EINVAL;
-	}
+	struct socinfo *socinfo = seq->private;
 
-	return socinfo_get_feature_code_id();
-}
-EXPORT_SYMBOL(socinfo_get_feature_code);
+	seq_printf(seq, "%s\n", socinfo->build_id);
 
-int socinfo_get_pcode(void)
-{
-	if (socinfo_format < SOCINFO_VERSION(0, 16)) {
-		pr_warn("socinfo: pcode is not supported by bootloaders\n");
-		return -EINVAL;
-	}
-
-	return socinfo_get_pcode_id();
-}
-EXPORT_SYMBOL(socinfo_get_pcode);
-
-char *socinfo_get_partinfo_details(unsigned int part_id)
-{
-	if (socinfo_format < SOCINFO_VERSION(0, 16) ||
-			part_id > SOCINFO_PART_MAX_PARTTYPE)
-		return NULL;
-
-	return partinfo[part_id].part_name;
-}
-EXPORT_SYMBOL(socinfo_get_partinfo_details);
-
-void socinfo_enumerate_partinfo_details(void)
-{
-	unsigned int partinfo_array_offset;
-	unsigned int nnum_partname_mapping;
-	void *ptr = socinfo;
-	int i, part_type, part_name_len;
-
-	if (socinfo_format < SOCINFO_VERSION(0, 16))
-		return;
-
-	partinfo_array_offset =
-		le32_to_cpu(socinfo->v0_16.npartnamemap_offset);
-	nnum_partname_mapping =
-		le32_to_cpu(socinfo->v0_16.nnum_partname_mapping);
-
-	if (nnum_partname_mapping >  SOCINFO_PART_MAX_PARTTYPE) {
-		pr_warn("socinfo: Mismatch between bootloaders and hlos\n");
-		return;
-	}
-
-	ptr += partinfo_array_offset;
-	for (i = 0; i < nnum_partname_mapping; i++) {
-		part_type = get_unaligned_le32(ptr);
-		if (part_type > SOCINFO_PART_MAX_PARTTYPE)
-			pr_warn("socinfo: part type mismatch\n");
-
-		partinfo[part_type].part_type = part_type;
-		ptr += sizeof(u32);
-		strscpy(partinfo[part_type].part_name, ptr, PART_NAME_MAX);
-		part_name_len = strlen(partinfo[part_type].part_name);
-		ptr += PART_NAME_MAX;
-		if (part_name_len != get_unaligned_le32(ptr))
-			pr_warn("socinfo: part info string length mismatch\n");
-
-		partinfo[part_type].part_name_len = part_name_len;
-		ptr += sizeof(u32);
-	}
+	return 0;
 }
 
-enum pmic_model socinfo_get_pmic_model(void)
+static int qcom_show_pmic_model(struct seq_file *seq, void *p)
 {
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 7) ?
-			socinfo->v0_7.pmic_model : PMIC_MODEL_UNKNOWN)
-		: PMIC_MODEL_UNKNOWN;
-}
+	struct socinfo *socinfo = seq->private;
+	int model = SOCINFO_MINOR(le32_to_cpu(socinfo->pmic_model));
 
-uint32_t socinfo_get_pmic_die_revision(void)
-{
-	return socinfo ?
-		(socinfo_format >= SOCINFO_VERSION(0, 7) ?
-			socinfo->v0_7.pmic_die_revision : 0)
-		: 0;
-}
-
-static char *socinfo_get_image_version_base_address(void)
-{
-	size_t size;
-
-	return qcom_smem_get(QCOM_SMEM_HOST_ANY, SMEM_IMAGE_VERSION_TABLE,
-			&size);
-}
-
-enum msm_cpu socinfo_get_msm_cpu(void)
-{
-	return cur_cpu;
-}
-EXPORT_SYMBOL(socinfo_get_msm_cpu);
-
-static ssize_t
-msm_get_vendor(struct device *dev,
-		struct device_attribute *attr,
-		char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "Qualcomm Technologies, Inc\n");
-}
-
-static ssize_t
-msm_get_raw_id(struct device *dev,
-		struct device_attribute *attr,
-		char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "%u\n",
-		socinfo_get_raw_id());
-}
-
-static ssize_t
-msm_get_raw_version(struct device *dev,
-		     struct device_attribute *attr,
-		     char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "%u\n",
-		socinfo_get_raw_version());
-}
-
-static ssize_t
-msm_get_build_id(struct device *dev,
-		   struct device_attribute *attr,
-		   char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "%-.32s\n",
-			socinfo_get_build_id());
-}
-
-static ssize_t
-msm_get_hw_platform(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	uint32_t hw_type;
-
-	hw_type = socinfo_get_platform_type();
-
-	return snprintf(buf, PAGE_SIZE, "%-.32s\n",
-			hw_platform[hw_type]);
-}
-
-static ssize_t
-msm_get_platform_version(struct device *dev,
-				struct device_attribute *attr,
-				char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "%u\n",
-		socinfo_get_platform_version());
-}
-
-static ssize_t
-msm_get_accessory_chip(struct device *dev,
-				struct device_attribute *attr,
-				char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "%u\n",
-		socinfo_get_accessory_chip());
-}
-
-static ssize_t
-msm_get_platform_subtype(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	uint32_t hw_subtype;
-
-	hw_subtype = socinfo_get_platform_subtype();
-	if (socinfo_get_platform_type() == HW_PLATFORM_QRD) {
-		if (hw_subtype >= PLATFORM_SUBTYPE_QRD_INVALID) {
-			pr_err("Invalid hardware platform sub type for qrd found\n");
-			hw_subtype = PLATFORM_SUBTYPE_QRD_INVALID;
-		}
-		return snprintf(buf, PAGE_SIZE, "%-.32s\n",
-					qrd_hw_platform_subtype[hw_subtype]);
-	} else {
-		if (hw_subtype >= PLATFORM_SUBTYPE_INVALID) {
-			pr_err("Invalid hardware platform subtype\n");
-			hw_subtype = PLATFORM_SUBTYPE_INVALID;
-		}
-		return snprintf(buf, PAGE_SIZE, "%-.32s\n",
-			hw_platform_subtype[hw_subtype]);
-	}
-}
-
-static ssize_t
-msm_get_platform_subtype_id(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	uint32_t hw_subtype;
-
-	hw_subtype = socinfo_get_platform_subtype();
-	return snprintf(buf, PAGE_SIZE, "%u\n",
-		hw_subtype);
-}
-
-static ssize_t
-msm_get_foundry_id(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "%u\n",
-		socinfo_get_foundry_id());
-}
-
-static ssize_t
-msm_get_serial_number(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "%u\n",
-		socinfo_get_serial_number());
-}
-
-static ssize_t
-msm_get_chip_family(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "0x%x\n",
-		socinfo_get_chip_family());
-}
-
-static ssize_t
-msm_get_raw_device_family(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "0x%x\n",
-		socinfo_get_raw_device_family());
-}
-
-static ssize_t
-msm_get_raw_device_number(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "0x%x\n",
-		socinfo_get_raw_device_number());
-}
-
-static ssize_t
-msm_get_chip_name(struct device *dev,
-		   struct device_attribute *attr,
-		   char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "%-.32s\n",
-			socinfo_get_chip_name());
-}
-
-static ssize_t
-msm_get_nproduct_id(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "0x%x\n",
-		socinfo_get_nproduct_id());
-}
-
-static ssize_t
-msm_get_num_clusters(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "0x%x\n",
-		socinfo_get_num_clusters());
-}
-
-static ssize_t
-msm_get_ncluster_array_offset(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "0x%x\n",
-		socinfo_get_ncluster_array_offset());
-}
-
-uint32_t
-socinfo_get_cluster_info(enum subset_cluster_type cluster)
-{
-	uint32_t sub_cluster, num_cluster, offset;
-	void *cluster_val;
-	void *info = socinfo;
-
-	if (cluster >= NUM_CLUSTERS_MAX) {
-		pr_err("Bad cluster\n");
-		return -EINVAL;
-	}
-
-	num_cluster = socinfo_get_num_clusters();
-	offset = socinfo_get_ncluster_array_offset();
-
-	if (!num_cluster || !offset)
+	if (model < 0)
 		return -EINVAL;
 
-	info += offset;
-	cluster_val = info + (sizeof(uint32_t) * cluster);
-	sub_cluster = get_unaligned_le32(cluster_val);
-
-	return sub_cluster;
-}
-EXPORT_SYMBOL(socinfo_get_cluster_info);
-
-static ssize_t
-msm_get_subset_cores(struct device *dev,
-		struct device_attribute *attr,
-		char *buf)
-{
-	uint32_t sub_cluster = socinfo_get_cluster_info(CLUSTER_CPUSS);
-
-	return scnprintf(buf, PAGE_SIZE, "%x\n", sub_cluster);
-}
-
-static ssize_t
-msm_get_num_subset_parts(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "0x%x\n",
-		socinfo_get_num_subset_parts());
-}
-
-static ssize_t
-msm_get_nsubset_parts_array_offset(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "0x%x\n",
-		socinfo_get_nsubset_parts_array_offset());
-}
-
-static uint32_t
-socinfo_get_subset_parts(void)
-{
-	uint32_t num_parts = socinfo_get_num_subset_parts();
-	uint32_t offset = socinfo_get_nsubset_parts_array_offset();
-	uint32_t sub_parts = 0;
-	void *info = socinfo;
-	uint32_t part_entry;
-	int i;
-
-	if (!num_parts || !offset)
-		return -EINVAL;
-
-	info += offset;
-	for (i = 0; i < num_parts; i++) {
-		part_entry = get_unaligned_le32(info);
-		if (part_entry)
-			sub_parts |= BIT(i);
-		info += sizeof(uint32_t);
-	}
-
-	return sub_parts;
-}
-
-bool
-socinfo_get_part_info(enum subset_part_type part)
-{
-	uint32_t partinfo;
-
-	if (part >= NUM_PARTS_MAX) {
-		pr_err("Bad part number\n");
-		return false;
-	}
-
-	partinfo = socinfo_get_subset_parts();
-	if (partinfo < 0) {
-		pr_err("Failed to get part information\n");
-		return false;
-	}
-
-	return (partinfo & BIT(part));
-}
-EXPORT_SYMBOL(socinfo_get_part_info);
-
-static ssize_t
-msm_get_subset_parts(struct device *dev,
-		struct device_attribute *attr,
-		char *buf)
-{
-	uint32_t sub_parts = socinfo_get_subset_parts();
-
-	return scnprintf(buf, PAGE_SIZE, "%x\n", sub_parts);
-}
-
-static ssize_t
-msm_get_nmodem_supported(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "0x%x\n",
-		socinfo_get_nmodem_supported());
-}
-
-static ssize_t
-msm_get_sku(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	return scnprintf(buf, PAGE_SIZE, "%s\n",
-		sku ? sku : "Unknown");
-}
-
-static ssize_t
-msm_get_pcode(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	return scnprintf(buf, PAGE_SIZE, "0x%x\n", socinfo_get_pcode_id());
-}
-
-static ssize_t
-msm_get_feature_code(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	const char *feature_code = socinfo_get_feature_code_mapping();
-
-	return scnprintf(buf, PAGE_SIZE, "%s\n",
-		feature_code ? feature_code : "Unknown");
-}
-
-static ssize_t
-msm_get_pmic_model(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "%u\n",
-		socinfo_get_pmic_model());
-}
-
-static ssize_t
-msm_get_pmic_die_revision(struct device *dev,
-			       struct device_attribute *attr,
-			       char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "%u\n",
-			 socinfo_get_pmic_die_revision());
-}
-
-static ssize_t
-msm_get_image_version(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	char *string_address;
-
-	string_address = socinfo_get_image_version_base_address();
-	if (IS_ERR_OR_NULL(string_address)) {
-		pr_err("Failed to get image version base address");
-		return snprintf(buf, SMEM_IMAGE_VERSION_NAME_SIZE, "Unknown");
-	}
-	down_read(&current_image_rwsem);
-	string_address += current_image * SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
-	up_read(&current_image_rwsem);
-	return snprintf(buf, SMEM_IMAGE_VERSION_NAME_SIZE, "%-.75s\n",
-			string_address);
-}
-
-static ssize_t
-msm_set_image_version(struct device *dev,
-			struct device_attribute *attr,
-			const char *buf,
-			size_t count)
-{
-	char *store_address;
-
-	down_read(&current_image_rwsem);
-	if (current_image != SMEM_IMAGE_VERSION_PARTITION_APPS) {
-		up_read(&current_image_rwsem);
-		return count;
-	}
-	store_address = socinfo_get_image_version_base_address();
-	if (IS_ERR_OR_NULL(store_address)) {
-		pr_err("Failed to get image version base address");
-		up_read(&current_image_rwsem);
-		return count;
-	}
-	store_address += current_image * SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
-	up_read(&current_image_rwsem);
-	snprintf(store_address, SMEM_IMAGE_VERSION_NAME_SIZE, "%-.75s", buf);
-	return count;
-}
-
-static ssize_t
-msm_get_image_variant(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	char *string_address;
-
-	string_address = socinfo_get_image_version_base_address();
-	if (IS_ERR_OR_NULL(string_address)) {
-		pr_err("Failed to get image version base address");
-		return snprintf(buf, SMEM_IMAGE_VERSION_VARIANT_SIZE,
-		"Unknown");
-	}
-	down_read(&current_image_rwsem);
-	string_address += current_image * SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
-	up_read(&current_image_rwsem);
-	string_address += SMEM_IMAGE_VERSION_VARIANT_OFFSET;
-	return snprintf(buf, SMEM_IMAGE_VERSION_VARIANT_SIZE, "%-.20s\n",
-			string_address);
-}
-
-static ssize_t
-msm_set_image_variant(struct device *dev,
-			struct device_attribute *attr,
-			const char *buf,
-			size_t count)
-{
-	char *store_address;
-
-	down_read(&current_image_rwsem);
-	if (current_image != SMEM_IMAGE_VERSION_PARTITION_APPS) {
-		up_read(&current_image_rwsem);
-		return count;
-	}
-	store_address = socinfo_get_image_version_base_address();
-	if (IS_ERR_OR_NULL(store_address)) {
-		pr_err("Failed to get image version base address");
-		up_read(&current_image_rwsem);
-		return count;
-	}
-	store_address += current_image * SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
-	up_read(&current_image_rwsem);
-	store_address += SMEM_IMAGE_VERSION_VARIANT_OFFSET;
-	snprintf(store_address, SMEM_IMAGE_VERSION_VARIANT_SIZE, "%-.20s", buf);
-	return count;
-}
-
-static ssize_t
-msm_get_image_crm_version(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	char *string_address;
-
-	string_address = socinfo_get_image_version_base_address();
-	if (IS_ERR_OR_NULL(string_address)) {
-		pr_err("Failed to get image version base address");
-		return snprintf(buf, SMEM_IMAGE_VERSION_OEM_SIZE, "Unknown");
-	}
-	down_read(&current_image_rwsem);
-	string_address += current_image * SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
-	up_read(&current_image_rwsem);
-	string_address += SMEM_IMAGE_VERSION_OEM_OFFSET;
-	return snprintf(buf, SMEM_IMAGE_VERSION_OEM_SIZE, "%-.33s\n",
-			string_address);
-}
-
-static ssize_t
-msm_set_image_crm_version(struct device *dev,
-			struct device_attribute *attr,
-			const char *buf,
-			size_t count)
-{
-	char *store_address;
-
-	down_read(&current_image_rwsem);
-	if (current_image != SMEM_IMAGE_VERSION_PARTITION_APPS) {
-		up_read(&current_image_rwsem);
-		return count;
-	}
-	store_address = socinfo_get_image_version_base_address();
-	if (IS_ERR_OR_NULL(store_address)) {
-		pr_err("Failed to get image version base address");
-		up_read(&current_image_rwsem);
-		return count;
-	}
-	store_address += current_image * SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
-	up_read(&current_image_rwsem);
-	store_address += SMEM_IMAGE_VERSION_OEM_OFFSET;
-	snprintf(store_address, SMEM_IMAGE_VERSION_OEM_SIZE, "%-.33s", buf);
-	return count;
-}
-
-static ssize_t
-msm_get_image_number(struct device *dev,
-			struct device_attribute *attr,
-			char *buf)
-{
-	int ret;
-
-	down_read(&current_image_rwsem);
-	ret = snprintf(buf, PAGE_SIZE, "%d\n",
-			current_image);
-	up_read(&current_image_rwsem);
-	return ret;
-
-}
-
-static ssize_t
-msm_select_image(struct device *dev, struct device_attribute *attr,
-			const char *buf, size_t count)
-{
-	int ret, digit;
-
-	ret = kstrtoint(buf, 10, &digit);
-	if (ret)
-		return ret;
-	down_write(&current_image_rwsem);
-	if (digit >= 0 && digit < SMEM_IMAGE_VERSION_BLOCKS_COUNT)
-		current_image = digit;
+	if (model < ARRAY_SIZE(pmic_models) && pmic_models[model])
+		seq_printf(seq, "%s\n", pmic_models[model]);
 	else
-		current_image = 0;
-	up_write(&current_image_rwsem);
-	return count;
+		seq_printf(seq, "unknown (%d)\n", model);
+
+	return 0;
 }
 
-static ssize_t
-msm_get_images(struct device *dev,
-		struct device_attribute *attr, char *buf)
+static int qcom_show_pmic_model_array(struct seq_file *seq, void *p)
 {
-	int pos = 0;
-	int image;
-	char *image_address;
+	struct socinfo *socinfo = seq->private;
+	unsigned int num_pmics = le32_to_cpu(socinfo->num_pmics);
+	unsigned int pmic_array_offset = le32_to_cpu(socinfo->pmic_array_offset);
+	int i;
+	void *ptr = socinfo;
 
-	image_address = socinfo_get_image_version_base_address();
-	if (IS_ERR_OR_NULL(image_address))
-		return snprintf(buf, PAGE_SIZE, "Unavailable\n");
+	ptr += pmic_array_offset;
 
-	*buf = '\0';
-	for (image = 0; image < SMEM_IMAGE_VERSION_BLOCKS_COUNT; image++) {
-		if (*image_address == '\0') {
-			image_address += SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
-			continue;
-		}
+	/* No need for bounds checking, it happened at socinfo_debugfs_init */
+	for (i = 0; i < num_pmics; i++) {
+		unsigned int model = SOCINFO_MINOR(get_unaligned_le32(ptr + 2 * i * sizeof(u32)));
+		unsigned int die_rev = get_unaligned_le32(ptr + (2 * i + 1) * sizeof(u32));
 
-		pos += snprintf(buf + pos, PAGE_SIZE - pos, "%d:\n",
-			image);
-		pos += snprintf(buf + pos, PAGE_SIZE - pos,
-			"\tCRM:\t\t%-.75s\n", image_address);
-		pos += snprintf(buf + pos, PAGE_SIZE - pos,
-			"\tVariant:\t%-.20s\n",
-			image_address + SMEM_IMAGE_VERSION_VARIANT_OFFSET);
-		pos += snprintf(buf + pos, PAGE_SIZE - pos,
-			"\tVersion:\t%-.33s\n",
-			image_address + SMEM_IMAGE_VERSION_OEM_OFFSET);
-
-		image_address += SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
+		if (model < ARRAY_SIZE(pmic_models) && pmic_models[model])
+			seq_printf(seq, "%s %u.%u\n", pmic_models[model],
+				   SOCINFO_MAJOR(die_rev),
+				   SOCINFO_MINOR(die_rev));
+		else
+			seq_printf(seq, "unknown (%d)\n", model);
 	}
 
-	return pos;
+	return 0;
 }
 
-static struct device_attribute msm_soc_attr_raw_version =
-	__ATTR(raw_version, 0444, msm_get_raw_version,  NULL);
-
-static struct device_attribute msm_soc_attr_raw_id =
-	__ATTR(raw_id, 0444, msm_get_raw_id,  NULL);
-
-static struct device_attribute msm_soc_attr_vendor =
-	__ATTR(vendor, 0444, msm_get_vendor,  NULL);
-
-static struct device_attribute msm_soc_attr_build_id =
-	__ATTR(build_id, 0444, msm_get_build_id, NULL);
-
-static struct device_attribute msm_soc_attr_hw_platform =
-	__ATTR(hw_platform, 0444, msm_get_hw_platform, NULL);
-
-
-static struct device_attribute msm_soc_attr_platform_version =
-	__ATTR(platform_version, 0444,
-			msm_get_platform_version, NULL);
-
-static struct device_attribute msm_soc_attr_accessory_chip =
-	__ATTR(accessory_chip, 0444,
-			msm_get_accessory_chip, NULL);
-
-static struct device_attribute msm_soc_attr_platform_subtype =
-	__ATTR(platform_subtype, 0444,
-			msm_get_platform_subtype, NULL);
-
-/* Platform Subtype String is being deprecated. Use Platform
- * Subtype ID instead.
- */
-static struct device_attribute msm_soc_attr_platform_subtype_id =
-	__ATTR(platform_subtype_id, 0444,
-			msm_get_platform_subtype_id, NULL);
-
-static struct device_attribute msm_soc_attr_foundry_id =
-	__ATTR(foundry_id, 0444,
-			msm_get_foundry_id, NULL);
-
-static struct device_attribute msm_soc_attr_serial_number =
-	__ATTR(serial_number, 0444,
-			msm_get_serial_number, NULL);
-
-static struct device_attribute msm_soc_attr_chip_family =
-	__ATTR(chip_family, 0444,
-			msm_get_chip_family, NULL);
-
-static struct device_attribute msm_soc_attr_raw_device_family =
-	__ATTR(raw_device_family, 0444,
-			msm_get_raw_device_family, NULL);
-
-static struct device_attribute msm_soc_attr_raw_device_number =
-	__ATTR(raw_device_number, 0444,
-			msm_get_raw_device_number, NULL);
-
-static struct device_attribute msm_soc_attr_chip_name =
-	__ATTR(chip_name, 0444,
-			msm_get_chip_name, NULL);
-
-static struct device_attribute msm_soc_attr_nproduct_id =
-	__ATTR(nproduct_id, 0444,
-			msm_get_nproduct_id, NULL);
-
-static struct device_attribute msm_soc_attr_num_clusters =
-	__ATTR(num_clusters, 0444,
-			msm_get_num_clusters, NULL);
-
-static struct device_attribute msm_soc_attr_ncluster_array_offset =
-	__ATTR(ncluster_array_offset, 0444,
-			msm_get_ncluster_array_offset, NULL);
-
-static struct device_attribute msm_soc_attr_subset_cores =
-	__ATTR(subset_cores, 0444,
-			msm_get_subset_cores, NULL);
-
-static struct device_attribute msm_soc_attr_num_subset_parts =
-	__ATTR(num_subset_parts, 0444,
-			msm_get_num_subset_parts, NULL);
-
-static struct device_attribute msm_soc_attr_nsubset_parts_array_offset =
-	__ATTR(nsubset_parts_array_offset, 0444,
-			msm_get_nsubset_parts_array_offset, NULL);
-
-static struct device_attribute msm_soc_attr_subset_parts =
-	__ATTR(subset_parts, 0444,
-			msm_get_subset_parts, NULL);
-
-static struct device_attribute msm_soc_attr_nmodem_supported =
-	__ATTR(nmodem_supported, 0444,
-			msm_get_nmodem_supported, NULL);
-
-static struct device_attribute msm_soc_attr_sku =
-	__ATTR(sku, 0444, msm_get_sku, NULL);
-
-static struct device_attribute msm_soc_attr_feature_code =
-	__ATTR(feature_code, 0444, msm_get_feature_code, NULL);
-
-static struct device_attribute msm_soc_attr_pcode =
-	__ATTR(pcode, 0444, msm_get_pcode, NULL);
-
-static struct device_attribute msm_soc_attr_pmic_model =
-	__ATTR(pmic_model, 0444,
-			msm_get_pmic_model, NULL);
-
-static struct device_attribute msm_soc_attr_pmic_die_revision =
-	__ATTR(pmic_die_revision, 0444,
-			msm_get_pmic_die_revision, NULL);
-
-static struct device_attribute image_version =
-	__ATTR(image_version, 0644,
-			msm_get_image_version, msm_set_image_version);
-
-static struct device_attribute image_variant =
-	__ATTR(image_variant, 0644,
-			msm_get_image_variant, msm_set_image_variant);
-
-static struct device_attribute image_crm_version =
-	__ATTR(image_crm_version, 0644,
-			msm_get_image_crm_version, msm_set_image_crm_version);
-
-static struct device_attribute select_image =
-	__ATTR(select_image, 0644,
-			msm_get_image_number, msm_select_image);
-
-static struct device_attribute images =
-	__ATTR(images, 0444, msm_get_images, NULL);
-
-static void * __init setup_dummy_socinfo(void)
+static int qcom_show_pmic_die_revision(struct seq_file *seq, void *p)
 {
-	if (early_machine_is_apq8084()) {
-		dummy_socinfo.id = 178;
-		strlcpy(dummy_socinfo.build_id, "apq8084 - ",
-			sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_msm8916()) {
-		dummy_socinfo.id = 206;
-		strlcpy(dummy_socinfo.build_id, "msm8916 - ",
-			sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_msm8996()) {
-		dummy_socinfo.id = 246;
-		strlcpy(dummy_socinfo.build_id, "msm8996 - ",
-			sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_msm8996_auto()) {
-		dummy_socinfo.id = 310;
-		strlcpy(dummy_socinfo.build_id, "msm8996-auto - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_sdm660()) {
-		dummy_socinfo.id = 317;
-		strlcpy(dummy_socinfo.build_id, "sdm660 - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_sm8150()) {
-		dummy_socinfo.id = 339;
-		strlcpy(dummy_socinfo.build_id, "sm8150 - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_sa8150()) {
-		dummy_socinfo.id = 362;
-		strlcpy(dummy_socinfo.build_id, "sa8150 - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_kona()) {
-		dummy_socinfo.id = 356;
-		strlcpy(dummy_socinfo.build_id, "kona - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_lito()) {
-		dummy_socinfo.id = 400;
-		strlcpy(dummy_socinfo.build_id, "lito - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_orchid()) {
-		dummy_socinfo.id = 476;
-		strlcpy(dummy_socinfo.build_id, "orchid - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_bengal()) {
-		dummy_socinfo.id = 417;
-		strlcpy(dummy_socinfo.build_id, "bengal - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_khaje()) {
-		dummy_socinfo.id = 518;
-		strlcpy(dummy_socinfo.build_id, "khaje - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_khajep()) {
-		dummy_socinfo.id = 561;
-		strlcpy(dummy_socinfo.build_id, "khajep - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_khajeq()) {
-		dummy_socinfo.id = 562;
-		strlcpy(dummy_socinfo.build_id, "khajeq - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_khajeg()) {
-		dummy_socinfo.id = 585;
-		strlcpy(dummy_socinfo.build_id, "khajeg - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_bengalp()) {
-		dummy_socinfo.id = 445;
-		strlcpy(dummy_socinfo.build_id, "bengalp - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_lagoon()) {
-		dummy_socinfo.id = 434;
-		strlcpy(dummy_socinfo.build_id, "lagoon - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_scuba()) {
-		dummy_socinfo.id = 441;
-		strlcpy(dummy_socinfo.build_id, "scuba - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_scubaiot()) {
-		dummy_socinfo.id = 473;
-		strlcpy(dummy_socinfo.build_id, "scubaiot - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_scubapiot()) {
-		dummy_socinfo.id = 474;
-		strlcpy(dummy_socinfo.build_id, "scubapiot - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_sdmshrike()) {
-		dummy_socinfo.id = 340;
-		strlcpy(dummy_socinfo.build_id, "sdmshrike - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_sm6150()) {
-		dummy_socinfo.id = 355;
-		strlcpy(dummy_socinfo.build_id, "sm6150 - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_qcs405()) {
-		dummy_socinfo.id = 352;
-		strlcpy(dummy_socinfo.build_id, "qcs405 - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_sdxprairie()) {
-		dummy_socinfo.id = 357;
-		strlcpy(dummy_socinfo.build_id, "sdxprairie - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_sdmmagpie()) {
-		dummy_socinfo.id = 365;
-		strlcpy(dummy_socinfo.build_id, "sdmmagpie - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_bengal_iot()) {
-		dummy_socinfo.id = 469;
-		strlcpy(dummy_socinfo.build_id, "bengal-iot - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_bengalp_iot()) {
-		dummy_socinfo.id = 470;
-		strlcpy(dummy_socinfo.build_id, "bengalp-iot - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_msm8937()) {
-		dummy_socinfo.id = 294;
-		strlcpy(dummy_socinfo.build_id, "msm8937 - ",
-		sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_msm8917()) {
-		dummy_socinfo.id = 303;
-		strlcpy(dummy_socinfo.build_id, "msm8917 - ",
-			sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_sdm439()) {
-		dummy_socinfo.id = 353;
-		strlcpy(dummy_socinfo.build_id, "sdm439 - ",
-				sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_sdm429()) {
-		dummy_socinfo.id = 354;
-		strlcpy(dummy_socinfo.build_id, "sdm429 - ",
-				sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_qm215()) {
-		dummy_socinfo.id = 386;
-		strlcpy(dummy_socinfo.build_id, "qm215 - ",
-				sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_qcm2150()) {
-		dummy_socinfo.id = 436;
-		strlcpy(dummy_socinfo.build_id, "qcm2150 - ",
-				sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_msm8953()) {
-		dummy_socinfo.id = 293;
-		strlcpy(dummy_socinfo.build_id, "msm8953 - ",
-			sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_sdm450()) {
-		dummy_socinfo.id = 338;
-		strlcpy(dummy_socinfo.build_id, "sdm450 - ",
-			sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_kona_7230_iot()) {
-		dummy_socinfo.id = 548;
-		strlcpy(dummy_socinfo.build_id, "kona-7230-iot - ",
-		sizeof(dummy_socinfo.build_id));
-	} else
-		strlcat(dummy_socinfo.build_id, "Dummy socinfo",
-			sizeof(dummy_socinfo.build_id));
+	struct socinfo *socinfo = seq->private;
 
-	return (void *) &dummy_socinfo;
+	seq_printf(seq, "%u.%u\n",
+		   SOCINFO_MAJOR(le32_to_cpu(socinfo->pmic_die_rev)),
+		   SOCINFO_MINOR(le32_to_cpu(socinfo->pmic_die_rev)));
+
+	return 0;
 }
 
-static void __init populate_soc_sysfs_files(struct device *msm_soc_device)
+static int qcom_show_chip_id(struct seq_file *seq, void *p)
 {
-	device_create_file(msm_soc_device, &msm_soc_attr_vendor);
-	device_create_file(msm_soc_device, &image_version);
-	device_create_file(msm_soc_device, &image_variant);
-	device_create_file(msm_soc_device, &image_crm_version);
-	device_create_file(msm_soc_device, &select_image);
-	device_create_file(msm_soc_device, &images);
+	struct socinfo *socinfo = seq->private;
 
-	switch (socinfo_format) {
+	seq_printf(seq, "%s\n", socinfo->chip_id);
+
+	return 0;
+}
+
+QCOM_OPEN(build_id, qcom_show_build_id);
+QCOM_OPEN(pmic_model, qcom_show_pmic_model);
+QCOM_OPEN(pmic_model_array, qcom_show_pmic_model_array);
+QCOM_OPEN(pmic_die_rev, qcom_show_pmic_die_revision);
+QCOM_OPEN(chip_id, qcom_show_chip_id);
+
+#define DEFINE_IMAGE_OPS(type)					\
+static int show_image_##type(struct seq_file *seq, void *p)		  \
+{								  \
+	struct smem_image_version *image_version = seq->private;  \
+	if (image_version->type[0] != '\0')			  \
+		seq_printf(seq, "%s\n", image_version->type);	  \
+	return 0;						  \
+}								  \
+static int open_image_##type(struct inode *inode, struct file *file)	  \
+{									  \
+	return single_open(file, show_image_##type, inode->i_private); \
+}									  \
+									  \
+static const struct file_operations qcom_image_##type##_ops = {	  \
+	.open = open_image_##type,					  \
+	.read = seq_read,						  \
+	.llseek = seq_lseek,						  \
+	.release = single_release,					  \
+}
+
+DEFINE_IMAGE_OPS(name);
+DEFINE_IMAGE_OPS(variant);
+DEFINE_IMAGE_OPS(oem);
+
+static void socinfo_debugfs_init(struct qcom_socinfo *qcom_socinfo,
+				 struct socinfo *info, size_t info_size)
+{
+	struct smem_image_version *versions;
+	struct dentry *dentry;
+	size_t size;
+	int i;
+	unsigned int num_pmics;
+	unsigned int pmic_array_offset;
+
+	qcom_socinfo->dbg_root = debugfs_create_dir("qcom_socinfo", NULL);
+
+	qcom_socinfo->info.fmt = __le32_to_cpu(info->fmt);
+
+	debugfs_create_x32("info_fmt", 0444, qcom_socinfo->dbg_root,
+			   &qcom_socinfo->info.fmt);
+
+	switch (qcom_socinfo->info.fmt) {
+	case SOCINFO_VERSION(0, 19):
+		qcom_socinfo->info.num_func_clusters = __le32_to_cpu(info->num_func_clusters);
+		qcom_socinfo->info.boot_cluster = __le32_to_cpu(info->boot_cluster);
+		qcom_socinfo->info.boot_core = __le32_to_cpu(info->boot_core);
+
+		debugfs_create_u32("num_func_clusters", 0444, qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.num_func_clusters);
+		debugfs_create_u32("boot_cluster", 0444, qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.boot_cluster);
+		debugfs_create_u32("boot_core", 0444, qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.boot_core);
+		fallthrough;
+	case SOCINFO_VERSION(0, 18):
+	case SOCINFO_VERSION(0, 17):
+		qcom_socinfo->info.oem_variant = __le32_to_cpu(info->oem_variant);
+		debugfs_create_u32("oem_variant", 0444, qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.oem_variant);
+		fallthrough;
 	case SOCINFO_VERSION(0, 16):
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_sku);
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_feature_code);
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_pcode);
+		qcom_socinfo->info.feature_code = __le32_to_cpu(info->feature_code);
+		qcom_socinfo->info.pcode = __le32_to_cpu(info->pcode);
+
+		debugfs_create_u32("feature_code", 0444, qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.feature_code);
+		debugfs_create_u32("pcode", 0444, qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.pcode);
+		fallthrough;
 	case SOCINFO_VERSION(0, 15):
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_nmodem_supported);
+		qcom_socinfo->info.nmodem_supported = __le32_to_cpu(info->nmodem_supported);
+
+		debugfs_create_u32("nmodem_supported", 0444, qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.nmodem_supported);
+		fallthrough;
 	case SOCINFO_VERSION(0, 14):
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_num_clusters);
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_ncluster_array_offset);
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_subset_cores);
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_num_subset_parts);
-		device_create_file(msm_soc_device,
-				&msm_soc_attr_nsubset_parts_array_offset);
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_subset_parts);
+		qcom_socinfo->info.num_clusters = __le32_to_cpu(info->num_clusters);
+		qcom_socinfo->info.ncluster_array_offset = __le32_to_cpu(info->ncluster_array_offset);
+		qcom_socinfo->info.num_subset_parts = __le32_to_cpu(info->num_subset_parts);
+		qcom_socinfo->info.nsubset_parts_array_offset =
+			__le32_to_cpu(info->nsubset_parts_array_offset);
+
+		debugfs_create_u32("num_clusters", 0444, qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.num_clusters);
+		debugfs_create_u32("ncluster_array_offset", 0444, qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.ncluster_array_offset);
+		debugfs_create_u32("num_subset_parts", 0444, qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.num_subset_parts);
+		debugfs_create_u32("nsubset_parts_array_offset", 0444, qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.nsubset_parts_array_offset);
+		fallthrough;
 	case SOCINFO_VERSION(0, 13):
-		 device_create_file(msm_soc_device,
-					&msm_soc_attr_nproduct_id);
-		 device_create_file(msm_soc_device,
-					&msm_soc_attr_chip_name);
+		qcom_socinfo->info.nproduct_id = __le32_to_cpu(info->nproduct_id);
+
+		debugfs_create_u32("nproduct_id", 0444, qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.nproduct_id);
+		DEBUGFS_ADD(info, chip_id);
+		fallthrough;
 	case SOCINFO_VERSION(0, 12):
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_chip_family);
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_raw_device_family);
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_raw_device_number);
+		qcom_socinfo->info.chip_family =
+			__le32_to_cpu(info->chip_family);
+		qcom_socinfo->info.raw_device_family =
+			__le32_to_cpu(info->raw_device_family);
+		qcom_socinfo->info.raw_device_num =
+			__le32_to_cpu(info->raw_device_num);
+
+		debugfs_create_x32("chip_family", 0444, qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.chip_family);
+		debugfs_create_x32("raw_device_family", 0444,
+				   qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.raw_device_family);
+		debugfs_create_x32("raw_device_number", 0444,
+				   qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.raw_device_num);
+		fallthrough;
 	case SOCINFO_VERSION(0, 11):
+		num_pmics = le32_to_cpu(info->num_pmics);
+		pmic_array_offset = le32_to_cpu(info->pmic_array_offset);
+		if (pmic_array_offset + 2 * num_pmics * sizeof(u32) <= info_size)
+			DEBUGFS_ADD(info, pmic_model_array);
+		fallthrough;
 	case SOCINFO_VERSION(0, 10):
-		 device_create_file(msm_soc_device,
-					&msm_soc_attr_serial_number);
 	case SOCINFO_VERSION(0, 9):
-		 device_create_file(msm_soc_device,
-					&msm_soc_attr_foundry_id);
+		qcom_socinfo->info.foundry_id = __le32_to_cpu(info->foundry_id);
+
+		debugfs_create_u32("foundry_id", 0444, qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.foundry_id);
+		fallthrough;
 	case SOCINFO_VERSION(0, 8):
 	case SOCINFO_VERSION(0, 7):
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_pmic_model);
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_pmic_die_revision);
+		DEBUGFS_ADD(info, pmic_model);
+		DEBUGFS_ADD(info, pmic_die_rev);
+		fallthrough;
 	case SOCINFO_VERSION(0, 6):
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_platform_subtype);
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_platform_subtype_id);
+		qcom_socinfo->info.hw_plat_subtype =
+			__le32_to_cpu(info->hw_plat_subtype);
+
+		debugfs_create_u32("hardware_platform_subtype", 0444,
+				   qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.hw_plat_subtype);
+		fallthrough;
 	case SOCINFO_VERSION(0, 5):
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_accessory_chip);
+		qcom_socinfo->info.accessory_chip =
+			__le32_to_cpu(info->accessory_chip);
+
+		debugfs_create_u32("accessory_chip", 0444,
+				   qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.accessory_chip);
+		fallthrough;
 	case SOCINFO_VERSION(0, 4):
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_platform_version);
+		qcom_socinfo->info.plat_ver = __le32_to_cpu(info->plat_ver);
+
+		debugfs_create_u32("platform_version", 0444,
+				   qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.plat_ver);
+		fallthrough;
 	case SOCINFO_VERSION(0, 3):
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_hw_platform);
+		qcom_socinfo->info.hw_plat = __le32_to_cpu(info->hw_plat);
+
+		debugfs_create_u32("hardware_platform", 0444,
+				   qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.hw_plat);
+		fallthrough;
 	case SOCINFO_VERSION(0, 2):
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_raw_id);
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_raw_version);
+		qcom_socinfo->info.raw_ver  = __le32_to_cpu(info->raw_ver);
+
+		debugfs_create_u32("raw_version", 0444, qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.raw_ver);
+		fallthrough;
 	case SOCINFO_VERSION(0, 1):
-		device_create_file(msm_soc_device,
-					&msm_soc_attr_build_id);
-		break;
-	default:
-		pr_err("Unknown socinfo format: v%u.%u\n",
-				SOCINFO_VERSION_MAJOR(socinfo_format),
-				SOCINFO_VERSION_MINOR(socinfo_format));
+		DEBUGFS_ADD(info, build_id);
 		break;
 	}
 
+	versions = qcom_smem_get(QCOM_SMEM_HOST_ANY, SMEM_IMAGE_VERSION_TABLE,
+				 &size);
+
+	for (i = 0; i < ARRAY_SIZE(socinfo_image_names); i++) {
+		if (!socinfo_image_names[i])
+			continue;
+
+		dentry = debugfs_create_dir(socinfo_image_names[i],
+					    qcom_socinfo->dbg_root);
+		debugfs_create_file("name", 0444, dentry, &versions[i],
+				    &qcom_image_name_ops);
+		debugfs_create_file("variant", 0444, dentry, &versions[i],
+				    &qcom_image_variant_ops);
+		debugfs_create_file("oem", 0444, dentry, &versions[i],
+				    &qcom_image_oem_ops);
+	}
 }
 
-static void  __init soc_info_populate(struct soc_device_attribute *soc_dev_attr)
+static void socinfo_debugfs_exit(struct qcom_socinfo *qcom_socinfo)
 {
-	uint32_t soc_version = socinfo_get_version();
-
-	soc_dev_attr->soc_id   = kasprintf(GFP_KERNEL, "%d", socinfo_get_id());
-	soc_dev_attr->family  =  "Snapdragon";
-	soc_dev_attr->machine  = socinfo_get_id_string();
-	soc_dev_attr->revision = kasprintf(GFP_KERNEL, "%u.%u",
-			SOCINFO_VERSION_MAJOR(soc_version),
-			SOCINFO_VERSION_MINOR(soc_version));
-	return;
-
+	debugfs_remove_recursive(qcom_socinfo->dbg_root);
 }
-
-static int __init socinfo_init_sysfs(void)
+#else
+static void socinfo_debugfs_init(struct qcom_socinfo *qcom_socinfo,
+				 struct socinfo *info, size_t info_size)
 {
-	struct device *msm_soc_device;
-	struct soc_device *soc_dev;
-	struct soc_device_attribute *soc_dev_attr;
+}
+static void socinfo_debugfs_exit(struct qcom_socinfo *qcom_socinfo) {  }
+#endif /* CONFIG_DEBUG_FS */
 
-	if (!socinfo) {
-		pr_err("No socinfo found!\n");
-		return -ENODEV;
+static int qcom_socinfo_probe(struct platform_device *pdev)
+{
+	struct qcom_socinfo *qs;
+	struct socinfo *info;
+	size_t item_size;
+
+	info = qcom_smem_get(QCOM_SMEM_HOST_ANY, SMEM_HW_SW_BUILD_ID,
+			      &item_size);
+	if (IS_ERR(info)) {
+		dev_err(&pdev->dev, "Couldn't find socinfo\n");
+		return PTR_ERR(info);
 	}
 
-	soc_dev_attr = kzalloc(sizeof(*soc_dev_attr), GFP_KERNEL);
-	if (!soc_dev_attr)
+	qs = devm_kzalloc(&pdev->dev, sizeof(*qs), GFP_KERNEL);
+	if (!qs)
 		return -ENOMEM;
 
-	soc_info_populate(soc_dev_attr);
-	soc_dev = soc_device_register(soc_dev_attr);
-	if (IS_ERR_OR_NULL(soc_dev)) {
-		kfree(soc_dev_attr);
-		pr_err("Soc device register failed\n");
-		return -EIO;
+	qs->attr.family = "Snapdragon";
+	qs->attr.machine = socinfo_machine(&pdev->dev,
+					   le32_to_cpu(info->id));
+	qs->attr.soc_id = devm_kasprintf(&pdev->dev, GFP_KERNEL, "%u",
+					 le32_to_cpu(info->id));
+	qs->attr.revision = devm_kasprintf(&pdev->dev, GFP_KERNEL, "%u.%u",
+					   SOCINFO_MAJOR(le32_to_cpu(info->ver)),
+					   SOCINFO_MINOR(le32_to_cpu(info->ver)));
+	if (!qs->attr.soc_id || !qs->attr.revision)
+		return -ENOMEM;
+
+	if (offsetofend(struct socinfo, serial_num) <= item_size) {
+		qs->attr.serial_number = devm_kasprintf(&pdev->dev, GFP_KERNEL,
+							"%u",
+							le32_to_cpu(info->serial_num));
+		if (!qs->attr.serial_number)
+			return -ENOMEM;
 	}
 
-	msm_soc_device = soc_device_to_device(soc_dev);
-	populate_soc_sysfs_files(msm_soc_device);
+	qs->soc_dev = soc_device_register(&qs->attr);
+	if (IS_ERR(qs->soc_dev))
+		return PTR_ERR(qs->soc_dev);
+
+	socinfo_debugfs_init(qs, info, item_size);
+
+	/* Feed the soc specific unique data into entropy pool */
+	add_device_randomness(info, item_size);
+
+	platform_set_drvdata(pdev, qs);
+
 	return 0;
 }
 
-late_initcall(socinfo_init_sysfs);
-
-static void socinfo_print(void)
+static void qcom_socinfo_remove(struct platform_device *pdev)
 {
-	uint32_t f_maj = SOCINFO_VERSION_MAJOR(socinfo_format);
-	uint32_t f_min = SOCINFO_VERSION_MINOR(socinfo_format);
-	uint32_t v_maj = SOCINFO_VERSION_MAJOR(socinfo->v0_1.version);
-	uint32_t v_min = SOCINFO_VERSION_MINOR(socinfo->v0_1.version);
+	struct qcom_socinfo *qs = platform_get_drvdata(pdev);
 
-	switch (socinfo_format) {
-	case SOCINFO_VERSION(0, 1):
-		pr_info("v%u.%u, id=%u, ver=%u.%u\n",
-			f_maj, f_min, socinfo->v0_1.id, v_maj, v_min);
-		break;
-	case SOCINFO_VERSION(0, 2):
-		pr_info("v%u.%u, id=%u, ver=%u.%u, raw_id=%u, raw_ver=%u\n",
-			f_maj, f_min, socinfo->v0_1.id, v_maj, v_min,
-			socinfo->v0_2.raw_id, socinfo->v0_2.raw_version);
-		break;
-	case SOCINFO_VERSION(0, 3):
-		pr_info("v%u.%u, id=%u, ver=%u.%u, raw_id=%u, raw_ver=%u, hw_plat=%u\n",
-			f_maj, f_min, socinfo->v0_1.id, v_maj, v_min,
-			socinfo->v0_2.raw_id, socinfo->v0_2.raw_version,
-			socinfo->v0_3.hw_platform);
-		break;
-	case SOCINFO_VERSION(0, 4):
-		pr_info("v%u.%u, id=%u, ver=%u.%u, raw_id=%u, raw_ver=%u, hw_plat=%u, hw_plat_ver=%u\n",
-			f_maj, f_min, socinfo->v0_1.id, v_maj, v_min,
-			socinfo->v0_2.raw_id, socinfo->v0_2.raw_version,
-			socinfo->v0_3.hw_platform,
-			socinfo->v0_4.platform_version);
-		break;
-	case SOCINFO_VERSION(0, 5):
-		pr_info("v%u.%u, id=%u, ver=%u.%u, raw_id=%u, raw_ver=%u, hw_plat=%u, hw_plat_ver=%u\n accessory_chip=%u\n",
-			f_maj, f_min, socinfo->v0_1.id, v_maj, v_min,
-			socinfo->v0_2.raw_id, socinfo->v0_2.raw_version,
-			socinfo->v0_3.hw_platform,
-			socinfo->v0_4.platform_version,
-			socinfo->v0_5.accessory_chip);
-		break;
-	case SOCINFO_VERSION(0, 6):
-		pr_info("v%u.%u, id=%u, ver=%u.%u, raw_id=%u, raw_ver=%u, hw_plat=%u, hw_plat_ver=%u\n accessory_chip=%u hw_plat_subtype=%u\n",
-			f_maj, f_min, socinfo->v0_1.id, v_maj, v_min,
-			socinfo->v0_2.raw_id, socinfo->v0_2.raw_version,
-			socinfo->v0_3.hw_platform,
-			socinfo->v0_4.platform_version,
-			socinfo->v0_5.accessory_chip,
-			socinfo->v0_6.hw_platform_subtype);
-		break;
-	case SOCINFO_VERSION(0, 7):
-	case SOCINFO_VERSION(0, 8):
-		pr_info("v%u.%u, id=%u, ver=%u.%u, raw_id=%u, raw_ver=%u, hw_plat=%u, hw_plat_ver=%u\n accessory_chip=%u, hw_plat_subtype=%u, pmic_model=%u, pmic_die_revision=%u\n",
-			f_maj, f_min, socinfo->v0_1.id, v_maj, v_min,
-			socinfo->v0_2.raw_id, socinfo->v0_2.raw_version,
-			socinfo->v0_3.hw_platform,
-			socinfo->v0_4.platform_version,
-			socinfo->v0_5.accessory_chip,
-			socinfo->v0_6.hw_platform_subtype,
-			socinfo->v0_7.pmic_model,
-			socinfo->v0_7.pmic_die_revision);
-		break;
-	case SOCINFO_VERSION(0, 9):
-		pr_info("v%u.%u, id=%u, ver=%u.%u, raw_id=%u, raw_ver=%u, hw_plat=%u, hw_plat_ver=%u\n accessory_chip=%u, hw_plat_subtype=%u, pmic_model=%u, pmic_die_revision=%u foundry_id=%u\n",
-			f_maj, f_min, socinfo->v0_1.id, v_maj, v_min,
-			socinfo->v0_2.raw_id, socinfo->v0_2.raw_version,
-			socinfo->v0_3.hw_platform,
-			socinfo->v0_4.platform_version,
-			socinfo->v0_5.accessory_chip,
-			socinfo->v0_6.hw_platform_subtype,
-			socinfo->v0_7.pmic_model,
-			socinfo->v0_7.pmic_die_revision,
-			socinfo->v0_9.foundry_id);
-		break;
-	case SOCINFO_VERSION(0, 10):
-		pr_info("v%u.%u, id=%u, ver=%u.%u, raw_id=%u, raw_ver=%u, hw_plat=%u, hw_plat_ver=%u\n accessory_chip=%u, hw_plat_subtype=%u, pmic_model=%u, pmic_die_revision=%u foundry_id=%u serial_number=%u\n",
-			f_maj, f_min, socinfo->v0_1.id, v_maj, v_min,
-			socinfo->v0_2.raw_id, socinfo->v0_2.raw_version,
-			socinfo->v0_3.hw_platform,
-			socinfo->v0_4.platform_version,
-			socinfo->v0_5.accessory_chip,
-			socinfo->v0_6.hw_platform_subtype,
-			socinfo->v0_7.pmic_model,
-			socinfo->v0_7.pmic_die_revision,
-			socinfo->v0_9.foundry_id,
-			socinfo->v0_10.serial_number);
-		break;
-	case SOCINFO_VERSION(0, 11):
-		pr_info("v%u.%u, id=%u, ver=%u.%u, raw_id=%u, raw_ver=%u, hw_plat=%u, hw_plat_ver=%u\n accessory_chip=%u, hw_plat_subtype=%u, pmic_model=%u, pmic_die_revision=%u foundry_id=%u serial_number=%u num_pmics=%u\n",
-			f_maj, f_min, socinfo->v0_1.id, v_maj, v_min,
-			socinfo->v0_2.raw_id, socinfo->v0_2.raw_version,
-			socinfo->v0_3.hw_platform,
-			socinfo->v0_4.platform_version,
-			socinfo->v0_5.accessory_chip,
-			socinfo->v0_6.hw_platform_subtype,
-			socinfo->v0_7.pmic_model,
-			socinfo->v0_7.pmic_die_revision,
-			socinfo->v0_9.foundry_id,
-			socinfo->v0_10.serial_number,
-			socinfo->v0_11.num_pmics);
-		break;
-	case SOCINFO_VERSION(0, 12):
-		pr_info("v%u.%u, id=%u, ver=%u.%u, raw_id=%u, raw_ver=%u, hw_plat=%u, hw_plat_ver=%u\n accessory_chip=%u, hw_plat_subtype=%u, pmic_model=%u, pmic_die_revision=%u foundry_id=%u serial_number=%u num_pmics=%u chip_family=0x%x raw_device_family=0x%x raw_device_number=0x%x\n",
-			f_maj, f_min, socinfo->v0_1.id, v_maj, v_min,
-			socinfo->v0_2.raw_id, socinfo->v0_2.raw_version,
-			socinfo->v0_3.hw_platform,
-			socinfo->v0_4.platform_version,
-			socinfo->v0_5.accessory_chip,
-			socinfo->v0_6.hw_platform_subtype,
-			socinfo->v0_7.pmic_model,
-			socinfo->v0_7.pmic_die_revision,
-			socinfo->v0_9.foundry_id,
-			socinfo->v0_10.serial_number,
-			socinfo->v0_11.num_pmics,
-			socinfo->v0_12.chip_family,
-			socinfo->v0_12.raw_device_family,
-			socinfo->v0_12.raw_device_number);
-		break;
-	case SOCINFO_VERSION(0, 13):
-		pr_info("v%u.%u, id=%u, ver=%u.%u, raw_id=%u, raw_ver=%u, hw_plat=%u, hw_plat_ver=%u\n accessory_chip=%u, hw_plat_subtype=%u, pmic_model=%u, pmic_die_revision=%u foundry_id=%u serial_number=%u num_pmics=%u chip_family=0x%x raw_device_family=0x%x raw_device_number=0x%x nproduct_id=0x%x\n",
-			f_maj, f_min, socinfo->v0_1.id, v_maj, v_min,
-			socinfo->v0_2.raw_id, socinfo->v0_2.raw_version,
-			socinfo->v0_3.hw_platform,
-			socinfo->v0_4.platform_version,
-			socinfo->v0_5.accessory_chip,
-			socinfo->v0_6.hw_platform_subtype,
-			socinfo->v0_7.pmic_model,
-			socinfo->v0_7.pmic_die_revision,
-			socinfo->v0_9.foundry_id,
-			socinfo->v0_10.serial_number,
-			socinfo->v0_11.num_pmics,
-			socinfo->v0_12.chip_family,
-			socinfo->v0_12.raw_device_family,
-			socinfo->v0_12.raw_device_number,
-			socinfo->v0_13.nproduct_id);
-		break;
+	soc_device_unregister(qs->soc_dev);
 
-	case SOCINFO_VERSION(0, 14):
-		pr_info("v%u.%u, id=%u, ver=%u.%u, raw_id=%u, raw_ver=%u, hw_plat=%u, hw_plat_ver=%u\n accessory_chip=%u, hw_plat_subtype=%u, pmic_model=%u, pmic_die_revision=%u foundry_id=%u serial_number=%u num_pmics=%u chip_family=0x%x raw_device_family=0x%x raw_device_number=0x%x nproduct_id=0x%x num_clusters=0x%x ncluster_array_offset=0x%x num_subset_parts=0x%x nsubset_parts_array_offset=0x%x\n",
-			f_maj, f_min, socinfo->v0_1.id, v_maj, v_min,
-			socinfo->v0_2.raw_id, socinfo->v0_2.raw_version,
-			socinfo->v0_3.hw_platform,
-			socinfo->v0_4.platform_version,
-			socinfo->v0_5.accessory_chip,
-			socinfo->v0_6.hw_platform_subtype,
-			socinfo->v0_7.pmic_model,
-			socinfo->v0_7.pmic_die_revision,
-			socinfo->v0_9.foundry_id,
-			socinfo->v0_10.serial_number,
-			socinfo->v0_11.num_pmics,
-			socinfo->v0_12.chip_family,
-			socinfo->v0_12.raw_device_family,
-			socinfo->v0_12.raw_device_number,
-			socinfo->v0_13.nproduct_id,
-			socinfo->v0_14.num_clusters,
-			socinfo->v0_14.ncluster_array_offset,
-			socinfo->v0_14.num_subset_parts,
-			socinfo->v0_14.nsubset_parts_array_offset);
-		break;
-
-	case SOCINFO_VERSION(0, 15):
-		pr_info("v%u.%u, id=%u, ver=%u.%u, raw_id=%u, raw_ver=%u, hw_plat=%u, hw_plat_ver=%u\n accessory_chip=%u, hw_plat_subtype=%u, pmic_model=%u, pmic_die_revision=%u foundry_id=%u serial_number=%u num_pmics=%u chip_family=0x%x raw_device_family=0x%x raw_device_number=0x%x nproduct_id=0x%x num_clusters=0x%x ncluster_array_offset=0x%x num_subset_parts=0x%x nsubset_parts_array_offset=0x%x nmodem_supported=0x%x\n",
-			f_maj, f_min, socinfo->v0_1.id, v_maj, v_min,
-			socinfo->v0_2.raw_id, socinfo->v0_2.raw_version,
-			socinfo->v0_3.hw_platform,
-			socinfo->v0_4.platform_version,
-			socinfo->v0_5.accessory_chip,
-			socinfo->v0_6.hw_platform_subtype,
-			socinfo->v0_7.pmic_model,
-			socinfo->v0_7.pmic_die_revision,
-			socinfo->v0_9.foundry_id,
-			socinfo->v0_10.serial_number,
-			socinfo->v0_11.num_pmics,
-			socinfo->v0_12.chip_family,
-			socinfo->v0_12.raw_device_family,
-			socinfo->v0_12.raw_device_number,
-			socinfo->v0_13.nproduct_id,
-			socinfo->v0_14.num_clusters,
-			socinfo->v0_14.ncluster_array_offset,
-			socinfo->v0_14.num_subset_parts,
-			socinfo->v0_14.nsubset_parts_array_offset,
-			socinfo->v0_15.nmodem_supported);
-		break;
-
-	case SOCINFO_VERSION(0, 16):
-		pr_info("v%u.%u, id=%u, ver=%u.%u, raw_id=%u, raw_ver=%u, hw_plat=%u, hw_plat_ver=%u\n accessory_chip=%u, hw_plat_subtype=%u, pmic_model=%u, pmic_die_revision=%u foundry_id=%u serial_number=%u num_pmics=%u chip_family=0x%x raw_device_family=0x%x raw_device_number=0x%x nproduct_id=0x%x num_clusters=0x%x ncluster_array_offset=0x%x num_subset_parts=0x%x nsubset_parts_array_offset=0x%x nmodem_supported=0x%x feature_code=0x%x pcode=0x%x sku=%s\n",
-			f_maj, f_min, socinfo->v0_1.id, v_maj, v_min,
-			socinfo->v0_2.raw_id, socinfo->v0_2.raw_version,
-			socinfo->v0_3.hw_platform,
-			socinfo->v0_4.platform_version,
-			socinfo->v0_5.accessory_chip,
-			socinfo->v0_6.hw_platform_subtype,
-			socinfo->v0_7.pmic_model,
-			socinfo->v0_7.pmic_die_revision,
-			socinfo->v0_9.foundry_id,
-			socinfo->v0_10.serial_number,
-			socinfo->v0_11.num_pmics,
-			socinfo->v0_12.chip_family,
-			socinfo->v0_12.raw_device_family,
-			socinfo->v0_12.raw_device_number,
-			socinfo->v0_13.nproduct_id,
-			socinfo->v0_14.num_clusters,
-			socinfo->v0_14.ncluster_array_offset,
-			socinfo->v0_14.num_subset_parts,
-			socinfo->v0_14.nsubset_parts_array_offset,
-			socinfo->v0_15.nmodem_supported,
-			socinfo->v0_16.feature_code,
-			socinfo->v0_16.pcode,
-			sku ? sku : "Unknown");
-		break;
-
-	default:
-		pr_err("Unknown format found: v%u.%u\n", f_maj, f_min);
-		break;
-	}
+	socinfo_debugfs_exit(qs);
 }
 
-static void socinfo_select_format(void)
-{
-	uint32_t f_maj = SOCINFO_VERSION_MAJOR(socinfo->v0_1.format);
-	uint32_t f_min = SOCINFO_VERSION_MINOR(socinfo->v0_1.format);
+static struct platform_driver qcom_socinfo_driver = {
+	.probe = qcom_socinfo_probe,
+	.remove = qcom_socinfo_remove,
+	.driver  = {
+		.name = "qcom-socinfo",
+	},
+};
 
-	if (f_maj != 0) {
-		pr_err("Unsupported format v%u.%u. Falling back to dummy values.\n",
-			f_maj, f_min);
-		socinfo = setup_dummy_socinfo();
-	}
+module_platform_driver(qcom_socinfo_driver);
 
-	if (socinfo->v0_1.format > MAX_SOCINFO_FORMAT) {
-		pr_warn("Unsupported format v%u.%u. Falling back to v%u.%u.\n",
-			f_maj, f_min, SOCINFO_VERSION_MAJOR(MAX_SOCINFO_FORMAT),
-			SOCINFO_VERSION_MINOR(MAX_SOCINFO_FORMAT));
-		socinfo_format = MAX_SOCINFO_FORMAT;
-	} else {
-		socinfo_format = socinfo->v0_1.format;
-	}
-}
-
-const char *product_name_get(void)
-{
-	char *product_name = NULL;
-	size_t size;
-	uint32_t hw_type;
-
-	hw_type = socinfo_get_platform_type();
-
-	product_name = qcom_smem_get(QCOM_SMEM_HOST_ANY, SMEM_ID_VENDOR1, &size);
-	if (IS_ERR_OR_NULL(product_name)) {
-		pr_warn("Can't find SMEM_ID_VENDOR1; falling back on dummy values.\n");
-		return hw_platform[hw_type];
-	}
-
-	return product_name;
-}
-
-EXPORT_SYMBOL(product_name_get);
-
-uint32_t get_hw_country_version(void)
-{
-	uint32_t version = socinfo_get_platform_version();
-	return (version & HW_COUNTRY_VERSION_MASK) >> HW_COUNTRY_VERSION_SHIFT;
-}
-
-EXPORT_SYMBOL(get_hw_country_version);
-
-uint32_t get_hw_version_platform(void)
-{
-	uint32_t hw_type = socinfo_get_platform_type();
-	if (hw_type == HW_PLATFORM_J2)
-		return HARDWARE_PLATFORM_UMI;
-	if (hw_type == HW_PLATFORM_J1)
-		return HARDWARE_PLATFORM_CMI;
-	if (hw_type == HW_PLATFORM_J11)
-		return HARDWARE_PLATFORM_LMI;
-	if (hw_type == HW_PLATFORM_J1S)
-		return HARDWARE_PLATFORM_CAS;
-	if (hw_type == HW_PLATFORM_J3S)
-		return HARDWARE_PLATFORM_APOLLO;
-	if (hw_type == HW_PLATFORM_K11A)
-		return HARDWARE_PLATFORM_ALIOTH;
-	if (hw_type == HW_PLATFORM_K81)
-		return HARDWARE_PLATFORM_ENUMA;
-	if (hw_type == HW_PLATFORM_K81A)
-		return HARDWARE_PLATFORM_ELISH;
-	if (hw_type == HW_PLATFORM_J2S)
-		return HARDWARE_PLATFORM_THYME;
-	if (hw_type == HW_PLATFORM_L3A)
-		return HARDWARE_PLATFORM_PSYCHE;
-	if (hw_type == HW_PLATFORM_L11R)
-		return HARDWARE_PLATFORM_MUNCH;
-	if (hw_type == HW_PLATFORM_L81A)
-		return HARDWARE_PLATFORM_DAGU;
-	if (hw_type == HW_PLATFORM_M82)
-		return HARDWARE_PLATFORM_PIPA;
-	else
-		return HARDWARE_PLATFORM_UNKNOWN;
-}
-EXPORT_SYMBOL(get_hw_version_platform);
-
-uint32_t get_hw_version_major(void)
-{
-	uint32_t version = socinfo_get_platform_version();
-	return (version & HW_MAJOR_VERSION_MASK) >> HW_MAJOR_VERSION_SHIFT;
-}
-EXPORT_SYMBOL(get_hw_version_major);
-
-uint32_t get_hw_version_minor(void)
-{
-	uint32_t version = socinfo_get_platform_version();
-	return (version & HW_MINOR_VERSION_MASK) >> HW_MINOR_VERSION_SHIFT;
-}
-EXPORT_SYMBOL(get_hw_version_minor);
-
-uint32_t get_hw_version_build(void)
-{
-	uint32_t version = socinfo_get_platform_version();
-	return (version & HW_BUILD_VERSION_MASK) >> HW_BUILD_VERSION_SHIFT;
-}
-EXPORT_SYMBOL(get_hw_version_build);
-
-int __init socinfo_init(void)
-{
-	static bool socinfo_init_done;
-	size_t size;
-	uint32_t soc_info_id;
-	const char *machine, *fc;
-
-	if (socinfo_init_done)
-		return 0;
-
-	socinfo = qcom_smem_get(QCOM_SMEM_HOST_ANY, SMEM_HW_SW_BUILD_ID, &size);
-	if (IS_ERR_OR_NULL(socinfo)) {
-		pr_warn("Can't find SMEM_HW_SW_BUILD_ID; falling back on dummy values.\n");
-		socinfo = setup_dummy_socinfo();
-	}
-
-	socinfo_select_format();
-
-	WARN(!socinfo_get_id(), "Unknown SOC ID!\n");
-
-	soc_info_id = socinfo_get_id();
-	if ((soc_info_id >= ARRAY_SIZE(cpu_of_id)) ||
-			(!cpu_of_id[soc_info_id].soc_id_string))
-		pr_warn("New IDs added! ID => CPU mapping needs an update.\n");
-
-	if (socinfo_format >= SOCINFO_VERSION(0, 16)) {
-		socinfo_enumerate_partinfo_details();
-		machine = socinfo_get_id_string();
-		fc = socinfo_get_feature_code_mapping();
-		sku = kasprintf(GFP_KERNEL, "%s-%u-%s",
-			machine, socinfo_get_pcode(), fc);
-	}
-
-	cur_cpu = cpu_of_id[socinfo->v0_1.id].generic_soc_type;
-	boot_stats_init();
-	socinfo_print();
-	arch_read_hardware_id = msm_read_hardware_id;
-	socinfo_init_done = true;
-
-	return 0;
-}
-subsys_initcall(socinfo_init);
+MODULE_DESCRIPTION("Qualcomm SoCinfo driver");
+MODULE_LICENSE("GPL v2");
+MODULE_ALIAS("platform:qcom-socinfo");

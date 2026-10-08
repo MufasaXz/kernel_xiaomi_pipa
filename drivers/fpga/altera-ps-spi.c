@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Altera Passive Serial SPI Driver
  *
  *  Copyright (c) 2017 United Western Technologies, Corporation
  *
  *  Joshua Clayton <stillcompiling@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
  *
  * Manage Altera FPGA firmware that is loaded over SPI using the passive
  * serial configuration method.
@@ -21,8 +18,7 @@
 #include <linux/fpga/fpga-mgr.h>
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
-#include <linux/of_gpio.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/spi/spi.h>
 #include <linux/sizes.h>
 
@@ -199,7 +195,7 @@ static int altera_ps_write_complete(struct fpga_manager *mgr,
 				    struct fpga_image_info *info)
 {
 	struct altera_ps_conf *conf = mgr->priv;
-	const char dummy[] = {0};
+	static const char dummy[] = {0};
 	int ret;
 
 	if (gpiod_get_value_cansleep(conf->status)) {
@@ -237,19 +233,13 @@ static const struct fpga_manager_ops altera_ps_ops = {
 static int altera_ps_probe(struct spi_device *spi)
 {
 	struct altera_ps_conf *conf;
-	const struct of_device_id *of_id;
 	struct fpga_manager *mgr;
-	int ret;
 
 	conf = devm_kzalloc(&spi->dev, sizeof(*conf), GFP_KERNEL);
 	if (!conf)
 		return -ENOMEM;
 
-	of_id = of_match_device(of_ef_match, &spi->dev);
-	if (!of_id)
-		return -ENODEV;
-
-	conf->data = of_id->data;
+	conf->data = spi_get_device_match_data(spi);
 	conf->spi = spi;
 	conf->config = devm_gpiod_get(&spi->dev, "nconfig", GPIOD_OUT_LOW);
 	if (IS_ERR(conf->config)) {
@@ -278,31 +268,15 @@ static int altera_ps_probe(struct spi_device *spi)
 	snprintf(conf->mgr_name, sizeof(conf->mgr_name), "%s %s",
 		 dev_driver_string(&spi->dev), dev_name(&spi->dev));
 
-	mgr = fpga_mgr_create(&spi->dev, conf->mgr_name,
-			      &altera_ps_ops, conf);
-	if (!mgr)
-		return -ENOMEM;
-
-	spi_set_drvdata(spi, mgr);
-
-	ret = fpga_mgr_register(mgr);
-	if (ret)
-		fpga_mgr_free(mgr);
-
-	return ret;
-}
-
-static int altera_ps_remove(struct spi_device *spi)
-{
-	struct fpga_manager *mgr = spi_get_drvdata(spi);
-
-	fpga_mgr_unregister(mgr);
-
-	return 0;
+	mgr = devm_fpga_mgr_register(&spi->dev, conf->mgr_name,
+				     &altera_ps_ops, conf);
+	return PTR_ERR_OR_ZERO(mgr);
 }
 
 static const struct spi_device_id altera_ps_spi_ids[] = {
-	{"cyclone-ps-spi", 0},
+	{ "cyclone-ps-spi", (uintptr_t)&c5_data },
+	{ "fpga-passive-serial", (uintptr_t)&c5_data },
+	{ "fpga-arria10-passive-serial", (uintptr_t)&a10_data },
 	{}
 };
 MODULE_DEVICE_TABLE(spi, altera_ps_spi_ids);
@@ -310,12 +284,10 @@ MODULE_DEVICE_TABLE(spi, altera_ps_spi_ids);
 static struct spi_driver altera_ps_driver = {
 	.driver = {
 		.name = "altera-ps-spi",
-		.owner = THIS_MODULE,
-		.of_match_table = of_match_ptr(of_ef_match),
+		.of_match_table = of_ef_match,
 	},
 	.id_table = altera_ps_spi_ids,
 	.probe = altera_ps_probe,
-	.remove = altera_ps_remove,
 };
 
 module_spi_driver(altera_ps_driver)

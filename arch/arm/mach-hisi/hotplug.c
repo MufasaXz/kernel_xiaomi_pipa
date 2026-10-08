@@ -1,17 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2013 Linaro Ltd.
- * Copyright (c) 2013 Hisilicon Limited.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
+ * Copyright (c) 2013 HiSilicon Limited.
  */
 
 #include <linux/cpu.h>
 #include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/of_address.h>
-#include <linux/of_platform.h>
 #include <asm/cacheflush.h>
 #include <asm/smp_plat.h>
 #include "core.h"

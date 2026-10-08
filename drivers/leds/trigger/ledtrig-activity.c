@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Activity LED trigger
  *
  * Copyright (C) 2017 Willy Tarreau <w@1wt.eu>
  * Partially based on Atsushi Nemoto's ledtrig-heartbeat.c.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/init.h>
@@ -14,6 +11,7 @@
 #include <linux/kernel_stat.h>
 #include <linux/leds.h>
 #include <linux/module.h>
+#include <linux/panic_notifier.h>
 #include <linux/reboot.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -34,8 +32,8 @@ struct activity_data {
 
 static void led_activity_function(struct timer_list *t)
 {
-	struct activity_data *activity_data = from_timer(activity_data, t,
-							 timer);
+	struct activity_data *activity_data = timer_container_of(activity_data,
+								 t, timer);
 	struct led_classdev *led_cdev = activity_data->led_cdev;
 	unsigned int target;
 	unsigned int usage;
@@ -60,11 +58,15 @@ static void led_activity_function(struct timer_list *t)
 	curr_used = 0;
 
 	for_each_possible_cpu(i) {
-		curr_used += kcpustat_cpu(i).cpustat[CPUTIME_USER]
-			  +  kcpustat_cpu(i).cpustat[CPUTIME_NICE]
-			  +  kcpustat_cpu(i).cpustat[CPUTIME_SYSTEM]
-			  +  kcpustat_cpu(i).cpustat[CPUTIME_SOFTIRQ]
-			  +  kcpustat_cpu(i).cpustat[CPUTIME_IRQ];
+		struct kernel_cpustat kcpustat;
+
+		kcpustat_cpu_fetch(&kcpustat, i);
+
+		curr_used += kcpustat.cpustat[CPUTIME_USER]
+			  +  kcpustat.cpustat[CPUTIME_NICE]
+			  +  kcpustat.cpustat[CPUTIME_SYSTEM]
+			  +  kcpustat.cpustat[CPUTIME_SOFTIRQ]
+			  +  kcpustat.cpustat[CPUTIME_IRQ];
 		cpus++;
 	}
 
@@ -154,7 +156,7 @@ static ssize_t led_invert_show(struct device *dev,
 {
 	struct activity_data *activity_data = led_trigger_get_drvdata(dev);
 
-	return sprintf(buf, "%u\n", activity_data->invert);
+	return sprintf(buf, "%d\n", activity_data->invert);
 }
 
 static ssize_t led_invert_store(struct device *dev,
@@ -206,7 +208,7 @@ static void activity_deactivate(struct led_classdev *led_cdev)
 {
 	struct activity_data *activity_data = led_get_trigger_data(led_cdev);
 
-	del_timer_sync(&activity_data->timer);
+	timer_shutdown_sync(&activity_data->timer);
 	kfree(activity_data);
 	clear_bit(LED_BLINK_SW, &led_cdev->work_flags);
 }

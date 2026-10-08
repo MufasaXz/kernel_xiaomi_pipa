@@ -1,27 +1,5 @@
-/******************************************************************************
- *
- * Copyright(c) 2009-2012  Realtek Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * The full GNU General Public License is included in this distribution in the
- * file called LICENSE.
- *
- * Contact Information:
- * wlanfae <wlanfae@realtek.com>
- * Realtek Corporation, No. 2, Innovation Road II, Hsinchu Science Park,
- * Hsinchu 300, Taiwan.
- *
- * Larry Finger <Larry.Finger@lwfinger.net>
- *
- *****************************************************************************/
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright(c) 2009-2012  Realtek Corporation.*/
 
 #include "wifi.h"
 #include "core.h"
@@ -86,13 +64,12 @@ static void _rtl_pci_update_default_setting(struct ieee80211_hw *hw)
 	struct rtl_ps_ctl *ppsc = rtl_psc(rtl_priv(hw));
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 	u8 pcibridge_vendor = pcipriv->ndis_adapter.pcibridge_vendor;
-	u8 init_aspm;
+	u16 init_aspm;
 
 	ppsc->reg_rfps_level = 0;
 	ppsc->support_aspm = false;
 
 	/*Update PCI ASPM setting */
-	ppsc->const_amdpci_aspm = rtlpci->const_amdpci_aspm;
 	switch (rtlpci->const_pci_aspm) {
 	case 0:
 		/*No ASPM */
@@ -173,9 +150,10 @@ static void _rtl_pci_update_default_setting(struct ieee80211_hw *hw)
 	/* toshiba aspm issue, toshiba will set aspm selfly
 	 * so we should not set aspm in driver
 	 */
-	pci_read_config_byte(rtlpci->pdev, 0x80, &init_aspm);
+	pcie_capability_read_word(rtlpci->pdev, PCI_EXP_LNKCTL, &init_aspm);
 	if (rtlpriv->rtlhal.hw_type == HARDWARE_TYPE_RTL8192SE &&
-	    init_aspm == 0x43)
+	    ((u8)init_aspm) == (PCI_EXP_LNKCTL_ASPM_L0S |
+				PCI_EXP_LNKCTL_ASPM_L1 | PCI_EXP_LNKCTL_CCC))
 		ppsc->support_aspm = false;
 
 	/* RTL8723BE found on some ASUSTek laptops, such as F441U and
@@ -235,7 +213,7 @@ static void rtl_pci_disable_aspm(struct ieee80211_hw *hw)
 	/*Retrieve original configuration settings. */
 	u8 linkctrl_reg = pcipriv->ndis_adapter.linkctrl_reg;
 	u16 aspmlevel = 0;
-	u8 tmp_u1b = 0;
+	u16 tmp_u1b = 0;
 
 	if (!ppsc->support_aspm)
 		return;
@@ -253,10 +231,10 @@ static void rtl_pci_disable_aspm(struct ieee80211_hw *hw)
 	}
 
 	/*for promising device will in L0 state after an I/O. */
-	pci_read_config_byte(rtlpci->pdev, 0x80, &tmp_u1b);
+	pcie_capability_read_word(rtlpci->pdev, PCI_EXP_LNKCTL, &tmp_u1b);
 
 	/*Set corresponding value. */
-	aspmlevel |= BIT(0) | BIT(1);
+	aspmlevel |= PCI_EXP_LNKCTL_ASPM_L0S | PCI_EXP_LNKCTL_ASPM_L1;
 	linkctrl_reg &= ~aspmlevel;
 
 	_rtl_pci_platform_switch_device_pci_aspm(hw, linkctrl_reg);
@@ -327,46 +305,6 @@ static bool rtl_pci_get_amd_l1_patch(struct ieee80211_hw *hw)
 	return status;
 }
 
-static bool rtl_pci_check_buddy_priv(struct ieee80211_hw *hw,
-				     struct rtl_priv **buddy_priv)
-{
-	struct rtl_priv *rtlpriv = rtl_priv(hw);
-	struct rtl_pci_priv *pcipriv = rtl_pcipriv(hw);
-	struct rtl_priv *tpriv = NULL, *iter;
-	struct rtl_pci_priv *tpcipriv = NULL;
-
-	if (!list_empty(&rtlpriv->glb_var->glb_priv_list)) {
-		list_for_each_entry(iter, &rtlpriv->glb_var->glb_priv_list,
-				    list) {
-			tpcipriv = (struct rtl_pci_priv *)iter->priv;
-			rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
-				"pcipriv->ndis_adapter.funcnumber %x\n",
-				pcipriv->ndis_adapter.funcnumber);
-			rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
-				"tpcipriv->ndis_adapter.funcnumber %x\n",
-				tpcipriv->ndis_adapter.funcnumber);
-
-			if (pcipriv->ndis_adapter.busnumber ==
-			    tpcipriv->ndis_adapter.busnumber &&
-			    pcipriv->ndis_adapter.devnumber ==
-			    tpcipriv->ndis_adapter.devnumber &&
-			    pcipriv->ndis_adapter.funcnumber !=
-			    tpcipriv->ndis_adapter.funcnumber) {
-				tpriv = iter;
-				break;
-			}
-		}
-	}
-
-	rtl_dbg(rtlpriv, COMP_INIT, DBG_LOUD,
-		"find_buddy_priv %d\n", tpriv != NULL);
-
-	if (tpriv)
-		*buddy_priv = tpriv;
-
-	return tpriv != NULL;
-}
-
 static void rtl_pci_parse_configuration(struct pci_dev *pdev,
 					struct ieee80211_hw *hw)
 {
@@ -383,9 +321,8 @@ static void rtl_pci_parse_configuration(struct pci_dev *pdev,
 	rtl_dbg(rtlpriv, COMP_INIT, DBG_TRACE, "Link Control Register =%x\n",
 		pcipriv->ndis_adapter.linkctrl_reg);
 
-	pci_read_config_byte(pdev, 0x98, &tmp);
-	tmp |= BIT(4);
-	pci_write_config_byte(pdev, 0x98, tmp);
+	pcie_capability_set_word(pdev, PCI_EXP_DEVCTL2,
+				 PCI_EXP_DEVCTL2_COMP_TMOUT_DIS);
 
 	tmp = 0x17;
 	pci_write_config_byte(pdev, 0x70f, tmp);
@@ -411,13 +348,13 @@ static void _rtl_pci_io_handler_init(struct device *dev,
 
 	rtlpriv->io.dev = dev;
 
-	rtlpriv->io.write8_async = pci_write8_async;
-	rtlpriv->io.write16_async = pci_write16_async;
-	rtlpriv->io.write32_async = pci_write32_async;
+	rtlpriv->io.write8 = pci_write8_async;
+	rtlpriv->io.write16 = pci_write16_async;
+	rtlpriv->io.write32 = pci_write32_async;
 
-	rtlpriv->io.read8_sync = pci_read8_sync;
-	rtlpriv->io.read16_sync = pci_read16_sync;
-	rtlpriv->io.read32_sync = pci_read32_sync;
+	rtlpriv->io.read8 = pci_read8_sync;
+	rtlpriv->io.read16 = pci_read16_sync;
+	rtlpriv->io.read32 = pci_read32_sync;
 }
 
 static bool _rtl_update_earlymode_info(struct ieee80211_hw *hw,
@@ -486,16 +423,16 @@ static void _rtl_pci_tx_chk_waitq(struct ieee80211_hw *hw)
 
 			memset(&tcb_desc, 0, sizeof(struct rtl_tcb_desc));
 
-			spin_lock_bh(&rtlpriv->locks.waitq_lock);
+			spin_lock(&rtlpriv->locks.waitq_lock);
 			if (!skb_queue_empty(&mac->skb_waitq[tid]) &&
 			    (ring->entries - skb_queue_len(&ring->queue) >
 			     rtlhal->max_earlymode_num)) {
 				skb = skb_dequeue(&mac->skb_waitq[tid]);
 			} else {
-				spin_unlock_bh(&rtlpriv->locks.waitq_lock);
+				spin_unlock(&rtlpriv->locks.waitq_lock);
 				break;
 			}
-			spin_unlock_bh(&rtlpriv->locks.waitq_lock);
+			spin_unlock(&rtlpriv->locks.waitq_lock);
 
 			/* Some macaddr can't do early mode. like
 			 * multicast/broadcast/no_qos data
@@ -534,11 +471,10 @@ static void _rtl_pci_tx_isr(struct ieee80211_hw *hw, int prio)
 		ring->idx = (ring->idx + 1) % ring->entries;
 
 		skb = __skb_dequeue(&ring->queue);
-		pci_unmap_single(rtlpci->pdev,
-				 rtlpriv->cfg->ops->
-					     get_desc(hw, (u8 *)entry, true,
-						      HW_DESC_TXBUFF_ADDR),
-				 skb->len, PCI_DMA_TODEVICE);
+		dma_unmap_single(&rtlpci->pdev->dev,
+				 rtlpriv->cfg->ops->get_desc(hw, (u8 *)entry,
+						true, HW_DESC_TXBUFF_ADDR),
+				 skb->len, DMA_TO_DEVICE);
 
 		/* remove early mode header */
 		if (rtlpriv->rtlhal.earlymode_enable)
@@ -609,7 +545,7 @@ tx_status_ok:
 	if (((rtlpriv->link_info.num_rx_inperiod +
 	      rtlpriv->link_info.num_tx_inperiod) > 8) ||
 	      rtlpriv->link_info.num_rx_inperiod > 2)
-		rtl_lps_leave(hw);
+		rtl_lps_leave(hw, false);
 }
 
 static int _rtl_pci_init_one_rxdesc(struct ieee80211_hw *hw,
@@ -633,11 +569,14 @@ static int _rtl_pci_init_one_rxdesc(struct ieee80211_hw *hw,
 remap:
 	/* just set skb->cb to mapping addr for pci_unmap_single use */
 	*((dma_addr_t *)skb->cb) =
-		pci_map_single(rtlpci->pdev, skb_tail_pointer(skb),
-			       rtlpci->rxbuffersize, PCI_DMA_FROMDEVICE);
+		dma_map_single(&rtlpci->pdev->dev, skb_tail_pointer(skb),
+			       rtlpci->rxbuffersize, DMA_FROM_DEVICE);
 	bufferaddress = *((dma_addr_t *)skb->cb);
-	if (pci_dma_mapping_error(rtlpci->pdev, bufferaddress))
+	if (dma_mapping_error(&rtlpci->pdev->dev, bufferaddress)) {
+		if (!new_skb)
+			kfree_skb(skb);
 		return 0;
+	}
 	rtlpci->rx_ring[rxring_idx].rx_buf[desc_idx] = skb;
 	if (rtlpriv->use_new_trx_flow) {
 		/* skb->cb may be 64 bit address */
@@ -760,8 +699,8 @@ static void _rtl_pci_rx_interrupt(struct ieee80211_hw *hw)
 		 * AAAAAAttention !!!
 		 * We can NOT access 'skb' before 'pci_unmap_single'
 		 */
-		pci_unmap_single(rtlpci->pdev, *((dma_addr_t *)skb->cb),
-				 rtlpci->rxbuffersize, PCI_DMA_FROMDEVICE);
+		dma_unmap_single(&rtlpci->pdev->dev, *((dma_addr_t *)skb->cb),
+				 rtlpci->rxbuffersize, DMA_FROM_DEVICE);
 
 		/* get a new skb - if fail, old one will be reused */
 		new_skb = dev_alloc_skb(rtlpci->rxbuffersize);
@@ -809,7 +748,7 @@ static void _rtl_pci_rx_interrupt(struct ieee80211_hw *hw)
 		hdr = rtl_get_hdr(skb);
 		fc = rtl_get_fc(skb);
 
-		if (!stats.crc && !stats.hwerror) {
+		if (!stats.crc && !stats.hwerror && (skb->len > FCS_LEN)) {
 			memcpy(IEEE80211_SKB_RXCB(skb), &rx_status,
 			       sizeof(rx_status));
 
@@ -846,6 +785,7 @@ static void _rtl_pci_rx_interrupt(struct ieee80211_hw *hw)
 				_rtl_pci_rx_to_mac80211(hw, skb, rx_status);
 			}
 		} else {
+			/* drop packets with errors or those too short */
 			dev_kfree_skb_any(skb);
 		}
 new_trx_end:
@@ -861,7 +801,7 @@ new_trx_end:
 		if (((rtlpriv->link_info.num_rx_inperiod +
 		      rtlpriv->link_info.num_tx_inperiod) > 8) ||
 		      rtlpriv->link_info.num_rx_inperiod > 2)
-			rtl_lps_leave(hw);
+			rtl_lps_leave(hw, false);
 		skb = new_skb;
 no_new:
 		if (rtlpriv->use_new_trx_flow) {
@@ -1053,16 +993,18 @@ done:
 	return ret;
 }
 
-static void _rtl_pci_irq_tasklet(unsigned long data)
+static void _rtl_pci_irq_tasklet(struct tasklet_struct *t)
 {
-	struct ieee80211_hw *hw = (struct ieee80211_hw *)data;
+	struct rtl_priv *rtlpriv = from_tasklet(rtlpriv, t, works.irq_tasklet);
+	struct ieee80211_hw *hw = rtlpriv->hw;
 	_rtl_pci_tx_chk_waitq(hw);
 }
 
-static void _rtl_pci_prepare_bcn_tasklet(unsigned long data)
+static void _rtl_pci_prepare_bcn_tasklet(struct tasklet_struct *t)
 {
-	struct ieee80211_hw *hw = (struct ieee80211_hw *)data;
-	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	struct rtl_priv *rtlpriv = from_tasklet(rtlpriv, t,
+						works.irq_prepare_bcn_tasklet);
+	struct ieee80211_hw *hw = rtlpriv->hw;
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 	struct rtl_mac *mac = rtl_mac(rtl_priv(hw));
 	struct rtl8192_tx_ring *ring = NULL;
@@ -1084,15 +1026,15 @@ static void _rtl_pci_prepare_bcn_tasklet(unsigned long data)
 	else
 		entry = (u8 *)(&ring->desc[ring->idx]);
 	if (pskb) {
-		pci_unmap_single(rtlpci->pdev,
-				 rtlpriv->cfg->ops->get_desc(
-				 hw, (u8 *)entry, true, HW_DESC_TXBUFF_ADDR),
-				 pskb->len, PCI_DMA_TODEVICE);
+		dma_unmap_single(&rtlpci->pdev->dev,
+				 rtlpriv->cfg->ops->get_desc(hw, (u8 *)entry,
+						true, HW_DESC_TXBUFF_ADDR),
+				 pskb->len, DMA_TO_DEVICE);
 		kfree_skb(pskb);
 	}
 
 	/*NB: the beacon data buffer must be 32-bit aligned. */
-	pskb = ieee80211_beacon_get(hw, mac->vif);
+	pskb = ieee80211_beacon_get(hw, mac->vif, 0);
 	if (!pskb)
 		return;
 	hdr = rtl_get_hdr(pskb);
@@ -1186,12 +1128,9 @@ static void _rtl_pci_init_struct(struct ieee80211_hw *hw,
 	rtlpci->acm_method = EACMWAY2_SW;
 
 	/*task */
-	tasklet_init(&rtlpriv->works.irq_tasklet,
-		     _rtl_pci_irq_tasklet,
-		     (unsigned long)hw);
-	tasklet_init(&rtlpriv->works.irq_prepare_bcn_tasklet,
-		     _rtl_pci_prepare_bcn_tasklet,
-		     (unsigned long)hw);
+	tasklet_setup(&rtlpriv->works.irq_tasklet, _rtl_pci_irq_tasklet);
+	tasklet_setup(&rtlpriv->works.irq_prepare_bcn_tasklet,
+		     _rtl_pci_prepare_bcn_tasklet);
 	INIT_WORK(&rtlpriv->works.lps_change_work,
 		  rtl_lps_change_work_callback);
 }
@@ -1210,9 +1149,9 @@ static int _rtl_pci_init_tx_ring(struct ieee80211_hw *hw,
 	/* alloc tx buffer desc for new trx flow*/
 	if (rtlpriv->use_new_trx_flow) {
 		buffer_desc =
-		   pci_zalloc_consistent(rtlpci->pdev,
-					 sizeof(*buffer_desc) * entries,
-					 &buffer_desc_dma);
+		   dma_alloc_coherent(&rtlpci->pdev->dev,
+				      sizeof(*buffer_desc) * entries,
+				      &buffer_desc_dma, GFP_KERNEL);
 
 		if (!buffer_desc || (unsigned long)buffer_desc & 0xFF) {
 			pr_err("Cannot allocate TX ring (prio = %d)\n",
@@ -1228,8 +1167,8 @@ static int _rtl_pci_init_tx_ring(struct ieee80211_hw *hw,
 	}
 
 	/* alloc dma for this ring */
-	desc = pci_zalloc_consistent(rtlpci->pdev,
-				     sizeof(*desc) * entries, &desc_dma);
+	desc = dma_alloc_coherent(&rtlpci->pdev->dev, sizeof(*desc) * entries,
+				  &desc_dma, GFP_KERNEL);
 
 	if (!desc || (unsigned long)desc & 0xFF) {
 		pr_err("Cannot allocate TX ring (prio = %d)\n", prio);
@@ -1272,11 +1211,10 @@ static int _rtl_pci_init_rx_ring(struct ieee80211_hw *hw, int rxring_idx)
 		struct rtl_rx_buffer_desc *entry = NULL;
 		/* alloc dma for this ring */
 		rtlpci->rx_ring[rxring_idx].buffer_desc =
-		    pci_zalloc_consistent(rtlpci->pdev,
-					  sizeof(*rtlpci->rx_ring[rxring_idx].
-						 buffer_desc) *
-						 rtlpci->rxringcount,
-					  &rtlpci->rx_ring[rxring_idx].dma);
+		    dma_alloc_coherent(&rtlpci->pdev->dev,
+				       sizeof(*rtlpci->rx_ring[rxring_idx].buffer_desc) *
+				       rtlpci->rxringcount,
+				       &rtlpci->rx_ring[rxring_idx].dma, GFP_KERNEL);
 		if (!rtlpci->rx_ring[rxring_idx].buffer_desc ||
 		    (ulong)rtlpci->rx_ring[rxring_idx].buffer_desc & 0xFF) {
 			pr_err("Cannot allocate RX ring\n");
@@ -1296,10 +1234,10 @@ static int _rtl_pci_init_rx_ring(struct ieee80211_hw *hw, int rxring_idx)
 		u8 tmp_one = 1;
 		/* alloc dma for this ring */
 		rtlpci->rx_ring[rxring_idx].desc =
-		    pci_zalloc_consistent(rtlpci->pdev,
-					  sizeof(*rtlpci->rx_ring[rxring_idx].
-					  desc) * rtlpci->rxringcount,
-					  &rtlpci->rx_ring[rxring_idx].dma);
+		    dma_alloc_coherent(&rtlpci->pdev->dev,
+				       sizeof(*rtlpci->rx_ring[rxring_idx].desc) *
+				       rtlpci->rxringcount,
+				       &rtlpci->rx_ring[rxring_idx].dma, GFP_KERNEL);
 		if (!rtlpci->rx_ring[rxring_idx].desc ||
 		    (unsigned long)rtlpci->rx_ring[rxring_idx].desc & 0xFF) {
 			pr_err("Cannot allocate RX ring\n");
@@ -1339,24 +1277,23 @@ static void _rtl_pci_free_tx_ring(struct ieee80211_hw *hw,
 		else
 			entry = (u8 *)(&ring->desc[ring->idx]);
 
-		pci_unmap_single(rtlpci->pdev,
+		dma_unmap_single(&rtlpci->pdev->dev,
 				 rtlpriv->cfg->ops->get_desc(hw, (u8 *)entry,
-						   true,
-						   HW_DESC_TXBUFF_ADDR),
-				 skb->len, PCI_DMA_TODEVICE);
+						true, HW_DESC_TXBUFF_ADDR),
+				 skb->len, DMA_TO_DEVICE);
 		kfree_skb(skb);
 		ring->idx = (ring->idx + 1) % ring->entries;
 	}
 
 	/* free dma of this ring */
-	pci_free_consistent(rtlpci->pdev,
-			    sizeof(*ring->desc) * ring->entries,
-			    ring->desc, ring->dma);
+	dma_free_coherent(&rtlpci->pdev->dev,
+			  sizeof(*ring->desc) * ring->entries, ring->desc,
+			  ring->dma);
 	ring->desc = NULL;
 	if (rtlpriv->use_new_trx_flow) {
-		pci_free_consistent(rtlpci->pdev,
-				    sizeof(*ring->buffer_desc) * ring->entries,
-				    ring->buffer_desc, ring->buffer_desc_dma);
+		dma_free_coherent(&rtlpci->pdev->dev,
+				  sizeof(*ring->buffer_desc) * ring->entries,
+				  ring->buffer_desc, ring->buffer_desc_dma);
 		ring->buffer_desc = NULL;
 	}
 }
@@ -1373,25 +1310,25 @@ static void _rtl_pci_free_rx_ring(struct ieee80211_hw *hw, int rxring_idx)
 
 		if (!skb)
 			continue;
-		pci_unmap_single(rtlpci->pdev, *((dma_addr_t *)skb->cb),
-				 rtlpci->rxbuffersize, PCI_DMA_FROMDEVICE);
+		dma_unmap_single(&rtlpci->pdev->dev, *((dma_addr_t *)skb->cb),
+				 rtlpci->rxbuffersize, DMA_FROM_DEVICE);
 		kfree_skb(skb);
 	}
 
 	/* free dma of this ring */
 	if (rtlpriv->use_new_trx_flow) {
-		pci_free_consistent(rtlpci->pdev,
-				    sizeof(*rtlpci->rx_ring[rxring_idx].
-				    buffer_desc) * rtlpci->rxringcount,
-				    rtlpci->rx_ring[rxring_idx].buffer_desc,
-				    rtlpci->rx_ring[rxring_idx].dma);
+		dma_free_coherent(&rtlpci->pdev->dev,
+				  sizeof(*rtlpci->rx_ring[rxring_idx].buffer_desc) *
+				  rtlpci->rxringcount,
+				  rtlpci->rx_ring[rxring_idx].buffer_desc,
+				  rtlpci->rx_ring[rxring_idx].dma);
 		rtlpci->rx_ring[rxring_idx].buffer_desc = NULL;
 	} else {
-		pci_free_consistent(rtlpci->pdev,
-				    sizeof(*rtlpci->rx_ring[rxring_idx].desc) *
-				    rtlpci->rxringcount,
-				    rtlpci->rx_ring[rxring_idx].desc,
-				    rtlpci->rx_ring[rxring_idx].dma);
+		dma_free_coherent(&rtlpci->pdev->dev,
+				  sizeof(*rtlpci->rx_ring[rxring_idx].desc) *
+				  rtlpci->rxringcount,
+				  rtlpci->rx_ring[rxring_idx].desc,
+				  rtlpci->rx_ring[rxring_idx].dma);
 		rtlpci->rx_ring[rxring_idx].desc = NULL;
 	}
 }
@@ -1519,13 +1456,10 @@ int rtl_pci_reset_trx_ring(struct ieee80211_hw *hw)
 				else
 					entry = (u8 *)(&ring->desc[ring->idx]);
 
-				pci_unmap_single(rtlpci->pdev,
-						 rtlpriv->cfg->ops->
-							 get_desc(hw, (u8 *)
-							 entry,
-							 true,
-							 HW_DESC_TXBUFF_ADDR),
-						 skb->len, PCI_DMA_TODEVICE);
+				dma_unmap_single(&rtlpci->pdev->dev,
+						 rtlpriv->cfg->ops->get_desc(hw, (u8 *)entry,
+								true, HW_DESC_TXBUFF_ADDR),
+						 skb->len, DMA_TO_DEVICE);
 				dev_kfree_skb_irq(skb);
 				ring->idx = (ring->idx + 1) % ring->entries;
 			}
@@ -1741,9 +1675,6 @@ static void rtl_pci_deinit(struct ieee80211_hw *hw)
 	synchronize_irq(rtlpci->pdev->irq);
 	tasklet_kill(&rtlpriv->works.irq_tasklet);
 	cancel_work_sync(&rtlpriv->works.lps_change_work);
-
-	flush_workqueue(rtlpriv->works.rtl_wq);
-	destroy_workqueue(rtlpriv->works.rtl_wq);
 }
 
 static int rtl_pci_init(struct ieee80211_hw *hw, struct pci_dev *pdev)
@@ -2014,7 +1945,6 @@ static bool _rtl_pci_find_adapter(struct pci_dev *pdev,
 	 */
 	if (bridge_pdev) {
 		/*find bridge info if available */
-		pcipriv->ndis_adapter.pcibridge_vendorid = bridge_pdev->vendor;
 		for (tmp = 0; tmp < PCI_BRIDGE_VENDOR_MAX; tmp++) {
 			if (bridge_pdev->vendor == pcibridge_vendors[tmp]) {
 				pcipriv->ndis_adapter.pcibridge_vendor = tmp;
@@ -2058,7 +1988,6 @@ static bool _rtl_pci_find_adapter(struct pci_dev *pdev,
 		pcipriv->ndis_adapter.amd_l1_patch);
 
 	rtl_pci_parse_configuration(pdev, hw);
-	list_add_tail(&rtlpriv->list, &rtlpriv->glb_var->glb_priv_list);
 
 	return true;
 }
@@ -2156,8 +2085,8 @@ int rtl_pci_probe(struct pci_dev *pdev,
 	}
 
 	if (((struct rtl_hal_cfg *)id->driver_data)->mod_params->dma64 &&
-	    !pci_set_dma_mask(pdev, DMA_BIT_MASK(64))) {
-		if (pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64))) {
+	    !dma_set_mask(&pdev->dev, DMA_BIT_MASK(64))) {
+		if (dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(64))) {
 			WARN_ONCE(true,
 				  "Unable to obtain 64bit DMA for consistent allocations\n");
 			err = -ENOMEM;
@@ -2165,8 +2094,8 @@ int rtl_pci_probe(struct pci_dev *pdev,
 		}
 
 		platform_enable_dma64(pdev, true);
-	} else if (!pci_set_dma_mask(pdev, DMA_BIT_MASK(32))) {
-		if (pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32))) {
+	} else if (!dma_set_mask(&pdev->dev, DMA_BIT_MASK(32))) {
+		if (dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32))) {
 			WARN_ONCE(true,
 				  "rtlwifi: Unable to obtain 32bit DMA for consistent allocations\n");
 			err = -ENOMEM;
@@ -2205,7 +2134,6 @@ int rtl_pci_probe(struct pci_dev *pdev,
 	rtlpriv->rtlhal.interface = INTF_PCI;
 	rtlpriv->cfg = (struct rtl_hal_cfg *)(id->driver_data);
 	rtlpriv->intf_ops = &rtl_pci_ops;
-	rtlpriv->glb_var = &rtl_global_var;
 	rtl_efuse_ops_init(hw);
 
 	/* MEM map */
@@ -2258,7 +2186,7 @@ int rtl_pci_probe(struct pci_dev *pdev,
 		err = -ENODEV;
 		goto fail2;
 	}
-	rtlpriv->cfg->ops->init_sw_leds(hw);
+	rtl_init_sw_leds(hw);
 
 	/*aspm */
 	rtl_pci_init_aspm(hw);
@@ -2367,7 +2295,6 @@ void rtl_pci_disconnect(struct pci_dev *pdev)
 	if (rtlpci->using_msi)
 		pci_disable_msi(rtlpci->pdev);
 
-	list_del(&rtlpriv->list);
 	if (rtlpriv->io.pci_mem_start != 0) {
 		pci_iounmap(pdev, (void __iomem *)rtlpriv->io.pci_mem_start);
 		pci_release_regions(pdev);
@@ -2401,8 +2328,7 @@ EXPORT_SYMBOL(rtl_pci_disconnect);
  ****************************************/
 int rtl_pci_suspend(struct device *dev)
 {
-	struct pci_dev *pdev = to_pci_dev(dev);
-	struct ieee80211_hw *hw = pci_get_drvdata(pdev);
+	struct ieee80211_hw *hw = dev_get_drvdata(dev);
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 
 	rtlpriv->cfg->ops->hw_suspend(hw);
@@ -2414,8 +2340,7 @@ EXPORT_SYMBOL(rtl_pci_suspend);
 
 int rtl_pci_resume(struct device *dev)
 {
-	struct pci_dev *pdev = to_pci_dev(dev);
-	struct ieee80211_hw *hw = pci_get_drvdata(pdev);
+	struct ieee80211_hw *hw = dev_get_drvdata(dev);
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 
 	rtlpriv->cfg->ops->hw_resume(hw);
@@ -2426,10 +2351,8 @@ EXPORT_SYMBOL(rtl_pci_resume);
 #endif /* CONFIG_PM_SLEEP */
 
 const struct rtl_intf_ops rtl_pci_ops = {
-	.read_efuse_byte = read_efuse_byte,
 	.adapter_start = rtl_pci_start,
 	.adapter_stop = rtl_pci_stop,
-	.check_buddy_priv = rtl_pci_check_buddy_priv,
 	.adapter_tx = rtl_pci_tx,
 	.flush = rtl_pci_flush,
 	.reset_trx_ring = rtl_pci_reset_trx_ring,

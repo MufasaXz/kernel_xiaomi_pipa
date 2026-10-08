@@ -1,8 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * Copyright Tomi Manninen OH2BNS (oh2bns@sral.fi)
  */
@@ -62,8 +59,7 @@ static void nr_loopback_timer(struct timer_list *unused)
 		if (dev == NULL || nr_rx_frame(skb, dev) == 0)
 			kfree_skb(skb);
 
-		if (dev != NULL)
-			dev_put(dev);
+		dev_put(dev);
 
 		if (!skb_queue_empty(&loopback_queue) && !nr_loopback_running())
 			mod_timer(&loopback_timer, jiffies + 10);
@@ -72,6 +68,6 @@ static void nr_loopback_timer(struct timer_list *unused)
 
 void nr_loopback_clear(void)
 {
-	del_timer_sync(&loopback_timer);
+	timer_delete_sync(&loopback_timer);
 	skb_queue_purge(&loopback_queue);
 }

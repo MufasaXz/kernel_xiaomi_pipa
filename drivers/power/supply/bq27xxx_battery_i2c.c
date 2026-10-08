@@ -1,29 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * BQ27xxx battery monitor I2C driver
  *
- * Copyright (C) 2015 Texas Instruments Incorporated - http://www.ti.com/
+ * Copyright (C) 2015 Texas Instruments Incorporated - https://www.ti.com/
  *	Andrew F. Davis <afd@ti.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed "as is" WITHOUT ANY WARRANTY of any
- * kind, whether express or implied; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <linux/power/bq27xxx_battery.h>
 
-static DEFINE_IDR(battery_id);
-static DEFINE_MUTEX(battery_mutex);
+static DEFINE_IDA(battery_id);
 
 static irqreturn_t bq27xxx_battery_irq_handler_thread(int irq, void *data)
 {
@@ -155,30 +146,39 @@ static int bq27xxx_battery_i2c_bulk_write(struct bq27xxx_device_info *di,
 	return 0;
 }
 
-static int bq27xxx_battery_i2c_probe(struct i2c_client *client,
-				     const struct i2c_device_id *id)
+static void bq27xxx_battery_i2c_devm_ida_free(void *data)
 {
+	int num = (long)data;
+
+	ida_free(&battery_id, num);
+}
+
+static int bq27xxx_battery_i2c_probe(struct i2c_client *client)
+{
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct bq27xxx_device_info *di;
 	int ret;
 	char *name;
-	int num;
+	long num;
 
 	/* Get new ID for the new battery device */
-	mutex_lock(&battery_mutex);
-	num = idr_alloc(&battery_id, client, 0, 0, GFP_KERNEL);
-	mutex_unlock(&battery_mutex);
+	num = ida_alloc(&battery_id, GFP_KERNEL);
 	if (num < 0)
 		return num;
+	ret = devm_add_action_or_reset(&client->dev,
+				       bq27xxx_battery_i2c_devm_ida_free,
+				       (void *)num);
+	if (ret)
+		return ret;
 
-	name = devm_kasprintf(&client->dev, GFP_KERNEL, "%s-%d", id->name, num);
+	name = devm_kasprintf(&client->dev, GFP_KERNEL, "%s-%ld", id->name, num);
 	if (!name)
-		goto err_mem;
+		return -ENOMEM;
 
 	di = devm_kzalloc(&client->dev, sizeof(*di), GFP_KERNEL);
 	if (!di)
-		goto err_mem;
+		return -ENOMEM;
 
-	di->id = num;
 	di->dev = &client->dev;
 	di->chip = id->driver_data;
 	di->name = name;
@@ -190,7 +190,7 @@ static int bq27xxx_battery_i2c_probe(struct i2c_client *client,
 
 	ret = bq27xxx_battery_setup(di);
 	if (ret)
-		goto err_failed;
+		return ret;
 
 	/* Schedule a polling after about 1 min */
 	schedule_delayed_work(&di->work, 60 * HZ);
@@ -207,24 +207,14 @@ static int bq27xxx_battery_i2c_probe(struct i2c_client *client,
 				"Unable to register IRQ %d error %d\n",
 				client->irq, ret);
 			bq27xxx_battery_teardown(di);
-			goto err_failed;
+			return ret;
 		}
 	}
 
 	return 0;
-
-err_mem:
-	ret = -ENOMEM;
-
-err_failed:
-	mutex_lock(&battery_mutex);
-	idr_remove(&battery_id, num);
-	mutex_unlock(&battery_mutex);
-
-	return ret;
 }
 
-static int bq27xxx_battery_i2c_remove(struct i2c_client *client)
+static void bq27xxx_battery_i2c_remove(struct i2c_client *client)
 {
 	struct bq27xxx_device_info *di = i2c_get_clientdata(client);
 
@@ -232,12 +222,6 @@ static int bq27xxx_battery_i2c_remove(struct i2c_client *client)
 		free_irq(client->irq, di);
 
 	bq27xxx_battery_teardown(di);
-
-	mutex_lock(&battery_mutex);
-	idr_remove(&battery_id, di->id);
-	mutex_unlock(&battery_mutex);
-
-	return 0;
 }
 
 static const struct i2c_device_id bq27xxx_i2c_id_table[] = {
@@ -262,11 +246,16 @@ static const struct i2c_device_id bq27xxx_i2c_id_table[] = {
 	{ "bq27546", BQ27546 },
 	{ "bq27742", BQ27742 },
 	{ "bq27545", BQ27545 },
+	{ "bq27411", BQ27411 },
 	{ "bq27421", BQ27421 },
 	{ "bq27425", BQ27425 },
 	{ "bq27426", BQ27426 },
 	{ "bq27441", BQ27441 },
 	{ "bq27621", BQ27621 },
+	{ "bq27z561", BQ27Z561 },
+	{ "bq28z610", BQ28Z610 },
+	{ "bq34z100", BQ34Z100 },
+	{ "bq78z100", BQ78Z100 },
 	{},
 };
 MODULE_DEVICE_TABLE(i2c, bq27xxx_i2c_id_table);
@@ -294,11 +283,16 @@ static const struct of_device_id bq27xxx_battery_i2c_of_match_table[] = {
 	{ .compatible = "ti,bq27546" },
 	{ .compatible = "ti,bq27742" },
 	{ .compatible = "ti,bq27545" },
+	{ .compatible = "ti,bq27411" },
 	{ .compatible = "ti,bq27421" },
 	{ .compatible = "ti,bq27425" },
 	{ .compatible = "ti,bq27426" },
 	{ .compatible = "ti,bq27441" },
 	{ .compatible = "ti,bq27621" },
+	{ .compatible = "ti,bq27z561" },
+	{ .compatible = "ti,bq28z610" },
+	{ .compatible = "ti,bq34z100" },
+	{ .compatible = "ti,bq78z100" },
 	{},
 };
 MODULE_DEVICE_TABLE(of, bq27xxx_battery_i2c_of_match_table);
@@ -308,6 +302,7 @@ static struct i2c_driver bq27xxx_battery_i2c_driver = {
 	.driver = {
 		.name = "bq27xxx-battery",
 		.of_match_table = of_match_ptr(bq27xxx_battery_i2c_of_match_table),
+		.pm = &bq27xxx_battery_battery_pm_ops,
 	},
 	.probe = bq27xxx_battery_i2c_probe,
 	.remove = bq27xxx_battery_i2c_remove,

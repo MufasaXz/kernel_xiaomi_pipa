@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * rt286.c  --  RT286 ALSA SoC audio codec driver
  *
  * Copyright 2013 Realtek Semiconductor Corp.
  * Author: Bard Liao <bardliao@realtek.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -258,11 +255,16 @@ static int rt286_jack_detect(struct rt286_priv *rt286, bool *hp, bool *mic)
 				msleep(300);
 				regmap_read(rt286->regmap,
 					RT286_CBJ_CTRL2, &val);
-				if (0x0070 == (val & 0x0070))
+				if (0x0070 == (val & 0x0070)) {
 					*mic = true;
-				else
+				} else {
 					*mic = false;
+					regmap_update_bits(rt286->regmap,
+						RT286_CBJ_CTRL1,
+						0xfcc0, 0xc400);
+				}
 			}
+
 			regmap_update_bits(rt286->regmap,
 				RT286_DC_GAIN, 0x200, 0x0);
 
@@ -278,13 +280,13 @@ static int rt286_jack_detect(struct rt286_priv *rt286, bool *hp, bool *mic)
 		regmap_read(rt286->regmap, RT286_GET_MIC1_SENSE, &buf);
 		*mic = buf & 0x80000000;
 	}
-	if (!*mic) {
+
+	if (!*hp) {
 		snd_soc_dapm_disable_pin(dapm, "HV");
 		snd_soc_dapm_disable_pin(dapm, "VREF");
-	}
-	if (!*hp)
 		snd_soc_dapm_disable_pin(dapm, "LDO1");
-	snd_soc_dapm_sync(dapm);
+		snd_soc_dapm_sync(dapm);
+	}
 
 	return 0;
 }
@@ -299,17 +301,18 @@ static void rt286_jack_detect_work(struct work_struct *work)
 
 	rt286_jack_detect(rt286, &hp, &mic);
 
-	if (hp == true)
+	if (hp)
 		status |= SND_JACK_HEADPHONE;
 
-	if (mic == true)
+	if (mic)
 		status |= SND_JACK_MICROPHONE;
 
 	snd_soc_jack_report(rt286->jack, status,
 		SND_JACK_MICROPHONE | SND_JACK_HEADPHONE);
 }
 
-int rt286_mic_detect(struct snd_soc_component *component, struct snd_soc_jack *jack)
+static int rt286_mic_detect(struct snd_soc_component *component,
+			    struct snd_soc_jack *jack, void *data)
 {
 	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
 	struct rt286_priv *rt286 = snd_soc_component_get_drvdata(component);
@@ -333,7 +336,6 @@ int rt286_mic_detect(struct snd_soc_component *component, struct snd_soc_jack *j
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(rt286_mic_detect);
 
 static int is_mclk_mode(struct snd_soc_dapm_widget *source,
 			 struct snd_soc_dapm_widget *sink)
@@ -723,7 +725,6 @@ static int rt286_hw_params(struct snd_pcm_substream *substream,
 		return -EINVAL;
 	}
 
-	d_len_code = 0;
 	switch (params_width(params)) {
 	/* bit 6:4 Bits per Sample */
 	case 16:
@@ -764,11 +765,11 @@ static int rt286_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	struct snd_soc_component *component = dai->component;
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		snd_soc_component_update_bits(component,
 			RT286_I2S_CTRL1, 0x800, 0x800);
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		snd_soc_component_update_bits(component,
 			RT286_I2S_CTRL1, 0x800, 0x0);
 		break;
@@ -927,10 +928,10 @@ static irqreturn_t rt286_irq(int irq, void *data)
 	/* Clear IRQ */
 	regmap_update_bits(rt286->regmap, RT286_IRQ_CTRL, 0x1, 0x1);
 
-	if (hp == true)
+	if (hp)
 		status |= SND_JACK_HEADPHONE;
 
-	if (mic == true)
+	if (mic)
 		status |= SND_JACK_MICROPHONE;
 
 	snd_soc_jack_report(rt286->jack, status,
@@ -946,17 +947,11 @@ static int rt286_probe(struct snd_soc_component *component)
 	struct rt286_priv *rt286 = snd_soc_component_get_drvdata(component);
 
 	rt286->component = component;
+	INIT_DELAYED_WORK(&rt286->jack_detect_work, rt286_jack_detect_work);
 
-	if (rt286->i2c->irq) {
-		regmap_update_bits(rt286->regmap,
-					RT286_IRQ_CTRL, 0x2, 0x2);
-
-		INIT_DELAYED_WORK(&rt286->jack_detect_work,
-					rt286_jack_detect_work);
+	if (rt286->i2c->irq)
 		schedule_delayed_work(&rt286->jack_detect_work,
-					msecs_to_jiffies(1250));
-	}
-
+				      msecs_to_jiffies(50));
 	return 0;
 }
 
@@ -965,6 +960,7 @@ static void rt286_remove(struct snd_soc_component *component)
 	struct rt286_priv *rt286 = snd_soc_component_get_drvdata(component);
 
 	cancel_delayed_work_sync(&rt286->jack_detect_work);
+	rt286->component = NULL;
 }
 
 #ifdef CONFIG_PM
@@ -1023,7 +1019,7 @@ static struct snd_soc_dai_driver rt286_dai[] = {
 			.formats = RT286_FORMATS,
 		},
 		.ops = &rt286_aif_dai_ops,
-		.symmetric_rates = 1,
+		.symmetric_rate = 1,
 	},
 	{
 		.name = "rt286-aif2",
@@ -1043,7 +1039,7 @@ static struct snd_soc_dai_driver rt286_dai[] = {
 			.formats = RT286_FORMATS,
 		},
 		.ops = &rt286_aif_dai_ops,
-		.symmetric_rates = 1,
+		.symmetric_rate = 1,
 	},
 
 };
@@ -1054,6 +1050,7 @@ static const struct snd_soc_component_driver soc_component_dev_rt286 = {
 	.suspend		= rt286_suspend,
 	.resume			= rt286_resume,
 	.set_bias_level		= rt286_set_bias_level,
+	.set_jack		= rt286_mic_detect,
 	.controls		= rt286_snd_controls,
 	.num_controls		= ARRAY_SIZE(rt286_snd_controls),
 	.dapm_widgets		= rt286_dapm_widgets,
@@ -1062,7 +1059,6 @@ static const struct snd_soc_component_driver soc_component_dev_rt286 = {
 	.num_dapm_routes	= ARRAY_SIZE(rt286_dapm_routes),
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
-	.non_legacy_dai_naming	= 1,
 };
 
 static const struct regmap_config rt286_regmap = {
@@ -1079,17 +1075,20 @@ static const struct regmap_config rt286_regmap = {
 };
 
 static const struct i2c_device_id rt286_i2c_id[] = {
-	{"rt286", 0},
-	{"rt288", 0},
+	{"rt286"},
+	{"rt288"},
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, rt286_i2c_id);
 
+#ifdef CONFIG_ACPI
 static const struct acpi_device_id rt286_acpi_match[] = {
-	{ "INT343A", 0 },
-	{},
+	{ "10EC0286" },
+	{ "INT343A" },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, rt286_acpi_match);
+#endif
 
 static const struct dmi_system_id force_combo_jack_table[] = {
 	{
@@ -1131,8 +1130,7 @@ static const struct dmi_system_id dmi_dell[] = {
 	{ }
 };
 
-static int rt286_i2c_probe(struct i2c_client *i2c,
-			   const struct i2c_device_id *id)
+static int rt286_i2c_probe(struct i2c_client *i2c)
 {
 	struct rt286_platform_data *pdata = dev_get_platdata(&i2c->dev);
 	struct rt286_priv *rt286;
@@ -1208,7 +1206,7 @@ static int rt286_i2c_probe(struct i2c_client *i2c,
 	mdelay(10);
 
 	if (!rt286->pdata.gpio2_en)
-		regmap_write(rt286->regmap, RT286_SET_DMIC2_DEFAULT, 0x4000);
+		regmap_write(rt286->regmap, RT286_SET_DMIC2_DEFAULT, 0x40);
 	else
 		regmap_write(rt286->regmap, RT286_SET_DMIC2_DEFAULT, 0);
 
@@ -1240,7 +1238,7 @@ static int rt286_i2c_probe(struct i2c_client *i2c,
 			IRQF_TRIGGER_HIGH | IRQF_ONESHOT, "rt286", rt286);
 		if (ret != 0) {
 			dev_err(&i2c->dev,
-				"Failed to reguest IRQ: %d\n", ret);
+				"Failed to request IRQ: %d\n", ret);
 			return ret;
 		}
 	}
@@ -1252,14 +1250,12 @@ static int rt286_i2c_probe(struct i2c_client *i2c,
 	return ret;
 }
 
-static int rt286_i2c_remove(struct i2c_client *i2c)
+static void rt286_i2c_remove(struct i2c_client *i2c)
 {
 	struct rt286_priv *rt286 = i2c_get_clientdata(i2c);
 
 	if (i2c->irq)
 		free_irq(i2c->irq, rt286);
-
-	return 0;
 }
 
 

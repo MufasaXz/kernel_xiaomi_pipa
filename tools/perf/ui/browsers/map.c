@@ -2,17 +2,19 @@
 #include <elf.h>
 #include <inttypes.h>
 #include <sys/ttydefaults.h>
+#include <stdlib.h>
 #include <string.h>
 #include <linux/bitops.h>
-#include "../../util/util.h"
 #include "../../util/debug.h"
+#include "../../util/map.h"
+#include "../../util/dso.h"
 #include "../../util/symbol.h"
 #include "../browser.h"
 #include "../helpline.h"
 #include "../keysyms.h"
 #include "map.h"
 
-#include "sane_ctype.h"
+#include <linux/ctype.h>
 
 struct map_browser {
 	struct ui_browser b;
@@ -74,7 +76,7 @@ static int map_browser__run(struct map_browser *browser)
 {
 	int key;
 
-	if (ui_browser__show(&browser->b, browser->map->dso->long_name,
+	if (ui_browser__show(&browser->b, dso__long_name(map__dso(browser->map)),
 			     "Press ESC to exit, %s / to search",
 			     verbose > 0 ? "" : "restart with -v to use") < 0)
 		return -1;
@@ -86,8 +88,10 @@ static int map_browser__run(struct map_browser *browser)
 		case '/':
 			if (verbose > 0)
 				map_browser__search(browser);
+			/* fall thru */
 		default:
-			break;
+			ui_browser__warn_unhandled_hotkey(&browser->b, key, 0, NULL);
+			continue;
                 case K_LEFT:
                 case K_ESC:
                 case 'q':
@@ -104,7 +108,7 @@ int map__browse(struct map *map)
 {
 	struct map_browser mb = {
 		.b = {
-			.entries = &map->dso->symbols,
+			.entries = dso__symbols(map__dso(map)),
 			.refresh = ui_browser__rb_tree_refresh,
 			.seek	 = ui_browser__rb_tree_seek,
 			.write	 = map_browser__write,

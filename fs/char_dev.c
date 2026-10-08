@@ -25,7 +25,7 @@
 
 #include "internal.h"
 
-static struct kobj_map *cdev_map;
+static struct kobj_map *cdev_map __ro_after_init;
 
 static DEFINE_MUTEX(chrdevs_lock);
 
@@ -88,21 +88,30 @@ static int find_dynamic_major(void)
 /*
  * Register a single major with a specified minor range.
  *
- * If major == 0 this functions will dynamically allocate a major and return
- * its number.
+ * If major == 0 this function will dynamically allocate an unused major.
+ * If major > 0 this function will attempt to reserve the range of minors
+ * with given major.
  *
- * If major > 0 this function will attempt to reserve the passed range of
- * minors and will return zero on success.
- *
- * Returns a -ve errno on failure.
  */
 static struct char_device_struct *
 __register_chrdev_region(unsigned int major, unsigned int baseminor,
 			   int minorct, const char *name)
 {
-	struct char_device_struct *cd, **cp;
-	int ret = 0;
+	struct char_device_struct *cd, *curr, *prev = NULL;
+	int ret;
 	int i;
+
+	if (major >= CHRDEV_MAJOR_MAX) {
+		pr_err("CHRDEV \"%s\" major requested (%u) is greater than the maximum (%u)\n",
+		       name, major, CHRDEV_MAJOR_MAX-1);
+		return ERR_PTR(-EINVAL);
+	}
+
+	if (minorct > MINORMASK + 1 - baseminor) {
+		pr_err("CHRDEV \"%s\" minor range requested (%u-%u) is out of range of maximum range (%u-%u) for a single major\n",
+			name, baseminor, baseminor + minorct - 1, 0, MINORMASK);
+		return ERR_PTR(-EINVAL);
+	}
 
 	cd = kzalloc(sizeof(struct char_device_struct), GFP_KERNEL);
 	if (cd == NULL)
@@ -120,55 +129,37 @@ __register_chrdev_region(unsigned int major, unsigned int baseminor,
 		major = ret;
 	}
 
-	if (major >= CHRDEV_MAJOR_MAX) {
-		pr_err("CHRDEV \"%s\" major requested (%u) is greater than the maximum (%u)\n",
-		       name, major, CHRDEV_MAJOR_MAX-1);
-		ret = -EINVAL;
+	ret = -EBUSY;
+	i = major_to_index(major);
+	for (curr = chrdevs[i]; curr; prev = curr, curr = curr->next) {
+		if (curr->major < major)
+			continue;
+
+		if (curr->major > major)
+			break;
+
+		if (curr->baseminor + curr->minorct <= baseminor)
+			continue;
+
+		if (curr->baseminor >= baseminor + minorct)
+			break;
+
 		goto out;
 	}
 
 	cd->major = major;
 	cd->baseminor = baseminor;
 	cd->minorct = minorct;
-	strlcpy(cd->name, name, sizeof(cd->name));
+	strscpy(cd->name, name, sizeof(cd->name));
 
-	i = major_to_index(major);
-
-	for (cp = &chrdevs[i]; *cp; cp = &(*cp)->next)
-		if ((*cp)->major > major ||
-		    ((*cp)->major == major &&
-		     (((*cp)->baseminor >= baseminor) ||
-		      ((*cp)->baseminor + (*cp)->minorct > baseminor))))
-			break;
-
-	/* Check for overlapping minor ranges.  */
-	if (*cp && (*cp)->major == major) {
-		int old_min = (*cp)->baseminor;
-		int old_max = (*cp)->baseminor + (*cp)->minorct - 1;
-		int new_min = baseminor;
-		int new_max = baseminor + minorct - 1;
-
-		/* New driver overlaps from the left.  */
-		if (new_max >= old_min && new_max <= old_max) {
-			ret = -EBUSY;
-			goto out;
-		}
-
-		/* New driver overlaps from the right.  */
-		if (new_min <= old_max && new_min >= old_min) {
-			ret = -EBUSY;
-			goto out;
-		}
-
-		if (new_min < old_min && new_max > old_max) {
-			ret = -EBUSY;
-			goto out;
-		}
-
+	if (!prev) {
+		cd->next = curr;
+		chrdevs[i] = cd;
+	} else {
+		cd->next = prev->next;
+		prev->next = cd;
 	}
 
-	cd->next = *cp;
-	*cp = cd;
 	mutex_unlock(&chrdevs_lock);
 	return cd;
 out:
@@ -359,7 +350,7 @@ static struct kobject *cdev_get(struct cdev *p)
 	struct module *owner = p->owner;
 	struct kobject *kobj;
 
-	if (owner && !try_module_get(owner))
+	if (!try_module_get(owner))
 		return NULL;
 	kobj = kobject_get_unless_zero(&p->kobj);
 	if (!kobj)
@@ -492,14 +483,24 @@ int cdev_add(struct cdev *p, dev_t dev, unsigned count)
 	p->dev = dev;
 	p->count = count;
 
+	if (WARN_ON(dev == WHITEOUT_DEV)) {
+		error = -EBUSY;
+		goto err;
+	}
+
 	error = kobj_map(cdev_map, dev, count, NULL,
 			 exact_match, exact_lock, p);
 	if (error)
-		return error;
+		goto err;
 
 	kobject_get(p->kobj.parent);
 
 	return 0;
+
+err:
+	kfree_const(p->kobj.name);
+	p->kobj.name = NULL;
+	return error;
 }
 
 /**
@@ -561,8 +562,8 @@ int cdev_device_add(struct cdev *cdev, struct device *dev)
 
 /**
  * cdev_device_del() - inverse of cdev_device_add
- * @dev: the device structure
  * @cdev: the cdev structure
+ * @dev: the device structure
  *
  * cdev_device_del() is a helper function to call cdev_del and device_del.
  * It should be used whenever cdev_device_add is used.

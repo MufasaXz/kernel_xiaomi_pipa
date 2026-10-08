@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * LED Heartbeat Trigger
  *
@@ -5,15 +6,12 @@
  *
  * Based on Richard Purdie's ledtrig-timer.c and some arch's
  * CONFIG_HEARTBEAT code.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/panic_notifier.h>
 #include <linux/slab.h>
 #include <linux/timer.h>
 #include <linux/sched.h>
@@ -35,7 +33,7 @@ struct heartbeat_trig_data {
 static void led_heartbeat_function(struct timer_list *t)
 {
 	struct heartbeat_trig_data *heartbeat_data =
-		from_timer(heartbeat_data, t, timer);
+		timer_container_of(heartbeat_data, t, timer);
 	struct led_classdev *led_cdev;
 	unsigned long brightness = LED_OFF;
 	unsigned long delay = 0;
@@ -153,7 +151,7 @@ static void heartbeat_trig_deactivate(struct led_classdev *led_cdev)
 	struct heartbeat_trig_data *heartbeat_data =
 		led_get_trigger_data(led_cdev);
 
-	del_timer_sync(&heartbeat_data->timer);
+	timer_shutdown_sync(&heartbeat_data->timer);
 	kfree(heartbeat_data);
 	clear_bit(LED_BLINK_SW, &led_cdev->work_flags);
 }

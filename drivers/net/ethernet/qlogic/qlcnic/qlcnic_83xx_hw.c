@@ -1,15 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * QLogic qlcnic NIC Driver
  * Copyright (c) 2009-2013 QLogic Corporation
- *
- * See LICENSE.qlcnic for copyright and licensing details.
  */
 
 #include <linux/if_vlan.h>
 #include <linux/ipv6.h>
 #include <linux/ethtool.h>
 #include <linux/interrupt.h>
-#include <linux/aer.h>
 
 #include "qlcnic.h"
 #include "qlcnic_sriov.h"
@@ -658,11 +656,10 @@ int qlcnic_83xx_cam_lock(struct qlcnic_adapter *adapter)
 void qlcnic_83xx_cam_unlock(struct qlcnic_adapter *adapter)
 {
 	void __iomem *addr;
-	u32 val;
 	struct qlcnic_hardware_context *ahw = adapter->ahw;
 
 	addr = ahw->pci_base0 + QLC_83XX_SEM_UNLOCK_FUNC(ahw->pci_func);
-	val = readl(addr);
+	readl(addr);
 }
 
 void qlcnic_83xx_read_crb(struct qlcnic_adapter *adapter, char *buf,
@@ -2045,12 +2042,14 @@ int qlcnic_83xx_config_hw_lro(struct qlcnic_adapter *adapter, int mode)
 
 int qlcnic_83xx_config_rss(struct qlcnic_adapter *adapter, int enable)
 {
-	int err;
-	u32 word;
 	struct qlcnic_cmd_args cmd;
-	const u64 key[] = { 0xbeac01fa6a42b73bULL, 0x8030f20c77cb2da3ULL,
-			    0xae7b30b4d0ca2bcbULL, 0x43a38fb04167253dULL,
-			    0x255b0ec26d5a56daULL };
+	static const u64 key[] = {
+		0xbeac01fa6a42b73bULL, 0x8030f20c77cb2da3ULL,
+		0xae7b30b4d0ca2bcbULL, 0x43a38fb04167253dULL,
+		0x255b0ec26d5a56daULL
+	};
+	u32 word;
+	int err;
 
 	err = qlcnic_alloc_mbx_args(&cmd, adapter, QLCNIC_CMD_CONFIGURE_RSS);
 	if (err)
@@ -3821,7 +3820,6 @@ static int qlcnic_83xx_shutdown(struct pci_dev *pdev)
 {
 	struct qlcnic_adapter *adapter = pci_get_drvdata(pdev);
 	struct net_device *netdev = adapter->netdev;
-	int retval;
 
 	netif_device_detach(netdev);
 	qlcnic_cancel_idc_work(adapter);
@@ -3832,11 +3830,7 @@ static int qlcnic_83xx_shutdown(struct pci_dev *pdev)
 	qlcnic_83xx_disable_mbx_intr(adapter);
 	cancel_delayed_work_sync(&adapter->idc_aen_work);
 
-	retval = pci_save_state(pdev);
-	if (retval)
-		return retval;
-
-	return 0;
+	return pci_save_state(pdev);
 }
 
 static int qlcnic_83xx_resume(struct qlcnic_adapter *adapter)
@@ -4221,7 +4215,6 @@ static pci_ers_result_t qlcnic_83xx_io_slot_reset(struct pci_dev *pdev)
 	struct qlcnic_adapter *adapter = pci_get_drvdata(pdev);
 	int err = 0;
 
-	pdev->error_state = pci_channel_io_normal;
 	err = pci_enable_device(pdev);
 	if (err)
 		goto disconnect;
@@ -4243,7 +4236,6 @@ static void qlcnic_83xx_io_resume(struct pci_dev *pdev)
 {
 	struct qlcnic_adapter *adapter = pci_get_drvdata(pdev);
 
-	pci_cleanup_aer_uncorrect_error_status(pdev);
 	if (test_and_clear_bit(__QLCNIC_AER, &adapter->state))
 		qlcnic_83xx_aer_start_poll_work(adapter);
 }

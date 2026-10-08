@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * CALIPSO - Common Architecture Label IPv6 Security Option
  *
@@ -6,25 +7,10 @@
  *
  * Authors: Paul Moore <paul.moore@hp.com>
  *          Huw Davies <huw@codeweavers.com>
- *
  */
 
 /* (c) Copyright Hewlett-Packard Development Company, L.P., 2006, 2008
  * (c) Copyright Huw Davies <huw@codeweavers.com>, 2015
- *
- * This program is free software;  you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY;  without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
- * the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program;  if not, see <http://www.gnu.org/licenses/>.
- *
  */
 
 #include <linux/init.h>
@@ -43,10 +29,10 @@
 #include <net/calipso.h>
 #include <linux/atomic.h>
 #include <linux/bug.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/crc-ccitt.h>
 
-/* Maximium size of the calipso option including
+/* Maximum size of the calipso option including
  * the two-byte TLV header.
  */
 #define CALIPSO_OPT_LEN_MAX (2 + 252)
@@ -56,13 +42,13 @@
  */
 #define CALIPSO_HDR_LEN (2 + 8)
 
-/* Maximium size of the calipso option including
+/* Maximum size of the calipso option including
  * the two-byte TLV header and upto 3 bytes of
  * leading pad and 7 bytes of trailing pad.
  */
 #define CALIPSO_OPT_LEN_MAX_WITH_PAD (3 + CALIPSO_OPT_LEN_MAX + 7)
 
- /* Maximium size of u32 aligned buffer required to hold calipso
+ /* Maximum size of u32 aligned buffer required to hold calipso
   * option.  Max of 3 initial pad bytes starting from buffer + 3.
   * i.e. the worst case is when the previous tlv finishes on 4n + 3.
   */
@@ -440,7 +426,7 @@ static void calipso_doi_free_rcu(struct rcu_head *entry)
 /**
  * calipso_doi_remove - Remove an existing DOI from the CALIPSO protocol engine
  * @doi: the DOI value
- * @audit_secid: the LSM secid to use in the audit message
+ * @audit_info: NetLabel audit information
  *
  * Description:
  * Removes a DOI definition from the CALIPSO engine.  The NetLabel routines will
@@ -671,11 +657,8 @@ static int calipso_map_cat_ntoh(const struct calipso_doi *doi_def,
 					  net_clen_bits,
 					  spot + 1,
 					  1);
-		if (spot < 0) {
-			if (spot == -2)
-				return -EFAULT;
+		if (spot < 0)
 			return 0;
-		}
 
 		ret_val = netlbl_catmap_setbit(&secattr->attr.mls.cat,
 					       spot,
@@ -771,7 +754,7 @@ static int calipso_genopt(unsigned char *buf, u32 start, u32 buf_len,
 	calipso[1] = len - 2;
 	*(__be32 *)(calipso + 2) = htonl(doi_def->doi);
 	calipso[6] = (len - CALIPSO_HDR_LEN) / 4;
-	calipso[7] = secattr->attr.mls.lvl,
+	calipso[7] = secattr->attr.mls.lvl;
 	crc = ~crc_ccitt(0xffff, calipso, len);
 	calipso[8] = crc & 0xff;
 	calipso[9] = (crc >> 8) & 0xff;
@@ -1255,7 +1238,7 @@ static int calipso_req_setattr(struct request_sock *req,
 
 /**
  * calipso_req_delattr - Delete the CALIPSO option from a request socket
- * @reg: the request socket
+ * @req: the request socket
  *
  * Description:
  * Removes the CALIPSO option from a request socket, if present.
@@ -1359,7 +1342,8 @@ static int calipso_skbuff_setattr(struct sk_buff *skb,
 	/* At this point new_end aligns to 4n, so (new_end & 4) pads to 8n */
 	pad = ((new_end & 4) + (end & 7)) & 7;
 	len_delta = new_end - (int)end + pad;
-	ret_val = skb_cow(skb, skb_headroom(skb) + len_delta);
+	ret_val = skb_cow(skb,
+			  skb_headroom(skb) + (len_delta > 0 ? len_delta : 0));
 	if (ret_val < 0)
 		return ret_val;
 

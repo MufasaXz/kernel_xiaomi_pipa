@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Frontend part of the Linux driver for the Afatech 9005
  * USB1.1 DVB-T receiver.
  *
@@ -5,17 +6,7 @@
  *
  * Thanks to Afatech who kindly provided information.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * see Documentation/media/dvb-drivers/dvb-usb.rst for more information
+ * see Documentation/driver-api/media/drivers/dvb-usb.rst for more information
  */
 #include "af9005.h"
 #include "af9005-script.h"
@@ -1421,8 +1412,7 @@ static int af9005_fe_get_frontend(struct dvb_frontend *fe,
 
 static void af9005_fe_release(struct dvb_frontend *fe)
 {
-	struct af9005_fe_state *state =
-	    (struct af9005_fe_state *)fe->demodulator_priv;
+	struct af9005_fe_state *state = fe->demodulator_priv;
 	kfree(state);
 }
 

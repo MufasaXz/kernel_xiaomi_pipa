@@ -1,21 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #include <asm/vdso.h>
+#include <asm/vdso/vsyscall.h>
+#include <vdso/datapage.h>
 
 /*
  * Linker script for vDSO.  This is an ELF shared object prelinked to
  * its virtual address, and with only one read-only segment.
  * This script controls its layout.
  */
-
-#if defined(BUILD_VDSO64)
-# define SHDR_SIZE 64
-#elif defined(BUILD_VDSO32) || defined(BUILD_VDSOX32)
-# define SHDR_SIZE 40
-#else
-# error unknown VDSO target
-#endif
-
-#define NUM_FAKE_SHDRS 13
 
 SECTIONS
 {
@@ -26,18 +18,11 @@ SECTIONS
 	 * segment.
 	 */
 
-	vvar_start = . - 3 * PAGE_SIZE;
-	vvar_page = vvar_start;
+	VDSO_VVAR_SYMS
 
-	/* Place all vvars at the offsets in asm/vvar.h. */
-#define EMIT_VVAR(name, offset) vvar_ ## name = vvar_page + offset;
-#define __VVAR_KERNEL_LDS
-#include <asm/vvar.h>
-#undef __VVAR_KERNEL_LDS
-#undef EMIT_VVAR
-
-	pvclock_page = vvar_start + PAGE_SIZE;
-	hvclock_page = vvar_start + 2 * PAGE_SIZE;
+	vclock_pages = VDSO_VCLOCK_PAGES_START(vdso_u_data);
+	pvclock_page = vclock_pages + VDSO_PAGE_PVCLOCK_OFFSET * PAGE_SIZE;
+	hvclock_page = vclock_pages + VDSO_PAGE_HVCLOCK_OFFSET * PAGE_SIZE;
 
 	. = SIZEOF_HEADERS;
 
@@ -60,20 +45,15 @@ SECTIONS
 		*(.bss*)
 		*(.dynbss*)
 		*(.gnu.linkonce.b.*)
-
-		/*
-		 * Ideally this would live in a C file, but that won't
-		 * work cleanly for x32 until we start building the x32
-		 * C code using an x32 toolchain.
-		 */
-		VDSO_FAKE_SECTION_TABLE_START = .;
-		. = . + NUM_FAKE_SHDRS * SHDR_SIZE;
-		VDSO_FAKE_SECTION_TABLE_END = .;
 	}						:text
 
-	.fake_shstrtab	: { *(.fake_shstrtab) }		:text
-
-
+	/*
+	 * Discard .note.gnu.property sections which are unused and have
+	 * different alignment requirement from vDSO note sections.
+	 */
+	/DISCARD/ : {
+		*(.note.gnu.property)
+	}
 	.note		: { *(.note.*) }		:text	:note
 
 	.eh_frame_hdr	: { *(.eh_frame_hdr) }		:text	:eh_frame_hdr
@@ -85,15 +65,16 @@ SECTIONS
 	 * stuff that isn't used at runtime in between.
 	 */
 
-	.text		: { *(.text*) }			:text	=0x90909090,
+	.text		: {
+		*(.text*)
+	}						:text	=0x90909090,
 
-	/*
-	 * At the end so that eu-elflint stays happy when vdso2c strips
-	 * these.  A better implementation would avoid allocating space
-	 * for these.
-	 */
+
+
 	.altinstructions	: { *(.altinstructions) }	:text
 	.altinstr_replacement	: { *(.altinstr_replacement) }	:text
+
+	__ex_table		: { *(__ex_table) }		:text
 
 	/DISCARD/ : {
 		*(.discard)

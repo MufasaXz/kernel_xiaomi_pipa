@@ -12,7 +12,7 @@
 #include <linux/hid.h>
 #include <linux/mutex.h>
 #include <linux/videodev2.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-ctrls.h>
@@ -25,14 +25,14 @@
  *
  * The USB protocol has been reversed engineered using wireshark, initially
  * by Dinesh Ram <dinesh.ram@cern.ch> and finished by Hans Verkuil
- * <hverkuil@xs4all.nl>.
+ * <hverkuil@kernel.org>.
  *
  * Sadly the firmware used in this product hides lots of goodies since the
  * si4734 has more features than are supported by the firmware. Oh well...
  */
 
 /* driver and module definitions */
-MODULE_AUTHOR("Hans Verkuil <hverkuil@xs4all.nl>");
+MODULE_AUTHOR("Hans Verkuil <hverkuil@kernel.org>");
 MODULE_DESCRIPTION("Thanko's Raremono AM/FM/SW Receiver USB driver");
 MODULE_LICENSE("GPL v2");
 
@@ -181,11 +181,9 @@ static int vidioc_querycap(struct file *file, void *priv,
 {
 	struct raremono_device *radio = video_drvdata(file);
 
-	strlcpy(v->driver, "radio-raremono", sizeof(v->driver));
-	strlcpy(v->card, "Thanko's Raremono", sizeof(v->card));
+	strscpy(v->driver, "radio-raremono", sizeof(v->driver));
+	strscpy(v->card, "Thanko's Raremono", sizeof(v->card));
 	usb_make_path(radio->usbdev, v->bus_info, sizeof(v->bus_info));
-	v->device_caps = V4L2_CAP_TUNER | V4L2_CAP_RADIO;
-	v->capabilities = v->device_caps | V4L2_CAP_DEVICE_CAPS;
 	return 0;
 }
 
@@ -212,7 +210,7 @@ static int vidioc_g_tuner(struct file *file, void *priv,
 	if (v->index > 0)
 		return -EINVAL;
 
-	strlcpy(v->name, "AM/FM/SW", sizeof(v->name));
+	strscpy(v->name, "AM/FM/SW", sizeof(v->name));
 	v->capability = V4L2_TUNER_CAP_LOW | V4L2_TUNER_CAP_STEREO |
 		V4L2_TUNER_CAP_FREQ_BANDS;
 	v->rangelow = AM_FREQ_RANGE_LOW * 16;
@@ -349,13 +347,14 @@ static int usb_raremono_probe(struct usb_interface *intf,
 
 	mutex_init(&radio->lock);
 
-	strlcpy(radio->vdev.name, radio->v4l2_dev.name,
+	strscpy(radio->vdev.name, radio->v4l2_dev.name,
 		sizeof(radio->vdev.name));
 	radio->vdev.v4l2_dev = &radio->v4l2_dev;
 	radio->vdev.fops = &usb_raremono_fops;
 	radio->vdev.ioctl_ops = &usb_raremono_ioctl_ops;
 	radio->vdev.lock = &radio->lock;
 	radio->vdev.release = video_device_release_empty;
+	radio->vdev.device_caps = V4L2_CAP_TUNER | V4L2_CAP_RADIO;
 	radio->v4l2_dev.release = raremono_device_release;
 
 	usb_set_intfdata(intf, &radio->v4l2_dev);

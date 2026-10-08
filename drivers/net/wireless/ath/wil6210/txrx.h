@@ -1,13 +1,13 @@
 /* SPDX-License-Identifier: ISC */
 /*
  * Copyright (c) 2012-2016 Qualcomm Atheros, Inc.
- * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
  */
 
 #ifndef WIL6210_TXRX_H
 #define WIL6210_TXRX_H
 
-#include <net/ieee80211_radiotap.h>
+#include <net/sock.h>
 #include "wil6210.h"
 #include "txrx_edma.h"
 
@@ -344,8 +344,10 @@ struct vring_rx_mac {
 	u32 d0;
 	u32 d1;
 	u16 w4;
-	u16 pn_15_0;
-	u32 pn_47_16;
+	struct_group_attr(pn, __packed,
+		u16 pn_15_0;
+		u32 pn_47_16;
+	);
 } __packed;
 
 /* Rx descriptor - DMA part
@@ -357,7 +359,7 @@ struct vring_rx_mac {
  * bit     10 : cmd_dma_it:1 immediate interrupt
  * bit 11..15 : reserved:5
  * bit 16..29 : phy_info_length:14 It is valid when the PII is set.
- *		When the FFM bit is set bits 29-27 are used for for
+ *		When the FFM bit is set bits 29-27 are used for
  *		Flex Filter Match. Matching Index to one of the L2
  *		EtherType Flex Filter
  * bit 30..31 : l4_type:2 valid if the L4I bit is set in the status field
@@ -492,20 +494,6 @@ struct packet_rx_info {
 	u8 cid;
 };
 
-struct wil6210_rtap {
-	struct ieee80211_radiotap_header rthdr;
-	/* fields should be in the order of bits in rthdr.it_present */
-	/* flags */
-	u8 flags;
-	/* channel */
-	__le16 chnl_freq __aligned(2);
-	__le16 chnl_flags;
-	/* MCS */
-	u8 mcs_present;
-	u8 mcs_flags;
-	u8 mcs_index;
-} __packed;
-
 /* this struct will be stored in the skb cb buffer
  * max length of the struct is limited to 48 bytes
  */
@@ -625,19 +613,11 @@ static inline u8 *wil_skb_get_sa(struct sk_buff *skb)
 	return eth->h_source;
 }
 
-static inline __be16 wil_skb_get_protocol(struct sk_buff *skb)
-{
-	struct ethhdr *eth = (void *)skb->data;
-
-	return eth->h_proto;
-}
-
 static inline bool wil_need_txstat(struct sk_buff *skb)
 {
 	const u8 *da = wil_skb_get_da(skb);
 
-	return is_unicast_ether_addr(da) && skb->sk &&
-	       (skb_shinfo(skb)->tx_flags & SKBTX_WIFI_STATUS);
+	return is_unicast_ether_addr(da) && sk_requests_wifi_status(skb->sk);
 }
 
 static inline void wil_consume_skb(struct sk_buff *skb, bool acked)
@@ -696,12 +676,6 @@ static inline void wil_skb_set_cid(struct sk_buff *skb, u8 cid)
 	skb_rx_info->rx_info.cid = cid;
 }
 
-static inline
-void wil_tx_desc_set_nr_frags(struct vring_tx_desc *d, int nr_frags)
-{
-	d->mac.d[2] |= (nr_frags << MAC_CFG_DESC_TX_2_NUM_OF_DESCRIPTORS_POS);
-}
-
 void wil_netif_rx_any(struct sk_buff *skb, struct net_device *ndev);
 void wil_netif_rx(struct sk_buff *skb, struct net_device *ndev, int cid,
 		  struct wil_net_stats *stats, bool gro);
@@ -712,12 +686,9 @@ struct wil_tid_ampdu_rx *wil_tid_ampdu_rx_alloc(struct wil6210_priv *wil,
 						int size, u16 ssn);
 void wil_tid_ampdu_rx_free(struct wil6210_priv *wil,
 			   struct wil_tid_ampdu_rx *r);
-void wil_tx_data_init(const struct wil6210_priv *wil,
-		      struct wil_ring_tx_data *txdata);
+void wil_tx_data_init(struct wil_ring_tx_data *txdata);
 void wil_init_txrx_ops_legacy_dma(struct wil6210_priv *wil);
-int wil_tx_latency_calc_common(struct wil6210_priv *wil, struct sk_buff *skb,
-			       struct wil_sta_info *sta);
-int wil_get_cid_by_ring(struct wil6210_priv *wil, struct wil_ring *ring);
-bool wil_is_special_packet(const struct sk_buff *skb);
+void wil_tx_latency_calc(struct wil6210_priv *wil, struct sk_buff *skb,
+			 struct wil_sta_info *sta);
 
 #endif /* WIL6210_TXRX_H */

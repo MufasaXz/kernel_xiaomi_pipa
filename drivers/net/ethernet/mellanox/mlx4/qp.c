@@ -46,6 +46,13 @@
 #define MLX4_BF_QP_SKIP_MASK	0xc0
 #define MLX4_MAX_BF_QP_RANGE	0x40
 
+void mlx4_put_qp(struct mlx4_qp *qp)
+{
+	if (refcount_dec_and_test(&qp->refcount))
+		complete(&qp->free);
+}
+EXPORT_SYMBOL_GPL(mlx4_put_qp);
+
 void mlx4_qp_event(struct mlx4_dev *dev, u32 qpn, int event_type)
 {
 	struct mlx4_qp_table *qp_table = &mlx4_priv(dev)->qp_table;
@@ -64,10 +71,8 @@ void mlx4_qp_event(struct mlx4_dev *dev, u32 qpn, int event_type)
 		return;
 	}
 
+	/* Need to call mlx4_put_qp() in event handler */
 	qp->event(qp, event_type);
-
-	if (refcount_dec_and_test(&qp->refcount))
-		complete(&qp->free);
 }
 
 /* used for INIT/CLOSE port logic */
@@ -523,8 +528,7 @@ EXPORT_SYMBOL_GPL(mlx4_qp_remove);
 
 void mlx4_qp_free(struct mlx4_dev *dev, struct mlx4_qp *qp)
 {
-	if (refcount_dec_and_test(&qp->refcount))
-		complete(&qp->free);
+	mlx4_put_qp(qp);
 	wait_for_completion(&qp->free);
 
 	mlx4_qp_free_icm(dev, qp->qpn);
@@ -740,7 +744,7 @@ static void mlx4_cleanup_qp_zones(struct mlx4_dev *dev)
 		int i;
 
 		for (i = 0;
-		     i < sizeof(qp_table->zones_uids)/sizeof(qp_table->zones_uids[0]);
+		     i < ARRAY_SIZE(qp_table->zones_uids);
 		     i++) {
 			struct mlx4_bitmap *bitmap =
 				mlx4_zone_get_bitmap(qp_table->zones,
@@ -918,7 +922,7 @@ int mlx4_qp_to_ready(struct mlx4_dev *dev, struct mlx4_mtt *mtt,
 {
 	int err;
 	int i;
-	enum mlx4_qp_state states[] = {
+	static const enum mlx4_qp_state states[] = {
 		MLX4_QP_STATE_RST,
 		MLX4_QP_STATE_INIT,
 		MLX4_QP_STATE_RTR,

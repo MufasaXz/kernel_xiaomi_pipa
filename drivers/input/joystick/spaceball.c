@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) 1999-2001 Vojtech Pavlik
  *
@@ -10,28 +11,12 @@
  * SpaceTec SpaceBall 2003/3003/4000 FLX driver for Linux
  */
 
-/*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- */
-
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/input.h>
 #include <linux/serio.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define DRIVER_DESC	"SpaceTec SpaceBall 2003/3003/4000 FLX driver"
 
@@ -165,7 +150,7 @@ static irqreturn_t spaceball_interrupt(struct serio *serio,
 				break;
 			}
 			spaceball->escape = 0;
-			/* fall through */
+			fallthrough;
 		case 'M':
 		case 'Q':
 		case 'S':
@@ -173,7 +158,7 @@ static irqreturn_t spaceball_interrupt(struct serio *serio,
 				spaceball->escape = 0;
 				data &= 0x1f;
 			}
-			/* fall through */
+			fallthrough;
 		default:
 			if (spaceball->escape)
 				spaceball->escape = 0;
@@ -214,7 +199,7 @@ static int spaceball_connect(struct serio *serio, struct serio_driver *drv)
 	if ((id = serio->id.id) > SPACEBALL_MAX_ID)
 		return -ENODEV;
 
-	spaceball = kmalloc(sizeof(struct spaceball), GFP_KERNEL);
+	spaceball = kmalloc(sizeof(*spaceball), GFP_KERNEL);
 	input_dev = input_allocate_device();
 	if (!spaceball || !input_dev)
 		goto fail1;
@@ -239,13 +224,13 @@ static int spaceball_connect(struct serio *serio, struct serio_driver *drv)
 			input_dev->keybit[BIT_WORD(BTN_A)] |= BIT_MASK(BTN_A) |
 				BIT_MASK(BTN_B) | BIT_MASK(BTN_C) |
 				BIT_MASK(BTN_MODE);
-			/* fall through */
+			fallthrough;
 		default:
 			input_dev->keybit[BIT_WORD(BTN_0)] |= BIT_MASK(BTN_2) |
 				BIT_MASK(BTN_3) | BIT_MASK(BTN_4) |
 				BIT_MASK(BTN_5) | BIT_MASK(BTN_6) |
 				BIT_MASK(BTN_7) | BIT_MASK(BTN_8);
-			/* fall through */
+			fallthrough;
 		case SPACEBALL_3003C:
 			input_dev->keybit[BIT_WORD(BTN_0)] |= BIT_MASK(BTN_1) |
 				BIT_MASK(BTN_8);

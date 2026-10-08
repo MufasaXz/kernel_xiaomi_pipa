@@ -1,7 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) ST-Ericsson AB 2010
  * Author:	Sjur Brendeland
- * License terms: GNU General Public License (GPL) version 2
  */
 
 #ifndef CFPKT_H_
@@ -18,7 +18,7 @@ struct cfpkt *cfpkt_create(u16 len);
 
 /*
  * Destroy a CAIF Packet.
- * pkt Packet to be destoyed.
+ * pkt Packet to be destroyed.
  */
 void cfpkt_destroy(struct cfpkt *pkt);
 

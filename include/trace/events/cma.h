@@ -8,54 +8,29 @@
 #include <linux/types.h>
 #include <linux/tracepoint.h>
 
-DECLARE_EVENT_CLASS(cma_alloc_class,
-
-	TP_PROTO(unsigned long pfn, const struct page *page,
-		 unsigned int count, unsigned int align),
-
-	TP_ARGS(pfn, page, count, align),
-
-	TP_STRUCT__entry(
-		__field(unsigned long, pfn)
-		__field(const struct page *, page)
-		__field(unsigned int, count)
-		__field(unsigned int, align)
-	),
-
-	TP_fast_assign(
-		__entry->pfn = pfn;
-		__entry->page = page;
-		__entry->count = count;
-		__entry->align = align;
-	),
-
-	TP_printk("pfn=%lx page=%p count=%u align=%u",
-		  __entry->pfn,
-		  __entry->page,
-		  __entry->count,
-		  __entry->align)
-);
-
 TRACE_EVENT(cma_release,
 
-	TP_PROTO(unsigned long pfn, const struct page *page,
-		 unsigned int count),
+	TP_PROTO(const char *name, unsigned long pfn, const struct page *page,
+		 unsigned long count),
 
-	TP_ARGS(pfn, page, count),
+	TP_ARGS(name, pfn, page, count),
 
 	TP_STRUCT__entry(
+		__string(name, name)
 		__field(unsigned long, pfn)
 		__field(const struct page *, page)
-		__field(unsigned int, count)
+		__field(unsigned long, count)
 	),
 
 	TP_fast_assign(
+		__assign_str(name);
 		__entry->pfn = pfn;
 		__entry->page = page;
 		__entry->count = count;
 	),
 
-	TP_printk("pfn=%lx page=%p count=%u",
+	TP_printk("name=%s pfn=0x%lx page=%p count=%lu",
+		  __get_str(name),
 		  __entry->pfn,
 		  __entry->page,
 		  __entry->count)
@@ -63,41 +38,99 @@ TRACE_EVENT(cma_release,
 
 TRACE_EVENT(cma_alloc_start,
 
-	TP_PROTO(unsigned int count, unsigned int align),
+	TP_PROTO(const char *name, unsigned long request_count, unsigned long available_count,
+		unsigned long total_count, unsigned int align),
 
-	TP_ARGS(count, align),
+	TP_ARGS(name, request_count, available_count, total_count, align),
 
 	TP_STRUCT__entry(
-		__field(unsigned int, count)
+		__string(name, name)
+		__field(unsigned long, request_count)
+		__field(unsigned long, available_count)
+		__field(unsigned long, total_count)
 		__field(unsigned int, align)
 	),
 
 	TP_fast_assign(
+		__assign_str(name);
+		__entry->request_count = request_count;
+		__entry->available_count = available_count;
+		__entry->total_count = total_count;
+		__entry->align = align;
+	),
+
+	TP_printk("name=%s request_count=%lu available_count=%lu total_count=%lu align=%u",
+		  __get_str(name),
+		  __entry->request_count,
+		  __entry->available_count,
+		  __entry->total_count,
+		  __entry->align)
+);
+
+TRACE_EVENT(cma_alloc_finish,
+
+	TP_PROTO(const char *name, unsigned long pfn, const struct page *page,
+		 unsigned long count, unsigned int align, int errorno),
+
+	TP_ARGS(name, pfn, page, count, align, errorno),
+
+	TP_STRUCT__entry(
+		__string(name, name)
+		__field(unsigned long, pfn)
+		__field(const struct page *, page)
+		__field(unsigned long, count)
+		__field(unsigned int, align)
+		__field(int, errorno)
+	),
+
+	TP_fast_assign(
+		__assign_str(name);
+		__entry->pfn = pfn;
+		__entry->page = page;
+		__entry->count = count;
+		__entry->align = align;
+		__entry->errorno = errorno;
+	),
+
+	TP_printk("name=%s pfn=0x%lx page=%p count=%lu align=%u errorno=%d",
+		  __get_str(name),
+		  __entry->pfn,
+		  __entry->page,
+		  __entry->count,
+		  __entry->align,
+		  __entry->errorno)
+);
+
+TRACE_EVENT(cma_alloc_busy_retry,
+
+	TP_PROTO(const char *name, unsigned long pfn, const struct page *page,
+		 unsigned long count, unsigned int align),
+
+	TP_ARGS(name, pfn, page, count, align),
+
+	TP_STRUCT__entry(
+		__string(name, name)
+		__field(unsigned long, pfn)
+		__field(const struct page *, page)
+		__field(unsigned long, count)
+		__field(unsigned int, align)
+	),
+
+	TP_fast_assign(
+		__assign_str(name);
+		__entry->pfn = pfn;
+		__entry->page = page;
 		__entry->count = count;
 		__entry->align = align;
 	),
 
-	TP_printk("count=%u align=%u",
+	TP_printk("name=%s pfn=0x%lx page=%p count=%lu align=%u",
+		  __get_str(name),
+		  __entry->pfn,
+		  __entry->page,
 		  __entry->count,
 		  __entry->align)
 );
-
-DEFINE_EVENT(cma_alloc_class, cma_alloc,
-
-	TP_PROTO(unsigned long pfn, const struct page *page,
-		 unsigned int count, unsigned int align),
-
-	TP_ARGS(pfn, page, count, align)
-);
-
-DEFINE_EVENT(cma_alloc_class, cma_alloc_busy_retry,
-
-	TP_PROTO(unsigned long pfn, const struct page *page,
-		 unsigned int count, unsigned int align),
-
-	TP_ARGS(pfn, page, count, align)
-);
-
 
 #endif /* _TRACE_CMA_H */
 

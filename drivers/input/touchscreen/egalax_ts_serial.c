@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * EETI Egalax serial touchscreen driver
  *
@@ -8,11 +9,6 @@
  * Hampshire serial touchscreen driver (Copyright (c) 2010 Adam Bennett)
  */
 
-/*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- */
 
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -103,7 +99,7 @@ static int egalax_connect(struct serio *serio, struct serio_driver *drv)
 	struct input_dev *input_dev;
 	int error;
 
-	egalax = kzalloc(sizeof(struct egalax), GFP_KERNEL);
+	egalax = kzalloc(sizeof(*egalax), GFP_KERNEL);
 	input_dev = input_allocate_device();
 	if (!egalax || !input_dev) {
 		error = -ENOMEM;

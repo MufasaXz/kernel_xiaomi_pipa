@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * LEDs driver for Dialog Semiconductor DA9030/DA9034
  *
@@ -6,10 +7,6 @@
  *
  * Copyright (C) 2006-2008 Marvell International Ltd.
  *	Eric Miao <eric.miao@marvell.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -124,13 +121,11 @@ static int da903x_led_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int da903x_led_remove(struct platform_device *pdev)
+static void da903x_led_remove(struct platform_device *pdev)
 {
 	struct da903x_led *led = platform_get_drvdata(pdev);
 
 	led_classdev_unregister(&led->cdev);
-
-	return 0;
 }
 
 static struct platform_driver da903x_led_driver = {

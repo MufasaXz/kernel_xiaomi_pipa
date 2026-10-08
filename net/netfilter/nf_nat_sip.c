@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* SIP extension for NAT alteration.
  *
  * (C) 2005 by Christian Hentschel <chentschel@arnet.com.ar>
  * based on RR's ip_nat_ftp.c and other modules.
  * (C) 2007 United Security Providers
  * (C) 2007, 2008, 2011, 2012 Patrick McHardy <kaber@trash.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -24,11 +21,15 @@
 #include <net/netfilter/nf_conntrack_seqadj.h>
 #include <linux/netfilter/nf_conntrack_sip.h>
 
+#define NAT_HELPER_NAME "sip"
+
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Christian Hentschel <chentschel@arnet.com.ar>");
 MODULE_DESCRIPTION("SIP NAT helper");
-MODULE_ALIAS("ip_nat_sip");
+MODULE_ALIAS_NF_NAT_HELPER(NAT_HELPER_NAME);
 
+static struct nf_conntrack_nat_helper nat_helper_sip =
+	NF_CT_NAT_HELPER_INIT(NAT_HELPER_NAME);
 
 static unsigned int mangle_packet(struct sk_buff *skb, unsigned int protoff,
 				  unsigned int dataoff,
@@ -281,7 +282,7 @@ next:
 	if (dir == IP_CT_DIR_REPLY && ct_sip_info->forced_dport) {
 		struct udphdr *uh;
 
-		if (!skb_make_writable(skb, skb->len)) {
+		if (skb_ensure_writable(skb, skb->len)) {
 			nf_ct_helper_log(skb, ct, "cannot mangle packet");
 			return NF_DROP;
 		}
@@ -409,19 +410,7 @@ static unsigned int nf_nat_sip_expect(struct sk_buff *skb, unsigned int protoff,
 	exp->dir = !dir;
 	exp->expectfn = nf_nat_sip_expected;
 
-	for (; port != 0; port++) {
-		int ret;
-
-		exp->tuple.dst.u.udp.port = htons(port);
-		ret = nf_ct_expect_related(exp);
-		if (ret == 0)
-			break;
-		else if (ret != -EBUSY) {
-			port = 0;
-			break;
-		}
-	}
-
+	port = nf_nat_exp_find_port(exp, port);
 	if (port == 0) {
 		nf_ct_helper_log(skb, ct, "all ports in use for SIP");
 		return NF_DROP;
@@ -606,7 +595,8 @@ static unsigned int nf_nat_sdp_media(struct sk_buff *skb, unsigned int protoff,
 		int ret;
 
 		rtp_exp->tuple.dst.u.udp.port = htons(port);
-		ret = nf_ct_expect_related(rtp_exp);
+		ret = nf_ct_expect_related(rtp_exp,
+					   NF_CT_EXP_F_SKIP_MASTER);
 		if (ret == -EBUSY)
 			continue;
 		else if (ret < 0) {
@@ -614,7 +604,8 @@ static unsigned int nf_nat_sdp_media(struct sk_buff *skb, unsigned int protoff,
 			break;
 		}
 		rtcp_exp->tuple.dst.u.udp.port = htons(port + 1);
-		ret = nf_ct_expect_related(rtcp_exp);
+		ret = nf_ct_expect_related(rtcp_exp,
+					   NF_CT_EXP_F_SKIP_MASTER);
 		if (ret == 0)
 			break;
 		else if (ret == -EBUSY) {
@@ -656,8 +647,8 @@ static struct nf_ct_helper_expectfn sip_nat = {
 
 static void __exit nf_nat_sip_fini(void)
 {
+	nf_nat_helper_unregister(&nat_helper_sip);
 	RCU_INIT_POINTER(nf_nat_sip_hooks, NULL);
-
 	nf_ct_helper_expectfn_unregister(&sip_nat);
 	synchronize_rcu();
 }
@@ -675,6 +666,7 @@ static const struct nf_nat_sip_hooks sip_hooks = {
 static int __init nf_nat_sip_init(void)
 {
 	BUG_ON(nf_nat_sip_hooks != NULL);
+	nf_nat_helper_register(&nat_helper_sip);
 	RCU_INIT_POINTER(nf_nat_sip_hooks, &sip_hooks);
 	nf_ct_helper_expectfn_register(&sip_nat);
 	return 0;

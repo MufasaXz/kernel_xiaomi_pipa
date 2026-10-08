@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * itg3200_buffer.c -- support InvenSense ITG3200
  *                     Digital 3-Axis Gyroscope driver
@@ -5,10 +6,6 @@
  * Copyright (c) 2011 Christian Strobel <christian.strobel@iis.fraunhofer.de>
  * Copyright (c) 2011 Manuel Stahl <manuel.stahl@iis.fraunhofer.de>
  * Copyright (c) 2012 Thorsten Nowak <thorsten.nowak@iis.fraunhofer.de>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/slab.h>
@@ -55,7 +52,7 @@ static irqreturn_t itg3200_trigger_handler(int irq, void *p)
 	 */
 	struct {
 		__be16 buf[ITG3200_SCAN_ELEMENTS];
-		s64 ts __aligned(8);
+		aligned_s64 ts;
 	} scan;
 
 	int ret = itg3200_read_all_channels(st->i2c, scan.buf);
@@ -116,21 +113,18 @@ int itg3200_probe_trigger(struct iio_dev *indio_dev)
 	int ret;
 	struct itg3200 *st = iio_priv(indio_dev);
 
-	st->trig = iio_trigger_alloc("%s-dev%d", indio_dev->name,
-				     indio_dev->id);
+	st->trig = iio_trigger_alloc(&st->i2c->dev, "%s-dev%d", indio_dev->name,
+				     iio_device_id(indio_dev));
 	if (!st->trig)
 		return -ENOMEM;
 
-	ret = request_irq(st->i2c->irq,
-			  &iio_trigger_generic_data_rdy_poll,
-			  IRQF_TRIGGER_RISING,
-			  "itg3200_data_rdy",
-			  st->trig);
+	ret = request_irq(st->i2c->irq, &iio_trigger_generic_data_rdy_poll,
+			  IRQF_TRIGGER_RISING | IRQF_NO_THREAD,
+			  "itg3200_data_rdy", st->trig);
 	if (ret)
 		goto error_free_trig;
 
 
-	st->trig->dev.parent = &st->i2c->dev;
 	st->trig->ops = &itg3200_trigger_ops;
 	iio_trigger_set_drvdata(st->trig, indio_dev);
 	ret = iio_trigger_register(st->trig);

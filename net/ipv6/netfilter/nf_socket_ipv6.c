@@ -1,11 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2007-2008 BalaBit IT Ltd.
  * Author: Krisztian Kovacs
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/module.h>
@@ -16,7 +12,6 @@
 #include <net/sock.h>
 #include <net/inet_sock.h>
 #include <net/inet6_hashtables.h>
-#include <net/netfilter/ipv6/nf_defrag_ipv6.h>
 #include <net/netfilter/nf_socket.h>
 #if IS_ENABLED(CONFIG_NF_CONNTRACK)
 #include <net/netfilter/nf_conntrack.h>
@@ -88,8 +83,7 @@ nf_socket_get_sock_v6(struct net *net, struct sk_buff *skb, int doff,
 {
 	switch (protocol) {
 	case IPPROTO_TCP:
-		return inet6_lookup(net, &tcp_hashinfo, skb, doff,
-				    saddr, sport, daddr, dport,
+		return inet6_lookup(net, skb, doff, saddr, sport, daddr, dport,
 				    in->ifindex);
 	case IPPROTO_UDP:
 		return udp6_lib_lookup(net, saddr, sport, daddr, dport,

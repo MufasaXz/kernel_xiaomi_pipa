@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2015 Jens Kuske <jenskuske@gmail.com>
  *
@@ -5,19 +6,10 @@
  * Copyright 2015 Maxime Ripard
  *
  * Maxime Ripard <maxime.ripard@free-electrons.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/clk-provider.h>
+#include <linux/io.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/slab.h>
@@ -32,11 +24,9 @@ static void __init sun8i_h3_bus_gates_init(struct device_node *node)
 	const char *parents[PARENT_MAX];
 	struct clk_onecell_data *clk_data;
 	const char *clk_name;
-	struct property *prop;
 	struct resource res;
 	void __iomem *clk_reg;
 	void __iomem *reg;
-	const __be32 *p;
 	int number, i;
 	u8 clk_bit;
 	int index;
@@ -66,7 +56,7 @@ static void __init sun8i_h3_bus_gates_init(struct device_node *node)
 		goto err_free_data;
 
 	i = 0;
-	of_property_for_each_u32(node, "clock-indices", prop, p, index) {
+	of_property_for_each_u32(node, "clock-indices", index) {
 		of_property_read_string_index(node, "clock-output-names",
 					      i, &clk_name);
 

@@ -1,13 +1,10 @@
-/**
+// SPDX-License-Identifier: GPL-2.0-only
+/*
  * Register map access API - ENCX24J600 support
  *
  * Copyright 2015 Gridpoint
  *
  * Author: Jon Ringle <jringle@gridpoint.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/delay.h>
@@ -19,11 +16,6 @@
 #include <linux/spi/spi.h>
 
 #include "encx24j600_hw.h"
-
-static inline bool is_bits_set(int value, int mask)
-{
-	return (value & mask) == mask;
-}
 
 static int encx24j600_switch_bank(struct encx24j600_context *ctx,
 				  int bank)
@@ -83,7 +75,7 @@ static int regmap_encx24j600_sfr_read(void *context, u8 reg, u8 *val,
 		if (unlikely(ret))
 			return ret;
 	} else {
-		/* Translate registers that are more effecient using
+		/* Translate registers that are more efficient using
 		 * 3-byte SPI commands
 		 */
 		switch (reg) {
@@ -137,7 +129,7 @@ static int regmap_encx24j600_sfr_update(struct encx24j600_context *ctx,
 		if (unlikely(ret))
 			return ret;
 	} else {
-		/* Translate registers that are more effecient using
+		/* Translate registers that are more efficient using
 		 * 3-byte SPI commands
 		 */
 		switch (reg) {
@@ -472,7 +464,7 @@ static struct regmap_config regcfg = {
 	.val_bits = 16,
 	.max_register = 0xee,
 	.reg_stride = 2,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 	.val_format_endian = REGMAP_ENDIAN_LITTLE,
 	.readable_reg = encx24j600_regmap_readable,
 	.writeable_reg = encx24j600_regmap_writeable,
@@ -482,25 +474,25 @@ static struct regmap_config regcfg = {
 	.unlock = regmap_unlock_mutex,
 };
 
-static struct regmap_bus regmap_encx24j600 = {
+static const struct regmap_bus regmap_encx24j600 = {
 	.write = regmap_encx24j600_write,
 	.read = regmap_encx24j600_read,
 	.reg_update_bits = regmap_encx24j600_reg_update_bits,
 };
 
-static struct regmap_config phycfg = {
+static const struct regmap_config phycfg = {
 	.name = "phy",
 	.reg_bits = 8,
 	.val_bits = 16,
 	.max_register = 0x1f,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 	.val_format_endian = REGMAP_ENDIAN_LITTLE,
 	.readable_reg = encx24j600_phymap_readable,
 	.writeable_reg = encx24j600_phymap_writeable,
 	.volatile_reg = encx24j600_phymap_volatile,
 };
 
-static struct regmap_bus phymap_encx24j600 = {
+static const struct regmap_bus phymap_encx24j600 = {
 	.reg_write = regmap_encx24j600_phy_reg_write,
 	.reg_read = regmap_encx24j600_phy_reg_read,
 };
@@ -521,4 +513,5 @@ int devm_regmap_init_encx24j600(struct device *dev,
 }
 EXPORT_SYMBOL_GPL(devm_regmap_init_encx24j600);
 
+MODULE_DESCRIPTION("Microchip ENCX24J600 helpers");
 MODULE_LICENSE("GPL");

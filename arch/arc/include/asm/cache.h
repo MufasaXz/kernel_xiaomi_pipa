@@ -1,9 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef __ARC_ASM_CACHE_H
@@ -26,7 +23,9 @@
  */
 #define ARC_UNCACHED_ADDR_SPACE	0xc0000000
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
+
+#include <linux/build_bug.h>
 
 /* Uncached access macros */
 #define arc_read_uncached_32(ptr)	\
@@ -63,14 +62,10 @@
 #define ARCH_SLAB_MINALIGN	8
 #endif
 
-extern void arc_cache_init(void);
-extern char *arc_cache_mumbojumbo(int cpu_id, char *buf, int len);
-extern void read_decode_cache_bcr(void);
-
 extern int ioc_enable;
 extern unsigned long perip_base, perip_end;
 
-#endif	/* !__ASSEMBLY__ */
+#endif	/* !__ASSEMBLER__ */
 
 /* Instruction cache related Auxiliary registers */
 #define ARC_REG_IC_BCR		0x77	/* Build Config reg */

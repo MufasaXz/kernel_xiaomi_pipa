@@ -18,7 +18,6 @@
 
 #include <linux/acpi.h>
 #include <linux/bitmap.h>
-#include <linux/bootmem.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/memblock.h>
@@ -35,18 +34,7 @@ int __init acpi_numa_get_nid(unsigned int cpu)
 	return acpi_early_node_map[cpu];
 }
 
-static inline int get_cpu_for_acpi_id(u32 uid)
-{
-	int cpu;
-
-	for (cpu = 0; cpu < nr_cpu_ids; cpu++)
-		if (uid == get_acpi_id_for_cpu(cpu))
-			return cpu;
-
-	return -EINVAL;
-}
-
-static int __init acpi_parse_gicc_pxm(struct acpi_subtable_header *header,
+static int __init acpi_parse_gicc_pxm(union acpi_subtable_headers *header,
 				      const unsigned long end)
 {
 	struct acpi_srat_gicc_affinity *pa;
@@ -110,7 +98,7 @@ void __init acpi_numa_gicc_affinity_init(struct acpi_srat_gicc_affinity *pa)
 	pxm = pa->proximity_domain;
 	node = acpi_map_pxm_to_node(pxm);
 
-	if (node == NUMA_NO_NODE || node >= MAX_NUMNODES) {
+	if (node == NUMA_NO_NODE) {
 		pr_err("SRAT: Too many proximity domains %d\n", pxm);
 		bad_srat();
 		return;
@@ -119,15 +107,3 @@ void __init acpi_numa_gicc_affinity_init(struct acpi_srat_gicc_affinity *pa)
 	node_set(node, numa_nodes_parsed);
 }
 
-int __init arm64_acpi_numa_init(void)
-{
-	int ret;
-
-	ret = acpi_numa_init();
-	if (ret) {
-		pr_info("Failed to initialise from firmware\n");
-		return ret;
-	}
-
-	return srat_disabled() ? -EINVAL : 0;
-}

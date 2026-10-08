@@ -1,10 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2011-2016 Synaptics Incorporated
  * Copyright (c) 2011 Unixphere
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  */
 
 #ifndef _RMI_DRIVER_H
@@ -87,7 +84,7 @@ int rmi_register_desc_calc_reg_offset(
 bool rmi_register_desc_has_subpacket(const struct rmi_register_desc_item *item,
 			u8 subpacket);
 
-bool rmi_is_physical_driver(struct device_driver *);
+bool rmi_is_physical_driver(const struct device_driver *);
 int rmi_register_physical_driver(void);
 void rmi_unregister_physical_driver(void);
 void rmi_free_function_list(struct rmi_device *rmi_dev);
@@ -136,8 +133,11 @@ extern struct rmi_function_handler rmi_f01_handler;
 extern struct rmi_function_handler rmi_f03_handler;
 extern struct rmi_function_handler rmi_f11_handler;
 extern struct rmi_function_handler rmi_f12_handler;
+extern struct rmi_function_handler rmi_f1a_handler;
+extern struct rmi_function_handler rmi_f21_handler;
 extern struct rmi_function_handler rmi_f30_handler;
 extern struct rmi_function_handler rmi_f34_handler;
+extern struct rmi_function_handler rmi_f3a_handler;
 extern struct rmi_function_handler rmi_f54_handler;
 extern struct rmi_function_handler rmi_f55_handler;
 #endif

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * u_ncm.h
  *
@@ -7,7 +7,7 @@
  * Copyright (c) 2013 Samsung Electronics Co., Ltd.
  *		http://www.samsung.com
  *
- * Author: Andrzej Pietrasiewicz <andrzej.p@samsung.com>
+ * Author: Andrzej Pietrasiewicz <andrzejtp2010@gmail.com>
  */
 
 #ifndef U_NCM_H
@@ -18,7 +18,7 @@
 struct f_ncm_opts {
 	struct usb_function_instance	func_inst;
 	struct net_device		*net;
-	bool				bound;
+	int				bind_count;
 
 	struct config_group		*ncm_interf_group;
 	struct usb_os_desc		ncm_os_desc;
@@ -31,10 +31,8 @@ struct f_ncm_opts {
 	 */
 	struct mutex			lock;
 	int				refcnt;
-};
 
-extern struct device *create_function_device(char *name);
-int ncm_ctrlrequest(struct usb_composite_dev *cdev,
-		const struct usb_ctrlrequest *ctrl);
+	u16				max_segment_size;
+};
 
 #endif /* U_NCM_H */

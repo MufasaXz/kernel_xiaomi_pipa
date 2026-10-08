@@ -46,6 +46,9 @@
 #define TRACER_BLOCK_SIZE_BYTE 256
 #define TRACES_PER_BLOCK 32
 
+#define TRACE_STR_MSG 256
+#define SAVED_TRACES_NUM 8192
+
 #define TRACER_MAX_PARAMS 7
 #define MESSAGE_HASH_BITS 6
 #define MESSAGE_HASH_SIZE BIT(MESSAGE_HASH_BITS)
@@ -53,8 +56,21 @@
 #define MASK_52_7 (0x1FFFFFFFFFFF80)
 #define MASK_6_0  (0x7F)
 
+struct mlx5_fw_trace_data {
+	u64 timestamp;
+	bool lost;
+	u8 event_id;
+	char msg[TRACE_STR_MSG];
+};
+
+enum mlx5_fw_tracer_state {
+	MLX5_TRACER_STATE_UP = BIT(0),
+	MLX5_TRACER_RECREATE_DB = BIT(1),
+};
+
 struct mlx5_fw_tracer {
 	struct mlx5_core_dev *dev;
+	struct mlx5_nb        nb;
 	bool owner;
 	u8   trc_ver;
 	struct workqueue_struct *work_queue;
@@ -78,14 +94,24 @@ struct mlx5_fw_tracer {
 		void *log_buf;
 		dma_addr_t dma;
 		u32 size;
-		struct mlx5_core_mkey mkey;
+		u32 mkey;
 		u32 consumer_index;
 	} buff;
+
+	/* Saved Traces Array */
+	struct {
+		struct mlx5_fw_trace_data straces[SAVED_TRACES_NUM];
+		u32 saved_traces_index;
+		struct mutex lock; /* Protect st_arr access */
+	} st_arr;
 
 	u64 last_timestamp;
 	struct work_struct handle_traces_work;
 	struct hlist_head hash[MESSAGE_HASH_SIZE];
 	struct list_head ready_strings_list;
+	struct work_struct update_db_work;
+	struct mutex state_lock; /* Synchronize update work with reload flows */
+	unsigned long state;
 };
 
 struct tracer_string_format {
@@ -99,6 +125,7 @@ struct tracer_string_format {
 	struct list_head list;
 	u32 timestamp;
 	bool lost;
+	bool invalid_string;
 };
 
 enum mlx5_fw_tracer_ownership_state {
@@ -140,6 +167,7 @@ struct tracer_event {
 		struct tracer_string_event string_event;
 		struct tracer_timestamp_event timestamp_event;
 	};
+	u64 *out;
 };
 
 struct mlx5_ifc_tracer_event_bits {
@@ -170,6 +198,9 @@ struct mlx5_fw_tracer *mlx5_fw_tracer_create(struct mlx5_core_dev *dev);
 int mlx5_fw_tracer_init(struct mlx5_fw_tracer *tracer);
 void mlx5_fw_tracer_cleanup(struct mlx5_fw_tracer *tracer);
 void mlx5_fw_tracer_destroy(struct mlx5_fw_tracer *tracer);
-void mlx5_fw_tracer_event(struct mlx5_core_dev *dev, struct mlx5_eqe *eqe);
+int mlx5_fw_tracer_trigger_core_dump_general(struct mlx5_core_dev *dev);
+int mlx5_fw_tracer_get_saved_traces_objects(struct mlx5_fw_tracer *tracer,
+					    struct devlink_fmsg *fmsg);
+int mlx5_fw_tracer_reload(struct mlx5_fw_tracer *tracer);
 
 #endif

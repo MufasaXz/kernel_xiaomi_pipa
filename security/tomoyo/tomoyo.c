@@ -6,22 +6,23 @@
  */
 
 #include <linux/lsm_hooks.h>
+#include <uapi/linux/lsm.h>
 #include "common.h"
 
 /**
- * tomoyo_cred_alloc_blank - Target for security_cred_alloc_blank().
+ * tomoyo_domain - Get "struct tomoyo_domain_info" for current thread.
  *
- * @new: Pointer to "struct cred".
- * @gfp: Memory allocation flags.
- *
- * Returns 0.
+ * Returns pointer to "struct tomoyo_domain_info" for current thread.
  */
-static int tomoyo_cred_alloc_blank(struct cred *new, gfp_t gfp)
+struct tomoyo_domain_info *tomoyo_domain(void)
 {
-	struct tomoyo_domain_info **blob = tomoyo_cred(new);
+	struct tomoyo_task *s = tomoyo_task(current);
 
-	*blob = NULL;
-	return 0;
+	if (s->old_domain_info && !current->in_execve) {
+		atomic_dec(&s->old_domain_info->users);
+		s->old_domain_info = NULL;
+	}
+	return s->domain_info;
 }
 
 /**
@@ -36,85 +37,50 @@ static int tomoyo_cred_alloc_blank(struct cred *new, gfp_t gfp)
 static int tomoyo_cred_prepare(struct cred *new, const struct cred *old,
 			       gfp_t gfp)
 {
-	struct tomoyo_domain_info **old_blob = tomoyo_cred(old);
-	struct tomoyo_domain_info **new_blob = tomoyo_cred(new);
-	struct tomoyo_domain_info *domain;
+	/* Restore old_domain_info saved by previous execve() request. */
+	struct tomoyo_task *s = tomoyo_task(current);
 
-	domain = *old_blob;
-	*new_blob = domain;
-
-	if (domain)
-		atomic_inc(&domain->users);
+	if (s->old_domain_info && !current->in_execve) {
+		atomic_dec(&s->domain_info->users);
+		s->domain_info = s->old_domain_info;
+		s->old_domain_info = NULL;
+	}
 	return 0;
 }
 
 /**
- * tomoyo_cred_transfer - Target for security_transfer_creds().
+ * tomoyo_bprm_committed_creds - Target for security_bprm_committed_creds().
  *
- * @new: Pointer to "struct cred".
- * @old: Pointer to "struct cred".
+ * @bprm: Pointer to "struct linux_binprm".
  */
-static void tomoyo_cred_transfer(struct cred *new, const struct cred *old)
+static void tomoyo_bprm_committed_creds(const struct linux_binprm *bprm)
 {
-	tomoyo_cred_prepare(new, old, 0);
+	/* Clear old_domain_info saved by execve() request. */
+	struct tomoyo_task *s = tomoyo_task(current);
+
+	atomic_dec(&s->old_domain_info->users);
+	s->old_domain_info = NULL;
 }
 
+#ifndef CONFIG_SECURITY_TOMOYO_OMIT_USERSPACE_LOADER
 /**
- * tomoyo_cred_free - Target for security_cred_free().
- *
- * @cred: Pointer to "struct cred".
- */
-static void tomoyo_cred_free(struct cred *cred)
-{
-	struct tomoyo_domain_info **blob = tomoyo_cred(cred);
-	struct tomoyo_domain_info *domain = *blob;
-
-	if (domain)
-		atomic_dec(&domain->users);
-}
-
-/**
- * tomoyo_bprm_set_creds - Target for security_bprm_set_creds().
+ * tomoyo_bprm_creds_for_exec - Target for security_bprm_creds_for_exec().
  *
  * @bprm: Pointer to "struct linux_binprm".
  *
- * Returns 0 on success, negative value otherwise.
+ * Returns 0.
  */
-static int tomoyo_bprm_set_creds(struct linux_binprm *bprm)
+static int tomoyo_bprm_creds_for_exec(struct linux_binprm *bprm)
 {
-	struct tomoyo_domain_info **blob;
-	struct tomoyo_domain_info *domain;
-
-	/*
-	 * Do only if this function is called for the first time of an execve
-	 * operation.
-	 */
-	if (bprm->called_set_creds)
-		return 0;
-#ifndef CONFIG_SECURITY_TOMOYO_OMIT_USERSPACE_LOADER
 	/*
 	 * Load policy if /sbin/tomoyo-init exists and /sbin/init is requested
 	 * for the first time.
 	 */
 	if (!tomoyo_policy_loaded)
 		tomoyo_load_policy(bprm->filename);
-#endif
-	/*
-	 * Release reference to "struct tomoyo_domain_info" stored inside
-	 * "bprm->cred->security". New reference to "struct tomoyo_domain_info"
-	 * stored inside "bprm->cred->security" will be acquired later inside
-	 * tomoyo_find_next_domain().
-	 */
-	blob = tomoyo_cred(bprm->cred);
-	domain = *blob;
-	atomic_dec(&domain->users);
-	/*
-	 * Tell tomoyo_bprm_check_security() is called for the first time of an
-	 * execve operation.
-	 */
-	*blob = NULL;
 	return 0;
 }
+#endif
 
 /**
  * tomoyo_bprm_check_security - Target for security_bprm_check().
@@ -125,33 +91,30 @@ static int tomoyo_bprm_set_creds(struct linux_binprm *bprm)
  */
 static int tomoyo_bprm_check_security(struct linux_binprm *bprm)
 {
-	struct tomoyo_domain_info **blob;
-	struct tomoyo_domain_info *domain;
+	struct tomoyo_task *s = tomoyo_task(current);
 
-	blob = tomoyo_cred(bprm->cred);
-	domain = *blob;
 	/*
-	 * Execute permission is checked against pathname passed to do_execve()
+	 * Execute permission is checked against pathname passed to execve()
 	 * using current domain.
 	 */
-	if (!domain) {
+	if (!s->old_domain_info) {
 		const int idx = tomoyo_read_lock();
 		const int err = tomoyo_find_next_domain(bprm);
+
 		tomoyo_read_unlock(idx);
 		return err;
 	}
 	/*
 	 * Read permission is checked against interpreters using next domain.
 	 */
-	return tomoyo_check_open_permission(domain, &bprm->file->f_path,
-					    O_RDONLY);
+	return tomoyo_check_open_permission(s->domain_info,
+					    &bprm->file->f_path, O_RDONLY);
 }
 
 /**
  * tomoyo_inode_getattr - Target for security_inode_getattr().
  *
- * @mnt:    Pointer to "struct vfsmount".
- * @dentry: Pointer to "struct dentry".
+ * @path: Pointer to "struct path".
  *
  * Returns 0 on success, negative value otherwise.
  */
@@ -173,6 +136,18 @@ static int tomoyo_path_truncate(const struct path *path)
 }
 
 /**
+ * tomoyo_file_truncate - Target for security_file_truncate().
+ *
+ * @file: Pointer to "struct file".
+ *
+ * Returns 0 on success, negative value otherwise.
+ */
+static int tomoyo_file_truncate(struct file *file)
+{
+	return tomoyo_path_truncate(&file->f_path);
+}
+
+/**
  * tomoyo_path_unlink - Target for security_path_unlink().
  *
  * @parent: Pointer to "struct path".
@@ -183,6 +158,7 @@ static int tomoyo_path_truncate(const struct path *path)
 static int tomoyo_path_unlink(const struct path *parent, struct dentry *dentry)
 {
 	struct path path = { .mnt = parent->mnt, .dentry = dentry };
+
 	return tomoyo_path_perm(TOMOYO_TYPE_UNLINK, &path, NULL);
 }
 
@@ -199,6 +175,7 @@ static int tomoyo_path_mkdir(const struct path *parent, struct dentry *dentry,
 			     umode_t mode)
 {
 	struct path path = { .mnt = parent->mnt, .dentry = dentry };
+
 	return tomoyo_path_number_perm(TOMOYO_TYPE_MKDIR, &path,
 				       mode & S_IALLUGO);
 }
@@ -214,6 +191,7 @@ static int tomoyo_path_mkdir(const struct path *parent, struct dentry *dentry,
 static int tomoyo_path_rmdir(const struct path *parent, struct dentry *dentry)
 {
 	struct path path = { .mnt = parent->mnt, .dentry = dentry };
+
 	return tomoyo_path_perm(TOMOYO_TYPE_RMDIR, &path, NULL);
 }
 
@@ -230,6 +208,7 @@ static int tomoyo_path_symlink(const struct path *parent, struct dentry *dentry,
 			       const char *old_name)
 {
 	struct path path = { .mnt = parent->mnt, .dentry = dentry };
+
 	return tomoyo_path_perm(TOMOYO_TYPE_SYMLINK, &path, old_name);
 }
 
@@ -287,6 +266,7 @@ static int tomoyo_path_link(struct dentry *old_dentry, const struct path *new_di
 {
 	struct path path1 = { .mnt = new_dir->mnt, .dentry = old_dentry };
 	struct path path2 = { .mnt = new_dir->mnt, .dentry = new_dentry };
+
 	return tomoyo_path2_perm(TOMOYO_TYPE_LINK, &path1, &path2);
 }
 
@@ -297,16 +277,26 @@ static int tomoyo_path_link(struct dentry *old_dentry, const struct path *new_di
  * @old_dentry: Pointer to "struct dentry".
  * @new_parent: Pointer to "struct path".
  * @new_dentry: Pointer to "struct dentry".
+ * @flags: Rename options.
  *
  * Returns 0 on success, negative value otherwise.
  */
 static int tomoyo_path_rename(const struct path *old_parent,
 			      struct dentry *old_dentry,
 			      const struct path *new_parent,
-			      struct dentry *new_dentry)
+			      struct dentry *new_dentry,
+			      const unsigned int flags)
 {
 	struct path path1 = { .mnt = old_parent->mnt, .dentry = old_dentry };
 	struct path path2 = { .mnt = new_parent->mnt, .dentry = new_dentry };
+
+	if (flags & RENAME_EXCHANGE) {
+		const int err = tomoyo_path2_perm(TOMOYO_TYPE_RENAME, &path2,
+				&path1);
+
+		if (err)
+			return err;
+	}
 	return tomoyo_path2_perm(TOMOYO_TYPE_RENAME, &path1, &path2);
 }
 
@@ -331,18 +321,18 @@ static int tomoyo_file_fcntl(struct file *file, unsigned int cmd,
 /**
  * tomoyo_file_open - Target for security_file_open().
  *
- * @f:    Pointer to "struct file".
- * @cred: Pointer to "struct cred".
+ * @f: Pointer to "struct file".
  *
  * Returns 0 on success, negative value otherwise.
  */
 static int tomoyo_file_open(struct file *f)
 {
-	int flags = f->f_flags;
-	/* Don't check read permission here if called from do_execve(). */
-	if (current->in_execve)
+	/* Don't check read permission here if called from execve(). */
+	/* Illogically, FMODE_EXEC is in f_flags, not f_mode. */
+	if (f->f_flags & __FMODE_EXEC)
 		return 0;
-	return tomoyo_check_open_permission(tomoyo_domain(), &f->f_path, flags);
+	return tomoyo_check_open_permission(tomoyo_domain(), &f->f_path,
+					    f->f_flags);
 }
 
 /**
@@ -386,6 +376,7 @@ static int tomoyo_path_chmod(const struct path *path, umode_t mode)
 static int tomoyo_path_chown(const struct path *path, kuid_t uid, kgid_t gid)
 {
 	int error = 0;
+
 	if (uid_valid(uid))
 		error = tomoyo_path_number_perm(TOMOYO_TYPE_CHOWN, path,
 						from_kuid(&init_user_ns, uid));
@@ -435,6 +426,7 @@ static int tomoyo_sb_mount(const char *dev_name, const struct path *path,
 static int tomoyo_sb_umount(struct vfsmount *mnt, int flags)
 {
 	struct path path = { .mnt = mnt, .dentry = mnt->mnt_root };
+
 	return tomoyo_path_perm(TOMOYO_TYPE_UMOUNT, &path, NULL);
 }
 
@@ -509,23 +501,67 @@ static int tomoyo_socket_sendmsg(struct socket *sock, struct msghdr *msg,
 	return tomoyo_socket_sendmsg_permission(sock, msg, size);
 }
 
-struct lsm_blob_sizes tomoyo_blob_sizes __lsm_ro_after_init = {
-	.lbs_cred = sizeof(struct tomoyo_domain_info *),
+struct lsm_blob_sizes tomoyo_blob_sizes __ro_after_init = {
+	.lbs_task = sizeof(struct tomoyo_task),
 };
 
-/*
- * tomoyo_security_ops is a "struct security_operations" which is used for
- * registering TOMOYO.
+/**
+ * tomoyo_task_alloc - Target for security_task_alloc().
+ *
+ * @task:        Pointer to "struct task_struct".
+ * @clone_flags: clone() flags.
+ *
+ * Returns 0.
  */
-static struct security_hook_list tomoyo_hooks[] __lsm_ro_after_init = {
-	LSM_HOOK_INIT(cred_alloc_blank, tomoyo_cred_alloc_blank),
+static int tomoyo_task_alloc(struct task_struct *task,
+			     u64 clone_flags)
+{
+	struct tomoyo_task *old = tomoyo_task(current);
+	struct tomoyo_task *new = tomoyo_task(task);
+
+	new->domain_info = old->domain_info;
+	atomic_inc(&new->domain_info->users);
+	new->old_domain_info = NULL;
+	return 0;
+}
+
+/**
+ * tomoyo_task_free - Target for security_task_free().
+ *
+ * @task: Pointer to "struct task_struct".
+ */
+static void tomoyo_task_free(struct task_struct *task)
+{
+	struct tomoyo_task *s = tomoyo_task(task);
+
+	if (s->domain_info) {
+		atomic_dec(&s->domain_info->users);
+		s->domain_info = NULL;
+	}
+	if (s->old_domain_info) {
+		atomic_dec(&s->old_domain_info->users);
+		s->old_domain_info = NULL;
+	}
+}
+
+static const struct lsm_id tomoyo_lsmid = {
+	.name = "tomoyo",
+	.id = LSM_ID_TOMOYO,
+};
+
+/* tomoyo_hooks is used for registering TOMOYO. */
+static struct security_hook_list tomoyo_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(cred_prepare, tomoyo_cred_prepare),
-	LSM_HOOK_INIT(cred_transfer, tomoyo_cred_transfer),
-	LSM_HOOK_INIT(cred_free, tomoyo_cred_free),
-	LSM_HOOK_INIT(bprm_set_creds, tomoyo_bprm_set_creds),
+	LSM_HOOK_INIT(bprm_committed_creds, tomoyo_bprm_committed_creds),
+	LSM_HOOK_INIT(task_alloc, tomoyo_task_alloc),
+	LSM_HOOK_INIT(task_free, tomoyo_task_free),
+#ifndef CONFIG_SECURITY_TOMOYO_OMIT_USERSPACE_LOADER
+	LSM_HOOK_INIT(bprm_creds_for_exec, tomoyo_bprm_creds_for_exec),
+#endif
 	LSM_HOOK_INIT(bprm_check_security, tomoyo_bprm_check_security),
 	LSM_HOOK_INIT(file_fcntl, tomoyo_file_fcntl),
 	LSM_HOOK_INIT(file_open, tomoyo_file_open),
+	LSM_HOOK_INIT(file_truncate, tomoyo_file_truncate),
 	LSM_HOOK_INIT(path_truncate, tomoyo_path_truncate),
 	LSM_HOOK_INIT(path_unlink, tomoyo_path_unlink),
 	LSM_HOOK_INIT(path_mkdir, tomoyo_path_mkdir),
@@ -552,7 +588,7 @@ static struct security_hook_list tomoyo_hooks[] __lsm_ro_after_init = {
 /* Lock for GC. */
 DEFINE_SRCU(tomoyo_ss);
 
-int tomoyo_enabled __lsm_ro_after_init = 1;
+int tomoyo_enabled __ro_after_init = 1;
 
 /**
  * tomoyo_init - Register TOMOYO Linux as a LSM module.
@@ -561,14 +597,15 @@ int tomoyo_enabled __lsm_ro_after_init = 1;
  */
 static int __init tomoyo_init(void)
 {
-	struct cred *cred = (struct cred *) current_cred();
-	struct tomoyo_domain_info **blob;
+	struct tomoyo_task *s = tomoyo_task(current);
 
 	/* register ourselves with the security framework */
-	security_add_hooks(tomoyo_hooks, ARRAY_SIZE(tomoyo_hooks), "tomoyo");
-	printk(KERN_INFO "TOMOYO Linux initialized\n");
-	blob = tomoyo_cred(cred);
-	*blob = &tomoyo_kernel_domain;
+	security_add_hooks(tomoyo_hooks, ARRAY_SIZE(tomoyo_hooks),
+			   &tomoyo_lsmid);
+	pr_info("TOMOYO Linux initialized\n");
+	s->domain_info = &tomoyo_kernel_domain;
+	atomic_inc(&tomoyo_kernel_domain.users);
+	s->old_domain_info = NULL;
 	tomoyo_mm_init();
 
 	return 0;
@@ -577,7 +614,7 @@ static int __init tomoyo_init(void)
 DEFINE_LSM(tomoyo) = {
 	.name = "tomoyo",
 	.enabled = &tomoyo_enabled,
-	.flags = LSM_FLAG_LEGACY_MAJOR | LSM_FLAG_EXCLUSIVE,
+	.flags = LSM_FLAG_LEGACY_MAJOR,
 	.blobs = &tomoyo_blob_sizes,
 	.init = tomoyo_init,
 };

@@ -1,18 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Driver for Microtune MT2060 "Single chip dual conversion broadband tuner"
  *
  *  Copyright (c) 2006 Olivier DANET <odanet@caramail.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *
- *  GNU General Public License for more details.
  */
 
 /* In that file, frequencies are expressed in kiloHertz to avoid 32 bits overflows */
@@ -225,7 +215,7 @@ static int mt2060_set_params(struct dvb_frontend *fe)
 	f_lo2 = f_lo1 - freq - IF2;
 	// From the Comtech datasheet, the step used is 50kHz. The tuner chip could be more precise
 	f_lo2 = ((f_lo2 + 25) / 50) * 50;
-	priv->frequency =  (f_lo1 - f_lo2 - IF2) * 1000,
+	priv->frequency =  (f_lo1 - f_lo2 - IF2) * 1000;
 
 #ifdef MT2060_SPURCHECK
 	// LO-related spurs detection and correction
@@ -452,8 +442,7 @@ struct dvb_frontend * mt2060_attach(struct dvb_frontend *fe, struct i2c_adapter 
 }
 EXPORT_SYMBOL_GPL(mt2060_attach);
 
-static int mt2060_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int mt2060_probe(struct i2c_client *client)
 {
 	struct mt2060_platform_data *pdata = client->dev.platform_data;
 	struct dvb_frontend *fe;
@@ -519,15 +508,13 @@ err:
 	return ret;
 }
 
-static int mt2060_remove(struct i2c_client *client)
+static void mt2060_remove(struct i2c_client *client)
 {
 	dev_dbg(&client->dev, "\n");
-
-	return 0;
 }
 
 static const struct i2c_device_id mt2060_id_table[] = {
-	{"mt2060", 0},
+	{ "mt2060" },
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, mt2060_id_table);

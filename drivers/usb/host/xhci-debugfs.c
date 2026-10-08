@@ -110,6 +110,7 @@ static void xhci_debugfs_free_regset(struct xhci_regset *regset)
 	kfree(regset);
 }
 
+__printf(6, 7)
 static void xhci_debugfs_regset(struct xhci_hcd *xhci, u32 base,
 				const struct debugfs_reg32 *regs,
 				size_t nregs, struct dentry *parent,
@@ -198,12 +199,13 @@ static void xhci_ring_dump_segment(struct seq_file *s,
 	int			i;
 	dma_addr_t		dma;
 	union xhci_trb		*trb;
+	char			str[XHCI_MSG_MAX];
 
 	for (i = 0; i < TRBS_PER_SEGMENT; i++) {
 		trb = &seg->trbs[i];
 		dma = seg->dma + i * sizeof(*trb);
-		seq_printf(s, "%pad: %s\n", &dma,
-			   xhci_decode_trb(le32_to_cpu(trb->generic.field[0]),
+		seq_printf(s, "%2u %pad: %s\n", seg->num, &dma,
+			   xhci_decode_trb(str, XHCI_MSG_MAX, le32_to_cpu(trb->generic.field[0]),
 					   le32_to_cpu(trb->generic.field[1]),
 					   le32_to_cpu(trb->generic.field[2]),
 					   le32_to_cpu(trb->generic.field[3])));
@@ -212,14 +214,11 @@ static void xhci_ring_dump_segment(struct seq_file *s,
 
 static int xhci_ring_trb_show(struct seq_file *s, void *unused)
 {
-	int			i;
 	struct xhci_ring	*ring = *(struct xhci_ring **)s->private;
 	struct xhci_segment	*seg = ring->first_seg;
 
-	for (i = 0; i < ring->num_segs; i++) {
+	xhci_for_each_ring_seg(ring->first_seg, seg)
 		xhci_ring_dump_segment(s, seg);
-		seg = seg->next;
-	}
 
 	return 0;
 }
@@ -233,16 +232,7 @@ static struct xhci_file_map ring_files[] = {
 
 static int xhci_ring_open(struct inode *inode, struct file *file)
 {
-	int			i;
-	struct xhci_file_map	*f_map;
-	const char		*file_name = file_dentry(file)->d_iname;
-
-	for (i = 0; i < ARRAY_SIZE(ring_files); i++) {
-		f_map = &ring_files[i];
-
-		if (strcmp(f_map->name, file_name) == 0)
-			break;
-	}
+	const struct xhci_file_map *f_map = debugfs_get_aux(file);
 
 	return single_open(file, f_map->show, inode->i_private);
 }
@@ -260,11 +250,13 @@ static int xhci_slot_context_show(struct seq_file *s, void *unused)
 	struct xhci_slot_ctx	*slot_ctx;
 	struct xhci_slot_priv	*priv = s->private;
 	struct xhci_virt_device	*dev = priv->dev;
+	char			str[XHCI_MSG_MAX];
 
 	xhci = hcd_to_xhci(bus_to_hcd(dev->udev->bus));
 	slot_ctx = xhci_get_slot_ctx(xhci, dev->out_ctx);
 	seq_printf(s, "%pad: %s\n", &dev->out_ctx->dma,
-		   xhci_decode_slot_context(le32_to_cpu(slot_ctx->dev_info),
+		   xhci_decode_slot_context(str,
+					    le32_to_cpu(slot_ctx->dev_info),
 					    le32_to_cpu(slot_ctx->dev_info2),
 					    le32_to_cpu(slot_ctx->tt_info),
 					    le32_to_cpu(slot_ctx->dev_state)));
@@ -280,17 +272,20 @@ static int xhci_endpoint_context_show(struct seq_file *s, void *unused)
 	struct xhci_ep_ctx	*ep_ctx;
 	struct xhci_slot_priv	*priv = s->private;
 	struct xhci_virt_device	*dev = priv->dev;
+	char			str[XHCI_MSG_MAX];
 
 	xhci = hcd_to_xhci(bus_to_hcd(dev->udev->bus));
 
 	for (ep_index = 0; ep_index < 31; ep_index++) {
 		ep_ctx = xhci_get_ep_ctx(xhci, dev->out_ctx, ep_index);
 		dma = dev->out_ctx->dma + (ep_index + 1) * CTX_SIZE(xhci->hcc_params);
-		seq_printf(s, "%pad: %s\n", &dma,
-			   xhci_decode_ep_context(le32_to_cpu(ep_ctx->ep_info),
+		seq_printf(s, "%pad: %s, virt_state:%#x\n", &dma,
+			   xhci_decode_ep_context(str,
+						  le32_to_cpu(ep_ctx->ep_info),
 						  le32_to_cpu(ep_ctx->ep_info2),
 						  le64_to_cpu(ep_ctx->deq),
-						  le32_to_cpu(ep_ctx->tx_info)));
+						  le32_to_cpu(ep_ctx->tx_info)),
+						  dev->eps[ep_index].ep_state);
 	}
 
 	return 0;
@@ -314,16 +309,7 @@ static struct xhci_file_map context_files[] = {
 
 static int xhci_context_open(struct inode *inode, struct file *file)
 {
-	int			i;
-	struct xhci_file_map	*f_map;
-	const char		*file_name = file_dentry(file)->d_iname;
-
-	for (i = 0; i < ARRAY_SIZE(context_files); i++) {
-		f_map = &context_files[i];
-
-		if (strcmp(f_map->name, file_name) == 0)
-			break;
-	}
+	const struct xhci_file_map *f_map = debugfs_get_aux(file);
 
 	return single_open(file, f_map->show, inode->i_private);
 }
@@ -341,9 +327,10 @@ static int xhci_portsc_show(struct seq_file *s, void *unused)
 {
 	struct xhci_port	*port = s->private;
 	u32			portsc;
+	char			str[XHCI_MSG_MAX];
 
 	portsc = readl(port->addr);
-	seq_printf(s, "%s\n", xhci_decode_portsc(portsc));
+	seq_printf(s, "%s\n", xhci_decode_portsc(str, portsc));
 
 	return 0;
 }
@@ -405,7 +392,8 @@ static void xhci_debugfs_create_files(struct xhci_hcd *xhci,
 	int			i;
 
 	for (i = 0; i < nentries; i++)
-		debugfs_create_file(files[i].name, 0444, parent, data, fops);
+		debugfs_create_file_aux(files[i].name, 0444, parent,
+					data, &files[i], fops);
 }
 
 static struct dentry *xhci_debugfs_create_ring_dir(struct xhci_hcd *xhci,
@@ -451,9 +439,11 @@ void xhci_debugfs_create_endpoint(struct xhci_hcd *xhci,
 	if (!epriv)
 		return;
 
+	epriv->show_ring = dev->eps[ep_index].ring;
+
 	snprintf(epriv->name, sizeof(epriv->name), "ep%02d", ep_index);
 	epriv->root = xhci_debugfs_create_ring_dir(xhci,
-						   &dev->eps[ep_index].ring,
+						   &epriv->show_ring,
 						   epriv->name,
 						   spriv->root);
 	spriv->eps[ep_index] = epriv;
@@ -473,6 +463,111 @@ void xhci_debugfs_remove_endpoint(struct xhci_hcd *xhci,
 	debugfs_remove_recursive(epriv->root);
 	spriv->eps[ep_index] = NULL;
 	kfree(epriv);
+}
+
+static int xhci_stream_id_show(struct seq_file *s, void *unused)
+{
+	struct xhci_ep_priv	*epriv = s->private;
+
+	if (!epriv->stream_info)
+		return -EPERM;
+
+	seq_printf(s, "Show stream ID %d trb ring, supported [1 - %d]\n",
+		   epriv->stream_id, epriv->stream_info->num_streams - 1);
+
+	return 0;
+}
+
+static int xhci_stream_id_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, xhci_stream_id_show, inode->i_private);
+}
+
+static ssize_t xhci_stream_id_write(struct file *file,  const char __user *ubuf,
+			       size_t count, loff_t *ppos)
+{
+	struct seq_file         *s = file->private_data;
+	struct xhci_ep_priv	*epriv = s->private;
+	int			ret;
+	u16			stream_id; /* MaxPStreams + 1 <= 16 */
+
+	if (!epriv->stream_info)
+		return -EPERM;
+
+	/* Decimal number */
+	ret = kstrtou16_from_user(ubuf, count, 10, &stream_id);
+	if (ret)
+		return ret;
+
+	if (stream_id == 0 || stream_id >= epriv->stream_info->num_streams)
+		return -EINVAL;
+
+	epriv->stream_id = stream_id;
+	epriv->show_ring = epriv->stream_info->stream_rings[stream_id];
+
+	return count;
+}
+
+static const struct file_operations stream_id_fops = {
+	.open			= xhci_stream_id_open,
+	.write                  = xhci_stream_id_write,
+	.read			= seq_read,
+	.llseek			= seq_lseek,
+	.release		= single_release,
+};
+
+static int xhci_stream_context_array_show(struct seq_file *s, void *unused)
+{
+	struct xhci_ep_priv	*epriv = s->private;
+	struct xhci_stream_ctx	*stream_ctx;
+	dma_addr_t		dma;
+	int			id;
+
+	if (!epriv->stream_info)
+		return -EPERM;
+
+	seq_printf(s, "Allocated %d streams and %d stream context array entries\n",
+			epriv->stream_info->num_streams,
+			epriv->stream_info->num_stream_ctxs);
+
+	for (id = 0; id < epriv->stream_info->num_stream_ctxs; id++) {
+		stream_ctx = epriv->stream_info->stream_ctx_array + id;
+		dma = epriv->stream_info->ctx_array_dma + id * 16;
+		if (id < epriv->stream_info->num_streams)
+			seq_printf(s, "%pad stream id %d deq %016llx\n", &dma,
+				   id, le64_to_cpu(stream_ctx->stream_ring));
+		else
+			seq_printf(s, "%pad stream context entry not used deq %016llx\n",
+				   &dma, le64_to_cpu(stream_ctx->stream_ring));
+	}
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(xhci_stream_context_array);
+
+void xhci_debugfs_create_stream_files(struct xhci_hcd *xhci,
+				      struct xhci_virt_device *dev,
+				      int ep_index)
+{
+	struct xhci_slot_priv	*spriv = dev->debugfs_private;
+	struct xhci_ep_priv	*epriv;
+
+	if (!spriv || !spriv->eps[ep_index] ||
+	    !dev->eps[ep_index].stream_info)
+		return;
+
+	epriv = spriv->eps[ep_index];
+	epriv->stream_info = dev->eps[ep_index].stream_info;
+
+	/* Show trb ring of stream ID 1 by default */
+	epriv->stream_id = 1;
+	epriv->show_ring = epriv->stream_info->stream_rings[1];
+	debugfs_create_file("stream_id", 0644,
+			    epriv->root, epriv,
+			    &stream_id_fops);
+	debugfs_create_file("stream_context_array", 0444,
+			    epriv->root, epriv,
+			    &xhci_stream_context_array_fops);
 }
 
 void xhci_debugfs_create_slot(struct xhci_hcd *xhci, int slot_id)
@@ -536,6 +631,112 @@ static void xhci_debugfs_create_ports(struct xhci_hcd *xhci,
 	}
 }
 
+static int xhci_port_bw_show(struct xhci_hcd *xhci, u8 dev_speed,
+				struct seq_file *s)
+{
+	unsigned int			num_ports;
+	unsigned int			i;
+	int				ret;
+	struct xhci_container_ctx	*ctx;
+	struct usb_hcd			*hcd = xhci_to_hcd(xhci);
+	struct device			*dev = hcd->self.controller;
+
+	ret = pm_runtime_get_sync(dev);
+	if (ret < 0)
+		return ret;
+
+	num_ports = HCS_MAX_PORTS(xhci->hcs_params1);
+
+	ctx = xhci_alloc_port_bw_ctx(xhci, 0);
+	if (!ctx) {
+		pm_runtime_put_sync(dev);
+		return -ENOMEM;
+	}
+
+	/* get roothub port bandwidth */
+	ret = xhci_get_port_bandwidth(xhci, ctx, dev_speed);
+	if (ret)
+		goto err_out;
+
+	/* print all roothub ports available bandwidth
+	 * refer to xhci rev1_2 protocol 6.2.6 , byte 0 is reserved
+	 */
+	for (i = 1; i < num_ports+1; i++)
+		seq_printf(s, "port[%d] available bw: %d%%.\n", i,
+				ctx->bytes[i]);
+err_out:
+	pm_runtime_put_sync(dev);
+	xhci_free_port_bw_ctx(xhci, ctx);
+	return ret;
+}
+
+static int xhci_ss_bw_show(struct seq_file *s, void *unused)
+{
+	int ret;
+	struct xhci_hcd		*xhci = (struct xhci_hcd *)s->private;
+
+	ret = xhci_port_bw_show(xhci, USB_SPEED_SUPER, s);
+	return ret;
+}
+
+static int xhci_hs_bw_show(struct seq_file *s, void *unused)
+{
+	int ret;
+	struct xhci_hcd		*xhci = (struct xhci_hcd *)s->private;
+
+	ret = xhci_port_bw_show(xhci, USB_SPEED_HIGH, s);
+	return ret;
+}
+
+static int xhci_fs_bw_show(struct seq_file *s, void *unused)
+{
+	int ret;
+	struct xhci_hcd		*xhci = (struct xhci_hcd *)s->private;
+
+	ret = xhci_port_bw_show(xhci, USB_SPEED_FULL, s);
+	return ret;
+}
+
+static struct xhci_file_map bw_context_files[] = {
+	{"SS_BW",	xhci_ss_bw_show, },
+	{"HS_BW",	xhci_hs_bw_show, },
+	{"FS_BW",	xhci_fs_bw_show, },
+};
+
+static int bw_context_open(struct inode *inode, struct file *file)
+{
+	int			i;
+	struct xhci_file_map	*f_map;
+	const char		*file_name = file_dentry(file)->d_iname;
+
+	for (i = 0; i < ARRAY_SIZE(bw_context_files); i++) {
+		f_map = &bw_context_files[i];
+
+		if (strcmp(f_map->name, file_name) == 0)
+			break;
+	}
+
+	return single_open(file, f_map->show, inode->i_private);
+}
+
+static const struct file_operations bw_fops = {
+	.open			= bw_context_open,
+	.read			= seq_read,
+	.llseek			= seq_lseek,
+	.release		= single_release,
+};
+
+static void xhci_debugfs_create_bandwidth(struct xhci_hcd *xhci,
+					struct dentry *parent)
+{
+	parent = debugfs_create_dir("port_bandwidth", parent);
+
+	xhci_debugfs_create_files(xhci, bw_context_files,
+			  ARRAY_SIZE(bw_context_files),
+			  xhci,
+			  parent, &bw_fops);
+}
+
 void xhci_debugfs_init(struct xhci_hcd *xhci)
 {
 	struct device		*dev = xhci_to_hcd(xhci)->self.controller;
@@ -579,13 +780,15 @@ void xhci_debugfs_init(struct xhci_hcd *xhci)
 				     "command-ring",
 				     xhci->debugfs_root);
 
-	xhci_debugfs_create_ring_dir(xhci, &xhci->event_ring,
+	xhci_debugfs_create_ring_dir(xhci, &xhci->interrupters[0]->event_ring,
 				     "event-ring",
 				     xhci->debugfs_root);
 
 	xhci->debugfs_slots = debugfs_create_dir("devices", xhci->debugfs_root);
 
 	xhci_debugfs_create_ports(xhci, xhci->debugfs_root);
+
+	xhci_debugfs_create_bandwidth(xhci, xhci->debugfs_root);
 }
 
 void xhci_debugfs_exit(struct xhci_hcd *xhci)

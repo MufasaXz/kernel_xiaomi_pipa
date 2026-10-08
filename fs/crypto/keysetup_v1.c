@@ -20,22 +20,17 @@
  *    managed alongside the master keys in the filesystem-level keyring)
  */
 
-#include <crypto/algapi.h>
 #include <crypto/skcipher.h>
+#include <crypto/utils.h>
 #include <keys/user-type.h>
 #include <linux/hashtable.h>
 #include <linux/scatterlist.h>
-#include <linux/bio-crypt-ctx.h>
-#include <linux/siphash.h>
-#include <crypto/sha.h>
 
 #include "fscrypt_private.h"
 
 /* Table of keys referenced by DIRECT_KEY policies */
 static DEFINE_HASHTABLE(fscrypt_direct_keys, 6); /* 6 bits = 64 buckets */
 static DEFINE_SPINLOCK(fscrypt_direct_keys_lock);
-
-static struct crypto_shash *essiv_hash_tfm;
 
 /*
  * v1 key derivation function.  This generates the derived key by encrypting the
@@ -50,73 +45,33 @@ static struct crypto_shash *essiv_hash_tfm;
  * key is longer, then only the first 'derived_keysize' bytes are used.
  */
 static int derive_key_aes(const u8 *master_key,
-			  const u8 nonce[FS_KEY_DERIVATION_NONCE_SIZE],
+			  const u8 nonce[FSCRYPT_FILE_NONCE_SIZE],
 			  u8 *derived_key, unsigned int derived_keysize)
 {
-	int res = 0;
-	struct skcipher_request *req = NULL;
-	DECLARE_CRYPTO_WAIT(wait);
-	struct scatterlist src_sg, dst_sg;
-	struct crypto_skcipher *tfm = crypto_alloc_skcipher("ecb(aes)", 0, 0);
+	struct crypto_sync_skcipher *tfm;
+	int err;
 
-	if (IS_ERR(tfm)) {
-		res = PTR_ERR(tfm);
-		tfm = NULL;
-		goto out;
+	tfm = crypto_alloc_sync_skcipher("ecb(aes)", 0, FSCRYPT_CRYPTOAPI_MASK);
+	if (IS_ERR(tfm))
+		return PTR_ERR(tfm);
+
+	err = crypto_sync_skcipher_setkey(tfm, nonce, FSCRYPT_FILE_NONCE_SIZE);
+	if (err == 0) {
+		SYNC_SKCIPHER_REQUEST_ON_STACK(req, tfm);
+		struct scatterlist src_sg, dst_sg;
+
+		skcipher_request_set_callback(req,
+					      CRYPTO_TFM_REQ_MAY_BACKLOG |
+						      CRYPTO_TFM_REQ_MAY_SLEEP,
+					      NULL, NULL);
+		sg_init_one(&src_sg, master_key, derived_keysize);
+		sg_init_one(&dst_sg, derived_key, derived_keysize);
+		skcipher_request_set_crypt(req, &src_sg, &dst_sg,
+					   derived_keysize, NULL);
+		err = crypto_skcipher_encrypt(req);
 	}
-	crypto_skcipher_set_flags(tfm, CRYPTO_TFM_REQ_WEAK_KEY);
-	req = skcipher_request_alloc(tfm, GFP_NOFS);
-	if (!req) {
-		res = -ENOMEM;
-		goto out;
-	}
-	skcipher_request_set_callback(req,
-			CRYPTO_TFM_REQ_MAY_BACKLOG | CRYPTO_TFM_REQ_MAY_SLEEP,
-			crypto_req_done, &wait);
-	res = crypto_skcipher_setkey(tfm, nonce, FS_KEY_DERIVATION_NONCE_SIZE);
-	if (res < 0)
-		goto out;
-
-	sg_init_one(&src_sg, master_key, derived_keysize);
-	sg_init_one(&dst_sg, derived_key, derived_keysize);
-	skcipher_request_set_crypt(req, &src_sg, &dst_sg, derived_keysize,
-				   NULL);
-	res = crypto_wait_req(crypto_skcipher_encrypt(req), &wait);
-out:
-	skcipher_request_free(req);
-	crypto_free_skcipher(tfm);
-	return res;
-}
-
-static int fscrypt_do_sha256(const u8 *src, int srclen, u8 *dst)
-{
-	struct crypto_shash *tfm = READ_ONCE(essiv_hash_tfm);
-
-	/* init hash transform on demand */
-	if (unlikely(!tfm)) {
-		struct crypto_shash *prev_tfm;
-
-		tfm = crypto_alloc_shash("sha256", 0, 0);
-		if (IS_ERR(tfm)) {
-			fscrypt_warn(NULL,
-				     "error allocating SHA-256 transform: %ld",
-				     PTR_ERR(tfm));
-			return PTR_ERR(tfm);
-		}
-		prev_tfm = cmpxchg(&essiv_hash_tfm, NULL, tfm);
-		if (prev_tfm) {
-			crypto_free_shash(tfm);
-			tfm = prev_tfm;
-		}
-	}
-
-	{
-		SHASH_DESC_ON_STACK(desc, tfm);
-
-		desc->tfm = tfm;
-		desc->flags = 0;
-		return crypto_shash_digest(desc, src, srclen, dst);
-	}
+	crypto_free_sync_skcipher(tfm);
+	return err;
 }
 
 /*
@@ -135,7 +90,7 @@ find_and_lock_process_key(const char *prefix,
 	const struct user_key_payload *ukp;
 	const struct fscrypt_key *payload;
 
-	description = kasprintf(GFP_NOFS, "%s%*phN", prefix,
+	description = kasprintf(GFP_KERNEL, "%s%*phN", prefix,
 				FSCRYPT_KEY_DESCRIPTOR_SIZE, descriptor);
 	if (!description)
 		return ERR_PTR(-ENOMEM);
@@ -154,7 +109,7 @@ find_and_lock_process_key(const char *prefix,
 	payload = (const struct fscrypt_key *)ukp->data;
 
 	if (ukp->datalen != sizeof(struct fscrypt_key) ||
-	    payload->size < 1 || payload->size > FSCRYPT_MAX_KEY_SIZE) {
+	    payload->size < 1 || payload->size > sizeof(payload->raw)) {
 		fscrypt_warn(NULL,
 			     "key with description '%s' has invalid payload",
 			     key->description);
@@ -179,19 +134,20 @@ invalid:
 
 /* Master key referenced by DIRECT_KEY policy */
 struct fscrypt_direct_key {
+	struct super_block		*dk_sb;
 	struct hlist_node		dk_node;
 	refcount_t			dk_refcount;
 	const struct fscrypt_mode	*dk_mode;
 	struct fscrypt_prepared_key	dk_key;
 	u8				dk_descriptor[FSCRYPT_KEY_DESCRIPTOR_SIZE];
-	u8				dk_raw[FSCRYPT_MAX_KEY_SIZE];
+	u8				dk_raw[FSCRYPT_MAX_RAW_KEY_SIZE];
 };
 
 static void free_direct_key(struct fscrypt_direct_key *dk)
 {
 	if (dk) {
-		fscrypt_destroy_prepared_key(&dk->dk_key);
-		kzfree(dk);
+		fscrypt_destroy_prepared_key(dk->dk_sb, &dk->dk_key);
+		kfree_sensitive(dk);
 	}
 }
 
@@ -213,7 +169,8 @@ void fscrypt_put_direct_key(struct fscrypt_direct_key *dk)
  */
 static struct fscrypt_direct_key *
 find_or_insert_direct_key(struct fscrypt_direct_key *to_insert,
-			  const u8 *raw_key, const struct fscrypt_info *ci)
+			  const u8 *raw_key,
+			  const struct fscrypt_inode_info *ci)
 {
 	unsigned long hash_key;
 	struct fscrypt_direct_key *dk;
@@ -253,7 +210,7 @@ find_or_insert_direct_key(struct fscrypt_direct_key *to_insert,
 
 /* Prepare to encrypt directly using the master key in the given mode */
 static struct fscrypt_direct_key *
-fscrypt_get_direct_key(const struct fscrypt_info *ci, const u8 *raw_key)
+fscrypt_get_direct_key(const struct fscrypt_inode_info *ci, const u8 *raw_key)
 {
 	struct fscrypt_direct_key *dk;
 	int err;
@@ -264,13 +221,13 @@ fscrypt_get_direct_key(const struct fscrypt_info *ci, const u8 *raw_key)
 		return dk;
 
 	/* Nope, allocate one. */
-	dk = kzalloc(sizeof(*dk), GFP_NOFS);
+	dk = kzalloc(sizeof(*dk), GFP_KERNEL);
 	if (!dk)
 		return ERR_PTR(-ENOMEM);
+	dk->dk_sb = ci->ci_inode->i_sb;
 	refcount_set(&dk->dk_refcount, 1);
 	dk->dk_mode = ci->ci_mode;
-	err = fscrypt_prepare_key(&dk->dk_key, raw_key, ci->ci_mode->keysize,
-				  false /*is_hw_wrapped*/, ci);
+	err = fscrypt_prepare_key(&dk->dk_key, raw_key, ci);
 	if (err)
 		goto err_free_dk;
 	memcpy(dk->dk_descriptor, ci->ci_policy.v1.master_key_descriptor,
@@ -285,7 +242,7 @@ err_free_dk:
 }
 
 /* v1 policy, DIRECT_KEY: use the master key directly */
-static int setup_v1_file_key_direct(struct fscrypt_info *ci,
+static int setup_v1_file_key_direct(struct fscrypt_inode_info *ci,
 				    const u8 *raw_master_key)
 {
 	struct fscrypt_direct_key *dk;
@@ -294,76 +251,22 @@ static int setup_v1_file_key_direct(struct fscrypt_info *ci,
 	if (IS_ERR(dk))
 		return PTR_ERR(dk);
 	ci->ci_direct_key = dk;
-	ci->ci_key = dk->dk_key;
+	ci->ci_enc_key = dk->dk_key;
 	return 0;
 }
 
 /* v1 policy, !DIRECT_KEY: derive the file's encryption key */
-static int setup_v1_file_key_derived(struct fscrypt_info *ci,
+static int setup_v1_file_key_derived(struct fscrypt_inode_info *ci,
 				     const u8 *raw_master_key)
 {
-	u8 *derived_key = NULL;
+	u8 *derived_key;
 	int err;
-	int i;
-	union {
-		u8 bytes[FSCRYPT_MAX_HW_WRAPPED_KEY_SIZE];
-		u32 words[FSCRYPT_MAX_HW_WRAPPED_KEY_SIZE / sizeof(u32)];
-	} key_new;
 
-	/*Support legacy ice based content encryption mode*/
-	if ((fscrypt_policy_contents_mode(&ci->ci_policy) ==
-					  FSCRYPT_MODE_PRIVATE) &&
-					  fscrypt_using_inline_encryption(ci)) {
-		if (ci->ci_policy.v1.flags &
-		    FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32) {
-			union {
-				siphash_key_t k;
-				u8 bytes[SHA256_DIGEST_SIZE];
-			} ino_hash_key;
-			int err;
-
-			/* hashed_ino = SipHash(key=SHA256(master_key),
-			 * data=i_ino)
-			 */
-			err = fscrypt_do_sha256(raw_master_key,
-						ci->ci_mode->keysize / 2,
-						ino_hash_key.bytes);
-			if (err)
-				return err;
-			ci->ci_hashed_ino = siphash_1u64(ci->ci_inode->i_ino,
-							 &ino_hash_key.k);
-		}
-
-#if IS_ENABLED(CONFIG_ENABLE_LEGACY_PFK)
-		derived_key = kmalloc(ci->ci_mode->keysize, GFP_NOFS);
-		if (!derived_key)
-			return -ENOMEM;
-
-		err = derive_key_aes(raw_master_key, ci->ci_nonce,
-				     derived_key, ci->ci_mode->keysize);
-		if (err)
-			goto out;
-
-		memcpy(key_new.bytes, derived_key, ci->ci_mode->keysize);
-#else
-		memcpy(key_new.bytes, raw_master_key, ci->ci_mode->keysize);
-#endif
-
-		for (i = 0; i < ARRAY_SIZE(key_new.words); i++)
-			__cpu_to_be32s(&key_new.words[i]);
-
-		err = setup_v1_file_key_direct(ci, key_new.bytes);
-
-		if (derived_key)
-			kzfree(derived_key);
-
-		return err;
-	}
 	/*
 	 * This cannot be a stack buffer because it will be passed to the
 	 * scatterlist crypto API during derive_key_aes().
 	 */
-	derived_key = kmalloc(ci->ci_mode->keysize, GFP_NOFS);
+	derived_key = kmalloc(ci->ci_mode->keysize, GFP_KERNEL);
 	if (!derived_key)
 		return -ENOMEM;
 
@@ -374,13 +277,12 @@ static int setup_v1_file_key_derived(struct fscrypt_info *ci,
 
 	err = fscrypt_set_per_file_enc_key(ci, derived_key);
 out:
-	if (derived_key)
-		kzfree(derived_key);
-
+	kfree_sensitive(derived_key);
 	return err;
 }
 
-int fscrypt_setup_v1_file_key(struct fscrypt_info *ci, const u8 *raw_master_key)
+int fscrypt_setup_v1_file_key(struct fscrypt_inode_info *ci,
+			      const u8 *raw_master_key)
 {
 	if (ci->ci_policy.v1.flags & FSCRYPT_POLICY_FLAG_DIRECT_KEY)
 		return setup_v1_file_key_direct(ci, raw_master_key);
@@ -388,8 +290,10 @@ int fscrypt_setup_v1_file_key(struct fscrypt_info *ci, const u8 *raw_master_key)
 		return setup_v1_file_key_derived(ci, raw_master_key);
 }
 
-int fscrypt_setup_v1_file_key_via_subscribed_keyrings(struct fscrypt_info *ci)
+int
+fscrypt_setup_v1_file_key_via_subscribed_keyrings(struct fscrypt_inode_info *ci)
 {
+	const struct super_block *sb = ci->ci_inode->i_sb;
 	struct key *key;
 	const struct fscrypt_key *payload;
 	int err;
@@ -397,8 +301,8 @@ int fscrypt_setup_v1_file_key_via_subscribed_keyrings(struct fscrypt_info *ci)
 	key = find_and_lock_process_key(FSCRYPT_KEY_DESC_PREFIX,
 					ci->ci_policy.v1.master_key_descriptor,
 					ci->ci_mode->keysize, &payload);
-	if (key == ERR_PTR(-ENOKEY) && ci->ci_inode->i_sb->s_cop->key_prefix) {
-		key = find_and_lock_process_key(ci->ci_inode->i_sb->s_cop->key_prefix,
+	if (key == ERR_PTR(-ENOKEY) && sb->s_cop->legacy_key_prefix) {
+		key = find_and_lock_process_key(sb->s_cop->legacy_key_prefix,
 						ci->ci_policy.v1.master_key_descriptor,
 						ci->ci_mode->keysize, &payload);
 	}

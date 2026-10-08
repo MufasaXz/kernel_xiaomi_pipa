@@ -1,16 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- *   This program is free software; you can redistribute it and/or modify it
- *   under the terms of the GNU General Public License version 2 as published
- *   by the Free Software Foundation.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307, USA.
  *
  *   Copyright (C) 2011 John Crispin <john@phrozen.org>
  */
@@ -24,6 +13,7 @@
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/err.h>
+#include <linux/of.h>
 
 #include <lantiq_soc.h>
 #include <xway_dma.h>
@@ -51,7 +41,11 @@
 #define DMA_IRQ_ACK		0x7e		/* IRQ status register */
 #define DMA_POLL		BIT(31)		/* turn on channel polling */
 #define DMA_CLK_DIV4		BIT(6)		/* polling clock divider */
-#define DMA_2W_BURST		BIT(1)		/* 2 word burst length */
+#define DMA_PCTRL_2W_BURST	0x1		/* 2 word burst length */
+#define DMA_PCTRL_4W_BURST	0x2		/* 4 word burst length */
+#define DMA_PCTRL_8W_BURST	0x3		/* 8 word burst length */
+#define DMA_TX_BURST_SHIFT	4		/* tx burst shift */
+#define DMA_RX_BURST_SHIFT	2		/* rx burst shift */
 #define DMA_ETOP_ENDIANNESS	(0xf << 8) /* endianness swap etop channels */
 #define DMA_WEIGHT	(BIT(17) | BIT(16))	/* default channel wheight */
 
@@ -107,7 +101,6 @@ ltq_dma_open(struct ltq_dma_channel *ch)
 	spin_lock_irqsave(&ltq_dma_lock, flag);
 	ltq_dma_w32(ch->nr, LTQ_DMA_CS);
 	ltq_dma_w32_mask(0, DMA_CHAN_ON, LTQ_DMA_CCTRL);
-	ltq_dma_w32_mask(0, 1 << ch->nr, LTQ_DMA_IRNEN);
 	spin_unlock_irqrestore(&ltq_dma_lock, flag);
 }
 EXPORT_SYMBOL_GPL(ltq_dma_open);
@@ -131,9 +124,9 @@ ltq_dma_alloc(struct ltq_dma_channel *ch)
 	unsigned long flags;
 
 	ch->desc = 0;
-	ch->desc_base = dma_zalloc_coherent(ch->dev,
-				LTQ_DESC_NUM * LTQ_DESC_SIZE,
-				&ch->phys, GFP_ATOMIC);
+	ch->desc_base = dma_alloc_coherent(ch->dev,
+					   LTQ_DESC_NUM * LTQ_DESC_SIZE,
+					   &ch->phys, GFP_ATOMIC);
 
 	spin_lock_irqsave(&ltq_dma_lock, flags);
 	ltq_dma_w32(ch->nr, LTQ_DMA_CS);
@@ -189,7 +182,7 @@ ltq_dma_free(struct ltq_dma_channel *ch)
 EXPORT_SYMBOL_GPL(ltq_dma_free);
 
 void
-ltq_dma_init_port(int p)
+ltq_dma_init_port(int p, int tx_burst, int rx_burst)
 {
 	ltq_dma_w32(p, LTQ_DMA_PS);
 	switch (p) {
@@ -198,15 +191,44 @@ ltq_dma_init_port(int p)
 		 * Tell the DMA engine to swap the endianness of data frames and
 		 * drop packets if the channel arbitration fails.
 		 */
-		ltq_dma_w32_mask(0, DMA_ETOP_ENDIANNESS | DMA_PDEN,
+		ltq_dma_w32_mask(0, (DMA_ETOP_ENDIANNESS | DMA_PDEN),
 			LTQ_DMA_PCTRL);
 		break;
 
-	case DMA_PORT_DEU:
-		ltq_dma_w32((DMA_2W_BURST << 4) | (DMA_2W_BURST << 2),
+	default:
+		break;
+	}
+
+	switch (rx_burst) {
+	case 8:
+		ltq_dma_w32_mask(0x0c, (DMA_PCTRL_8W_BURST << DMA_RX_BURST_SHIFT),
 			LTQ_DMA_PCTRL);
 		break;
+	case 4:
+		ltq_dma_w32_mask(0x0c, (DMA_PCTRL_4W_BURST << DMA_RX_BURST_SHIFT),
+			LTQ_DMA_PCTRL);
+		break;
+	case 2:
+		ltq_dma_w32_mask(0x0c, (DMA_PCTRL_2W_BURST << DMA_RX_BURST_SHIFT),
+			LTQ_DMA_PCTRL);
+		break;
+	default:
+		break;
+	}
 
+	switch (tx_burst) {
+	case 8:
+		ltq_dma_w32_mask(0x30, (DMA_PCTRL_8W_BURST << DMA_TX_BURST_SHIFT),
+			LTQ_DMA_PCTRL);
+		break;
+	case 4:
+		ltq_dma_w32_mask(0x30, (DMA_PCTRL_4W_BURST << DMA_TX_BURST_SHIFT),
+			LTQ_DMA_PCTRL);
+		break;
+	case 2:
+		ltq_dma_w32_mask(0x30, (DMA_PCTRL_2W_BURST << DMA_TX_BURST_SHIFT),
+			LTQ_DMA_PCTRL);
+		break;
 	default:
 		break;
 	}
@@ -217,12 +239,10 @@ static int
 ltq_dma_init(struct platform_device *pdev)
 {
 	struct clk *clk;
-	struct resource *res;
 	unsigned int id, nchannels;
 	int i;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	ltq_dma_membase = devm_ioremap_resource(&pdev->dev, res);
+	ltq_dma_membase = devm_platform_get_and_ioremap_resource(pdev, 0, NULL);
 	if (IS_ERR(ltq_dma_membase))
 		panic("Failed to remap dma resource");
 
@@ -269,7 +289,7 @@ static struct platform_driver dma_driver = {
 	},
 };
 
-int __init
+static int __init
 dma_init(void)
 {
 	return platform_driver_register(&dma_driver);

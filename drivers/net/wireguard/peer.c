@@ -15,6 +15,7 @@
 #include <linux/rcupdate.h>
 #include <linux/list.h>
 
+static struct kmem_cache *peer_cache;
 static atomic64_t peer_counter = ATOMIC64_INIT(0);
 
 struct wg_peer *wg_peer_create(struct wg_device *wg,
@@ -29,10 +30,10 @@ struct wg_peer *wg_peer_create(struct wg_device *wg,
 	if (wg->num_peers >= MAX_PEERS_PER_DEVICE)
 		return ERR_PTR(ret);
 
-	peer = kzalloc(sizeof(*peer), GFP_KERNEL);
+	peer = kmem_cache_zalloc(peer_cache, GFP_KERNEL);
 	if (unlikely(!peer))
 		return ERR_PTR(ret);
-	if (dst_cache_init(&peer->endpoint_cache, GFP_KERNEL))
+	if (unlikely(dst_cache_init(&peer->endpoint_cache, GFP_KERNEL)))
 		goto err;
 
 	peer->device = wg;
@@ -53,8 +54,7 @@ struct wg_peer *wg_peer_create(struct wg_device *wg,
 	skb_queue_head_init(&peer->staged_packet_queue);
 	wg_noise_reset_last_sent_handshake(&peer->last_sent_handshake);
 	set_bit(NAPI_STATE_NO_BUSY_POLL, &peer->napi.state);
-	netif_napi_add(wg->dev, &peer->napi, wg_packet_rx_poll,
-		       NAPI_POLL_WEIGHT);
+	netif_napi_add(wg->dev, &peer->napi, wg_packet_rx_poll);
 	napi_enable(&peer->napi);
 	list_add_tail(&peer->peer_list, &wg->peer_list);
 	INIT_LIST_HEAD(&peer->allowedips_list);
@@ -64,7 +64,7 @@ struct wg_peer *wg_peer_create(struct wg_device *wg,
 	return peer;
 
 err:
-	kfree(peer);
+	kmem_cache_free(peer_cache, peer);
 	return ERR_PTR(ret);
 }
 
@@ -193,7 +193,8 @@ static void rcu_release(struct rcu_head *rcu)
 	/* The final zeroing takes care of clearing any remaining handshake key
 	 * material and other potentially sensitive information.
 	 */
-	kzfree(peer);
+	memzero_explicit(peer, sizeof(*peer));
+	kmem_cache_free(peer_cache, peer);
 }
 
 static void kref_release(struct kref *refcount)
@@ -224,4 +225,15 @@ void wg_peer_put(struct wg_peer *peer)
 	if (unlikely(!peer))
 		return;
 	kref_put(&peer->refcount, kref_release);
+}
+
+int __init wg_peer_init(void)
+{
+	peer_cache = KMEM_CACHE(wg_peer, 0);
+	return peer_cache ? 0 : -ENOMEM;
+}
+
+void wg_peer_uninit(void)
+{
+	kmem_cache_destroy(peer_cache);
 }

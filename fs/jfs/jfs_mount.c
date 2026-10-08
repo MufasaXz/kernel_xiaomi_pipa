@@ -1,19 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *   Copyright (C) International Business Machines Corp., 2000-2004
- *
- *   This program is free software;  you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY;  without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
- *   the GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program;  if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 /*
@@ -49,6 +36,7 @@
 
 #include <linux/fs.h>
 #include <linux/buffer_head.h>
+#include <linux/blkdev.h>
 #include <linux/log2.h>
 
 #include "jfs_incore.h"
@@ -246,11 +234,15 @@ int jfs_mount_rw(struct super_block *sb, int remount)
 
 		truncate_inode_pages(sbi->ipimap->i_mapping, 0);
 		truncate_inode_pages(sbi->ipbmap->i_mapping, 0);
+
+		IWRITE_LOCK(sbi->ipimap, RDWRLOCK_IMAP);
 		diUnmount(sbi->ipimap, 1);
 		if ((rc = diMount(sbi->ipimap))) {
+			IWRITE_UNLOCK(sbi->ipimap);
 			jfs_err("jfs_mount_rw: diMount failed!");
 			return rc;
 		}
+		IWRITE_UNLOCK(sbi->ipimap);
 
 		dbUnmount(sbi->ipbmap, 1);
 		if ((rc = dbMount(sbi->ipbmap))) {
@@ -319,13 +311,11 @@ static int chkSuper(struct super_block *sb)
 	}
 
 	bsize = le32_to_cpu(j_sb->s_bsize);
-#ifdef _JFS_4K
 	if (bsize != PSIZE) {
-		jfs_err("Currently only 4K block size supported!");
+		jfs_err("Only 4K block size supported!");
 		rc = -EINVAL;
 		goto out;
 	}
-#endif				/* _JFS_4K */
 
 	jfs_info("superblock: flag:0x%08x state:0x%08x size:0x%Lx",
 		 le32_to_cpu(j_sb->s_flag), le32_to_cpu(j_sb->s_state),
@@ -335,13 +325,13 @@ static int chkSuper(struct super_block *sb)
 	if ((j_sb->s_flag & cpu_to_le32(JFS_BAD_SAIT)) !=
 	    cpu_to_le32(JFS_BAD_SAIT)) {
 		expected_AIM_bytesize = 2 * PSIZE;
-		AIM_bytesize = lengthPXD(&(j_sb->s_aim2)) * bsize;
+		AIM_bytesize = lengthPXD(&j_sb->s_aim2) * bsize;
 		expected_AIT_bytesize = 4 * PSIZE;
-		AIT_bytesize = lengthPXD(&(j_sb->s_ait2)) * bsize;
-		AIM_byte_addr = addressPXD(&(j_sb->s_aim2)) * bsize;
-		AIT_byte_addr = addressPXD(&(j_sb->s_ait2)) * bsize;
+		AIT_bytesize = lengthPXD(&j_sb->s_ait2) * bsize;
+		AIM_byte_addr = addressPXD(&j_sb->s_aim2) * bsize;
+		AIT_byte_addr = addressPXD(&j_sb->s_ait2) * bsize;
 		byte_addr_diff0 = AIT_byte_addr - AIM_byte_addr;
-		fsckwsp_addr = addressPXD(&(j_sb->s_fsckpxd)) * bsize;
+		fsckwsp_addr = addressPXD(&j_sb->s_fsckpxd) * bsize;
 		byte_addr_diff1 = fsckwsp_addr - AIT_byte_addr;
 		if ((AIM_bytesize != expected_AIM_bytesize) ||
 		    (AIT_bytesize != expected_AIT_bytesize) ||
@@ -392,8 +382,8 @@ static int chkSuper(struct super_block *sb)
 		sbi->logpxd = j_sb->s_logpxd;
 	else {
 		sbi->logdev = new_decode_dev(le32_to_cpu(j_sb->s_logdev));
-		memcpy(sbi->uuid, j_sb->s_uuid, sizeof(sbi->uuid));
-		memcpy(sbi->loguuid, j_sb->s_loguuid, sizeof(sbi->uuid));
+		uuid_copy(&sbi->uuid, &j_sb->s_uuid);
+		uuid_copy(&sbi->loguuid, &j_sb->s_loguuid);
 	}
 	sbi->fsckpxd = j_sb->s_fsckpxd;
 	sbi->ait2 = j_sb->s_ait2;
@@ -440,7 +430,8 @@ int updateSuper(struct super_block *sb, uint state)
 
 	if (state == FM_MOUNT) {
 		/* record log's dev_t and mount serial number */
-		j_sb->s_logdev = cpu_to_le32(new_encode_dev(sbi->log->bdev->bd_dev));
+		j_sb->s_logdev = cpu_to_le32(
+			new_encode_dev(file_bdev(sbi->log->bdev_file)->bd_dev));
 		j_sb->s_logserial = cpu_to_le32(sbi->log->serial);
 	} else if (state == FM_CLEAN) {
 		/*

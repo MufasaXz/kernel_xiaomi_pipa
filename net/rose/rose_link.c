@@ -1,8 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * Copyright (C) Jonathan Naylor G4KLX (g4klx@g4klx.demon.co.uk)
  */
@@ -35,7 +32,7 @@ static void rose_transmit_restart_request(struct rose_neigh *neigh);
 
 void rose_start_ftimer(struct rose_neigh *neigh)
 {
-	del_timer(&neigh->ftimer);
+	timer_delete(&neigh->ftimer);
 
 	neigh->ftimer.function = rose_ftimer_expiry;
 	neigh->ftimer.expires  =
@@ -46,7 +43,7 @@ void rose_start_ftimer(struct rose_neigh *neigh)
 
 static void rose_start_t0timer(struct rose_neigh *neigh)
 {
-	del_timer(&neigh->t0timer);
+	timer_delete(&neigh->t0timer);
 
 	neigh->t0timer.function = rose_t0timer_expiry;
 	neigh->t0timer.expires  =
@@ -57,12 +54,12 @@ static void rose_start_t0timer(struct rose_neigh *neigh)
 
 void rose_stop_ftimer(struct rose_neigh *neigh)
 {
-	del_timer(&neigh->ftimer);
+	timer_delete(&neigh->ftimer);
 }
 
 void rose_stop_t0timer(struct rose_neigh *neigh)
 {
-	del_timer(&neigh->t0timer);
+	timer_delete(&neigh->t0timer);
 }
 
 int rose_ftimer_running(struct rose_neigh *neigh)
@@ -81,7 +78,7 @@ static void rose_ftimer_expiry(struct timer_list *t)
 
 static void rose_t0timer_expiry(struct timer_list *t)
 {
-	struct rose_neigh *neigh = from_timer(neigh, t, t0timer);
+	struct rose_neigh *neigh = timer_container_of(neigh, t, t0timer);
 
 	rose_transmit_restart_request(neigh);
 
@@ -97,11 +94,11 @@ static void rose_t0timer_expiry(struct timer_list *t)
  */
 static int rose_send_frame(struct sk_buff *skb, struct rose_neigh *neigh)
 {
-	ax25_address *rose_call;
+	const ax25_address *rose_call;
 	ax25_cb *ax25s;
 
 	if (ax25cmp(&rose_callsign, &null_ax25_address) == 0)
-		rose_call = (ax25_address *)neigh->dev->dev_addr;
+		rose_call = (const ax25_address *)neigh->dev->dev_addr;
 	else
 		rose_call = &rose_callsign;
 
@@ -120,11 +117,11 @@ static int rose_send_frame(struct sk_buff *skb, struct rose_neigh *neigh)
  */
 static int rose_link_up(struct rose_neigh *neigh)
 {
-	ax25_address *rose_call;
+	const ax25_address *rose_call;
 	ax25_cb *ax25s;
 
 	if (ax25cmp(&rose_callsign, &null_ax25_address) == 0)
-		rose_call = (ax25_address *)neigh->dev->dev_addr;
+		rose_call = (const ax25_address *)neigh->dev->dev_addr;
 	else
 		rose_call = &rose_callsign;
 

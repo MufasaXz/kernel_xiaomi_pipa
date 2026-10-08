@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  Universal power supply monitor class
  *
@@ -6,8 +7,6 @@
  *  Copyright © 2003  Ian Molton <spyro@f2s.com>
  *
  *  Modified: 2004, Oct     Szabolcs Gyurko
- *
- *  You may use this code as per GPL version 2
  */
 
 #ifndef __LINUX_POWER_SUPPLY_H__
@@ -16,9 +15,10 @@
 #include <linux/device.h>
 #include <linux/workqueue.h>
 #include <linux/leds.h>
+#include <linux/rwsem.h>
+#include <linux/list.h>
 #include <linux/spinlock.h>
 #include <linux/notifier.h>
-#include <linux/types.h>
 
 /*
  * All voltages, currents, charges, energies, time and temperatures in uV,
@@ -41,12 +41,17 @@ enum {
 	POWER_SUPPLY_STATUS_FULL,
 };
 
-enum {
+/* What algorithm is the charger using? */
+enum power_supply_charge_type {
 	POWER_SUPPLY_CHARGE_TYPE_UNKNOWN = 0,
 	POWER_SUPPLY_CHARGE_TYPE_NONE,
-	POWER_SUPPLY_CHARGE_TYPE_TRICKLE,
-	POWER_SUPPLY_CHARGE_TYPE_FAST,
-	POWER_SUPPLY_CHARGE_TYPE_TAPER,
+	POWER_SUPPLY_CHARGE_TYPE_TRICKLE,	/* slow speed */
+	POWER_SUPPLY_CHARGE_TYPE_FAST,		/* fast speed */
+	POWER_SUPPLY_CHARGE_TYPE_STANDARD,	/* normal speed */
+	POWER_SUPPLY_CHARGE_TYPE_ADAPTIVE,	/* dynamically adjusted speed */
+	POWER_SUPPLY_CHARGE_TYPE_CUSTOM,	/* use CHARGE_CONTROL_* props */
+	POWER_SUPPLY_CHARGE_TYPE_LONGLIFE,	/* slow speed, longer life */
+	POWER_SUPPLY_CHARGE_TYPE_BYPASS,	/* bypassing the charger */
 };
 
 enum {
@@ -55,14 +60,19 @@ enum {
 	POWER_SUPPLY_HEALTH_OVERHEAT,
 	POWER_SUPPLY_HEALTH_DEAD,
 	POWER_SUPPLY_HEALTH_OVERVOLTAGE,
+	POWER_SUPPLY_HEALTH_UNDERVOLTAGE,
 	POWER_SUPPLY_HEALTH_UNSPEC_FAILURE,
 	POWER_SUPPLY_HEALTH_COLD,
 	POWER_SUPPLY_HEALTH_WATCHDOG_TIMER_EXPIRE,
 	POWER_SUPPLY_HEALTH_SAFETY_TIMER_EXPIRE,
 	POWER_SUPPLY_HEALTH_OVERCURRENT,
+	POWER_SUPPLY_HEALTH_CALIBRATION_REQUIRED,
 	POWER_SUPPLY_HEALTH_WARM,
 	POWER_SUPPLY_HEALTH_COOL,
 	POWER_SUPPLY_HEALTH_HOT,
+	POWER_SUPPLY_HEALTH_NO_BATTERY,
+	POWER_SUPPLY_HEALTH_BLOWN_FUSE,
+	POWER_SUPPLY_HEALTH_CELL_IMBALANCE,
 };
 
 enum {
@@ -90,83 +100,11 @@ enum {
 	POWER_SUPPLY_SCOPE_DEVICE,
 };
 
-enum {
-	POWER_SUPPLY_DP_DM_UNKNOWN = 0,
-	POWER_SUPPLY_DP_DM_PREPARE = 1,
-	POWER_SUPPLY_DP_DM_UNPREPARE = 2,
-	POWER_SUPPLY_DP_DM_CONFIRMED_HVDCP3 = 3,
-	POWER_SUPPLY_DP_DM_DP_PULSE = 4,
-	POWER_SUPPLY_DP_DM_DM_PULSE = 5,
-	POWER_SUPPLY_DP_DM_DP0P6_DMF = 6,
-	POWER_SUPPLY_DP_DM_DP0P6_DM3P3 = 7,
-	POWER_SUPPLY_DP_DM_DPF_DMF = 8,
-	POWER_SUPPLY_DP_DM_DPR_DMR = 9,
-	POWER_SUPPLY_DP_DM_HVDCP3_SUPPORTED = 10,
-	POWER_SUPPLY_DP_DM_ICL_DOWN = 11,
-	POWER_SUPPLY_DP_DM_ICL_UP = 12,
-	POWER_SUPPLY_DP_DM_FORCE_5V = 13,
-	POWER_SUPPLY_DP_DM_FORCE_9V = 14,
-	POWER_SUPPLY_DP_DM_FORCE_12V = 15,
-	POWER_SUPPLY_DP_DM_CONFIRMED_HVDCP3P5 = 16,
-	POWER_SUPPLY_DP_DM_RAISE_VOLT_DONE = 17,
-	POWER_SUPPLY_DP_DM_RAISE_VOLT_START = 18,
-};
-
-enum {
-	POWER_SUPPLY_PL_NONE,
-	POWER_SUPPLY_PL_USBIN_USBIN,
-	POWER_SUPPLY_PL_USBIN_USBIN_EXT,
-	POWER_SUPPLY_PL_USBMID_USBMID,
-};
-
-enum {
-	POWER_SUPPLY_CHARGER_SEC_NONE = 0,
-	POWER_SUPPLY_CHARGER_SEC_CP,
-	POWER_SUPPLY_CHARGER_SEC_PL,
-	POWER_SUPPLY_CHARGER_SEC_CP_PL,
-};
-
-enum {
-	POWER_SUPPLY_CP_NONE = 0,
-	POWER_SUPPLY_CP_HVDCP3,
-	POWER_SUPPLY_CP_HVDCP3P5,
-	POWER_SUPPLY_CP_PPS,
-	POWER_SUPPLY_CP_WIRELESS,
-};
-
-enum {
-	POWER_SUPPLY_CONNECTOR_TYPEC,
-	POWER_SUPPLY_CONNECTOR_MICRO_USB,
-};
-
-enum {
-	POWER_SUPPLY_PL_STACKED_BATFET,
-	POWER_SUPPLY_PL_NON_STACKED_BATFET,
-};
-
-/* Parallel output connection topology */
-enum {
-	POWER_SUPPLY_PL_OUTPUT_NONE,
-	POWER_SUPPLY_PL_OUTPUT_VPH,
-	POWER_SUPPLY_PL_OUTPUT_VBAT,
-};
-
-enum {
-	POWER_SUPPLY_PD_INACTIVE = 0,
-	POWER_SUPPLY_PD_ACTIVE,
-	POWER_SUPPLY_PD_PPS_ACTIVE,
-};
-
-enum {
-	POWER_SUPPLY_QC_CTM_DISABLE = BIT(0),
-	POWER_SUPPLY_QC_THERMAL_BALANCE_DISABLE = BIT(1),
-	POWER_SUPPLY_QC_INOV_THERMAL_DISABLE = BIT(2),
-};
-
 enum power_supply_property {
 	/* Properties of type `int' */
 	POWER_SUPPLY_PROP_STATUS = 0,
 	POWER_SUPPLY_PROP_CHARGE_TYPE,
+	POWER_SUPPLY_PROP_CHARGE_TYPES,
 	POWER_SUPPLY_PROP_HEALTH,
 	POWER_SUPPLY_PROP_PRESENT,
 	POWER_SUPPLY_PROP_ONLINE,
@@ -178,8 +116,6 @@ enum power_supply_property {
 	POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN,
 	POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
-	POWER_SUPPLY_PROP_VOLTAGE_CELL1,
-	POWER_SUPPLY_PROP_VOLTAGE_CELL2,
 	POWER_SUPPLY_PROP_VOLTAGE_AVG,
 	POWER_SUPPLY_PROP_VOLTAGE_OCV,
 	POWER_SUPPLY_PROP_VOLTAGE_BOOT,
@@ -202,7 +138,12 @@ enum power_supply_property {
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX,
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT,
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX,
+	POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD, /* in percents! */
+	POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD, /* in percents! */
+	POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
 	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
+	POWER_SUPPLY_PROP_INPUT_VOLTAGE_LIMIT,
+	POWER_SUPPLY_PROP_INPUT_POWER_LIMIT,
 	POWER_SUPPLY_PROP_ENERGY_FULL_DESIGN,
 	POWER_SUPPLY_PROP_ENERGY_EMPTY_DESIGN,
 	POWER_SUPPLY_PROP_ENERGY_FULL,
@@ -212,12 +153,8 @@ enum power_supply_property {
 	POWER_SUPPLY_PROP_CAPACITY, /* in percents! */
 	POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN, /* in percents! */
 	POWER_SUPPLY_PROP_CAPACITY_ALERT_MAX, /* in percents! */
+	POWER_SUPPLY_PROP_CAPACITY_ERROR_MARGIN, /* in percents! */
 	POWER_SUPPLY_PROP_CAPACITY_LEVEL,
-	POWER_SUPPLY_PROP_SHUTDOWN_DELAY,
-	POWER_SUPPLY_PROP_SHUTDOWN_DELAY_ENABLE,
-	POWER_SUPPLY_PROP_SOC_DECIMAL,
-	POWER_SUPPLY_PROP_SOC_DECIMAL_RATE,
-	POWER_SUPPLY_PROP_COLD_THERMAL_LEVEL,
 	POWER_SUPPLY_PROP_TEMP,
 	POWER_SUPPLY_PROP_TEMP_MAX,
 	POWER_SUPPLY_PROP_TEMP_MIN,
@@ -236,289 +173,15 @@ enum power_supply_property {
 	POWER_SUPPLY_PROP_PRECHARGE_CURRENT,
 	POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT,
 	POWER_SUPPLY_PROP_CALIBRATE,
-	POWER_SUPPLY_PROP_FFC_TERMINATION_BBC,
-	POWER_SUPPLY_PROP_MTBF_CURRENT,
-	POWER_SUPPLY_PROP_HAS_DP,
-	/* Local extensions */
-	POWER_SUPPLY_PROP_USB_HC,
-	POWER_SUPPLY_PROP_USB_OTG,
-	POWER_SUPPLY_PROP_CHARGE_ENABLED,
-	POWER_SUPPLY_PROP_SET_SHIP_MODE,
-	POWER_SUPPLY_PROP_REAL_TYPE,
-	POWER_SUPPLY_PROP_HVDCP3_TYPE,
-	POWER_SUPPLY_PROP_FAKE_HVDCP3,
-	POWER_SUPPLY_PROP_QUICK_CHARGE_TYPE,
-	POWER_SUPPLY_PROP_QUICK_CHARGE_POWER,
-	POWER_SUPPLY_PROP_CHARGE_NOW_RAW,
-	POWER_SUPPLY_PROP_CHARGE_NOW_ERROR,
-	POWER_SUPPLY_PROP_CAPACITY_RAW,
-	POWER_SUPPLY_PROP_BATTERY_CHARGING_ENABLED,
-	POWER_SUPPLY_PROP_CHARGING_ENABLED,
-	POWER_SUPPLY_PROP_STEP_CHARGING_ENABLED,
-	POWER_SUPPLY_PROP_STEP_CHARGING_STEP,
-	POWER_SUPPLY_PROP_PIN_ENABLED,
-	POWER_SUPPLY_PROP_INPUT_SUSPEND,
-	POWER_SUPPLY_PROP_BATTERY_INPUT_SUSPEND,
-	POWER_SUPPLY_PROP_INPUT_VOLTAGE_REGULATION,
-	POWER_SUPPLY_PROP_INPUT_VOLTAGE_VRECT,
-	POWER_SUPPLY_PROP_RX_IOUT,
-	POWER_SUPPLY_PROP_INPUT_CURRENT_MAX,
-	POWER_SUPPLY_PROP_INPUT_CURRENT_TRIM,
-	POWER_SUPPLY_PROP_INPUT_CURRENT_SETTLED,
-	POWER_SUPPLY_PROP_INPUT_VOLTAGE_SETTLED,
-	POWER_SUPPLY_PROP_VCHG_LOOP_DBC_BYPASS,
-	POWER_SUPPLY_PROP_CHARGE_COUNTER_SHADOW,
-	POWER_SUPPLY_PROP_HI_POWER,
-	POWER_SUPPLY_PROP_LOW_POWER,
-	POWER_SUPPLY_PROP_COOL_TEMP,
-	POWER_SUPPLY_PROP_WARM_TEMP,
-	POWER_SUPPLY_PROP_COLD_TEMP,
-	POWER_SUPPLY_PROP_HOT_TEMP,
-	POWER_SUPPLY_PROP_SYSTEM_TEMP_LEVEL,
-	POWER_SUPPLY_PROP_RESISTANCE,
-	POWER_SUPPLY_PROP_RESISTANCE_CAPACITIVE,
-	POWER_SUPPLY_PROP_RESISTANCE_ID, /* in Ohms */
-	POWER_SUPPLY_PROP_RESISTANCE_NOW,
-	POWER_SUPPLY_PROP_FLASH_CURRENT_MAX,
-	POWER_SUPPLY_PROP_UPDATE_NOW,
-	POWER_SUPPLY_PROP_ESR_COUNT,
-	POWER_SUPPLY_PROP_BUCK_FREQ,
-	POWER_SUPPLY_PROP_BOOST_CURRENT,
-	POWER_SUPPLY_PROP_SAFETY_TIMER_ENABLE,
-	POWER_SUPPLY_PROP_CHARGE_DONE,
-	POWER_SUPPLY_PROP_HIZ_MODE,
-	POWER_SUPPLY_PROP_USB_CURRENT_NOW,
-	POWER_SUPPLY_PROP_USB_VOLTAGE_NOW,
-	POWER_SUPPLY_PROP_FLASH_ACTIVE,
-	POWER_SUPPLY_PROP_FLASH_TRIGGER,
-	POWER_SUPPLY_PROP_FORCE_TLIM,
-	POWER_SUPPLY_PROP_DP_DM,
-	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMITED,
-	POWER_SUPPLY_PROP_INPUT_CURRENT_NOW,
-	POWER_SUPPLY_PROP_CHARGE_QNOVO_ENABLE,
-	POWER_SUPPLY_PROP_CURRENT_QNOVO,
-	POWER_SUPPLY_PROP_VOLTAGE_QNOVO,
-	POWER_SUPPLY_PROP_RERUN_AICL,
-	POWER_SUPPLY_PROP_CYCLE_COUNT_ID,
-	POWER_SUPPLY_PROP_SAFETY_TIMER_EXPIRED,
-	POWER_SUPPLY_PROP_RESTRICTED_CHARGING,
-	POWER_SUPPLY_PROP_CURRENT_CAPABILITY,
-	POWER_SUPPLY_PROP_TYPEC_MODE,
-	POWER_SUPPLY_PROP_TYPEC_CC_ORIENTATION, /* 0: N/C, 1: CC1, 2: CC2 */
-	POWER_SUPPLY_PROP_TYPEC_POWER_ROLE,
-	POWER_SUPPLY_PROP_TYPEC_BOOST_OTG_DISABLE,
-	POWER_SUPPLY_PROP_TYPEC_SRC_RP,
-	POWER_SUPPLY_PROP_PD_ALLOWED,
-	POWER_SUPPLY_PROP_PD_ACTIVE,
-	POWER_SUPPLY_PROP_PD_IN_HARD_RESET,
-	POWER_SUPPLY_PROP_PD_CURRENT_MAX,
-	POWER_SUPPLY_PROP_APDO_MAX,
-	POWER_SUPPLY_PROP_POWER_MAX,
-	POWER_SUPPLY_PROP_PD_USB_SUSPEND_SUPPORTED,
-	POWER_SUPPLY_PROP_CHARGER_TEMP,
-	POWER_SUPPLY_PROP_CHARGER_TEMP_MAX,
-	POWER_SUPPLY_PROP_PARALLEL_DISABLE,
-	POWER_SUPPLY_PROP_PE_START,
-	POWER_SUPPLY_PROP_SOC_REPORTING_READY,
-	POWER_SUPPLY_PROP_DEBUG_BATTERY,
-	POWER_SUPPLY_PROP_FCC_DELTA,
-	POWER_SUPPLY_PROP_ICL_REDUCTION,
-	POWER_SUPPLY_PROP_PARALLEL_MODE,
-	POWER_SUPPLY_PROP_DIE_HEALTH,
-	POWER_SUPPLY_PROP_CONNECTOR_HEALTH,
-	POWER_SUPPLY_PROP_CONNECTOR_TEMP,
-#ifdef CONFIG_BATT_VERIFY_BY_DS28E16_PIPA
-	POWER_SUPPLY_PROP_BATTERY_SLAVE_TEMP,
-#endif
-	POWER_SUPPLY_PROP_VBUS_DISABLE,
-	POWER_SUPPLY_PROP_ARTI_VBUS_ENABLE,
-	POWER_SUPPLY_PROP_CTM_CURRENT_MAX,
-	POWER_SUPPLY_PROP_HW_CURRENT_MAX,
-	POWER_SUPPLY_PROP_PR_SWAP,
-	POWER_SUPPLY_PROP_CC_STEP,
-	POWER_SUPPLY_PROP_CC_STEP_SEL,
-	POWER_SUPPLY_PROP_SW_JEITA_ENABLED,
-	POWER_SUPPLY_PROP_PD_VOLTAGE_MAX,
-	POWER_SUPPLY_PROP_PD_VOLTAGE_MIN,
-	POWER_SUPPLY_PROP_SDP_CURRENT_MAX,
-	POWER_SUPPLY_PROP_DC_THERMAL_LEVELS,
-	POWER_SUPPLY_PROP_FG_RESET_CLOCK,
-	POWER_SUPPLY_PROP_CONNECTOR_TYPE,
-	POWER_SUPPLY_PROP_PARALLEL_BATFET_MODE,
-	POWER_SUPPLY_PROP_PARALLEL_FCC_MAX,
-	POWER_SUPPLY_PROP_WIRELESS_VERSION,
-	POWER_SUPPLY_PROP_WIRELESS_FW_VERSION,
-	POWER_SUPPLY_PROP_SIGNAL_STRENGTH,
-	POWER_SUPPLY_PROP_WIRELESS_CP_EN,
-	POWER_SUPPLY_PROP_WIRELESS_POWER_GOOD_EN,
-	POWER_SUPPLY_PROP_SW_DISABLE_DC_EN,
-	POWER_SUPPLY_PROP_WIRELESS_WAKELOCK,
-	POWER_SUPPLY_PROP_WIRELESS_TX_ID,
-	POWER_SUPPLY_PROP_TX_ADAPTER,
-	POWER_SUPPLY_PROP_WLS_CAR_ADAPTER,
-	POWER_SUPPLY_PROP_TX_MAC,
-	POWER_SUPPLY_PROP_RX_CR,
-	POWER_SUPPLY_PROP_RX_CEP,
-	POWER_SUPPLY_PROP_BT_STATE,
-	POWER_SUPPLY_PROP_PEN_MAC,
-	POWER_SUPPLY_PROP_MIN_ICL,
-	POWER_SUPPLY_PROP_MOISTURE_DETECTED,
-	POWER_SUPPLY_PROP_BATT_PROFILE_VERSION,
-	POWER_SUPPLY_PROP_BATT_FULL_CURRENT,
-	POWER_SUPPLY_PROP_WARM_FAKE_CHARGING,
-	POWER_SUPPLY_PROP_RECHARGE_SOC,
-	POWER_SUPPLY_PROP_HVDCP_OPTI_ALLOWED,
-	POWER_SUPPLY_PROP_SMB_EN_MODE,
-	POWER_SUPPLY_PROP_SMB_EN_REASON,
-	POWER_SUPPLY_PROP_ESR_ACTUAL,
-	POWER_SUPPLY_PROP_ESR_NOMINAL,
-	POWER_SUPPLY_PROP_SOH,
-	POWER_SUPPLY_PROP_CLEAR_SOH,
-	POWER_SUPPLY_PROP_FORCE_RECHARGE,
-	POWER_SUPPLY_PROP_FCC_STEPPER_ENABLE,
-	POWER_SUPPLY_PROP_SMB_EN_ALLOWED,
-	POWER_SUPPLY_PROP_BATT_2S_MODE,
-	POWER_SUPPLY_PROP_TOGGLE_STAT,
-	POWER_SUPPLY_PROP_TYPE_RECHECK,
-	POWER_SUPPLY_PROP_MAIN_FCC_MAX,
-	POWER_SUPPLY_PROP_FG_RESET,
-	POWER_SUPPLY_PROP_QC_OPTI_DISABLE,
-	POWER_SUPPLY_PROP_CC_SOC,
-	POWER_SUPPLY_PROP_BATT_AGE_LEVEL,
-	POWER_SUPPLY_PROP_SCALE_MODE_EN,
-	POWER_SUPPLY_PROP_VOLTAGE_VPH,
-	POWER_SUPPLY_PROP_CHIP_VERSION,
-	POWER_SUPPLY_PROP_THERM_ICL_LIMIT,
-	POWER_SUPPLY_PROP_DC_RESET,
-	POWER_SUPPLY_PROP_VOLTAGE_MAX_LIMIT,
-	POWER_SUPPLY_PROP_REAL_CAPACITY,
-	POWER_SUPPLY_PROP_FORCE_MAIN_ICL,
-	POWER_SUPPLY_PROP_FORCE_MAIN_FCC,
-	POWER_SUPPLY_PROP_COMP_CLAMP_LEVEL,
-	POWER_SUPPLY_PROP_ADAPTER_CC_MODE,
-	POWER_SUPPLY_PROP_NON_COMPATIBLE,
-	POWER_SUPPLY_PROP_SKIN_HEALTH,
-	POWER_SUPPLY_PROP_AICL_DONE,
-	POWER_SUPPLY_PROP_VOLTAGE_STEP,
-	POWER_SUPPLY_PROP_APSD_RERUN,
-	POWER_SUPPLY_PROP_APSD_TIMEOUT,
-	/* Charge pump properties */
-	POWER_SUPPLY_PROP_CP_STATUS1,
-	POWER_SUPPLY_PROP_CP_STATUS2,
-	POWER_SUPPLY_PROP_CP_ENABLE,
-	POWER_SUPPLY_PROP_CP_SWITCHER_EN,
-	POWER_SUPPLY_PROP_CP_DIE_TEMP,
-	POWER_SUPPLY_PROP_CP_ISNS,
-	POWER_SUPPLY_PROP_CP_ISNS_SLAVE,
-	POWER_SUPPLY_PROP_CP_TOGGLE_SWITCHER,
-	POWER_SUPPLY_PROP_CP_IRQ_STATUS,
-	POWER_SUPPLY_PROP_CP_ILIM,
-	POWER_SUPPLY_PROP_IRQ_STATUS,
-	POWER_SUPPLY_PROP_PARALLEL_OUTPUT_MODE,
-	POWER_SUPPLY_PROP_CP_WIN_OV,
-	POWER_SUPPLY_PROP_CP_PASSTHROUGH_MODE,
-	POWER_SUPPLY_PROP_CP_PASSTHROUGH_CONFIG,
-	POWER_SUPPLY_PROP_CP_OVP_CONFIG,
-	POWER_SUPPLY_PROP_CP_OCP_CONFIG,
-	POWER_SUPPLY_PROP_CP_CFLY_SS_STATUS,
-	POWER_SUPPLY_PROP_TI_BATTERY_PRESENT,
-	POWER_SUPPLY_PROP_TI_VBUS_PRESENT,
-	POWER_SUPPLY_PROP_TI_BATTERY_VOLTAGE,
-	POWER_SUPPLY_PROP_TI_BATTERY_CURRENT,
-	POWER_SUPPLY_PROP_TI_BATTERY_TEMPERATURE,
-	POWER_SUPPLY_PROP_TI_BUS_VOLTAGE,
-	POWER_SUPPLY_PROP_TI_BUS_CURRENT,
-	POWER_SUPPLY_PROP_TI_BUS_TEMPERATURE,
-	POWER_SUPPLY_PROP_TI_DIE_TEMPERATURE,
-	POWER_SUPPLY_PROP_TI_ALARM_STATUS,
-	POWER_SUPPLY_PROP_TI_FAULT_STATUS,
-	POWER_SUPPLY_PROP_TI_REG_STATUS,
-	POWER_SUPPLY_PROP_TI_RESET_CHECK,
-	POWER_SUPPLY_PROP_TI_SET_BUS_PROTECTION_FOR_QC3,
-	POWER_SUPPLY_PROP_TI_SET_BUS_PROTECTION_FOR_PD,
-	POWER_SUPPLY_PROP_TI_BUS_ERROR_STATUS,
-	POWER_SUPPLY_PROP_FASTCHARGE_MODE,
-	POWER_SUPPLY_PROP_FFC_ITERM,
-	POWER_SUPPLY_PROP_DP_DM_BQ,
-	POWER_SUPPLY_PROP_PD_AUTHENTICATION,
-	POWER_SUPPLY_PROP_PASSTHROUGH_CURR_MAX,
-	POWER_SUPPLY_PROP_TERMINATION_CURRENT,
-	POWER_SUPPLY_PROP_FFC_TERMINATION_CURRENT,
-	POWER_SUPPLY_PROP_SYS_TERMINATION_CURRENT,
-	POWER_SUPPLY_PROP_FFC_SYS_TERMINATION_CURRENT,
-	POWER_SUPPLY_PROP_VBATT_FULL_VOL,
-	POWER_SUPPLY_PROP_FFC_VBATT_FULL_VOL,
-	POWER_SUPPLY_PROP_KI_COEFF_CURRENT,
-	POWER_SUPPLY_PROP_RECHARGE_VBAT,
-	POWER_SUPPLY_PROP_STEP_VFLOAT_INDEX,
-	POWER_SUPPLY_PROP_NIGHT_CHARGING,
-	POWER_SUPPLY_PROP_I2C_ERROR_COUNT,
-	/* PS5169 properties */
-	POWER_SUPPLY_PROP_PS_EN,
-	POWER_SUPPLY_PROP_PS_CHIPID,
-	POWER_SUPPLY_PROP_PS_CFGMOD,
-	POWER_SUPPLY_PROP_PS_CFG_FLIP,
-	POWER_SUPPLY_PROP_PS_CFG_USB,
-	POWER_SUPPLY_PROP_PS_CFG_DP,
-	POWER_SUPPLY_PROP_PS_CFG_USB_DP,
-	POWER_SUPPLY_PROP_PS_RMOV_USB,
-	POWER_SUPPLY_PROP_PS_RMOV_DP,
-	POWER_SUPPLY_PROP_PS_RMOV_USB_DP,
-	POWER_SUPPLY_PROP_EQ0_TX,
-	POWER_SUPPLY_PROP_EQ1_TX,
-	POWER_SUPPLY_PROP_EQ2_TX,
-	POWER_SUPPLY_PROP_TX_GAIN,
-#if defined(CONFIG_BATT_VERIFY_BY_DS28E16) || defined(CONFIG_BATT_VERIFY_BY_DS28E16_PIPA)
-	/* battery verify properties */
-	POWER_SUPPLY_PROP_ROMID,
-	POWER_SUPPLY_PROP_DS_STATUS,
-	POWER_SUPPLY_PROP_PAGENUMBER,
-	POWER_SUPPLY_PROP_PAGEDATA,
-	POWER_SUPPLY_PROP_AUTHEN_RESULT,
-	POWER_SUPPLY_PROP_SESSION_SEED,
-	POWER_SUPPLY_PROP_S_SECRET,
-	POWER_SUPPLY_PROP_CHALLENGE,
-	POWER_SUPPLY_PROP_AUTH_ANON,
-	POWER_SUPPLY_PROP_AUTH_BDCONST,
-	POWER_SUPPLY_PROP_PAGE0_DATA,
-	POWER_SUPPLY_PROP_PAGE1_DATA,
-	POWER_SUPPLY_PROP_VERIFY_MODEL_NAME,
-	POWER_SUPPLY_PROP_MAXIM_BATT_CYCLE_COUNT,
-#endif
-	POWER_SUPPLY_PROP_CHIP_OK,
-	POWER_SUPPLY_PROP_SMART_BATTERY,
-	/* DIV 2 properties */
-	POWER_SUPPLY_PROP_DIV_2_MODE,
-	POWER_SUPPLY_PROP_REVERSE_CHG_MODE,
-	POWER_SUPPLY_PROP_REVERSE_CHG_STATE,
-	POWER_SUPPLY_PROP_REVERSE_PEN_CHG_STATE,
-	POWER_SUPPLY_PROP_REVERSE_GPIO_STATE,
-	POWER_SUPPLY_PROP_RESET_DIV_2_MODE,
-	POWER_SUPPLY_PROP_AICL_ENABLE,
-	POWER_SUPPLY_PROP_OTG_STATE,
-	POWER_SUPPLY_PROP_REVERSE_CHG_HALL3,
-	POWER_SUPPLY_PROP_REVERSE_CHG_HALL4,
-	POWER_SUPPLY_PROP_REVERSE_PEN_SOC,
-	POWER_SUPPLY_PROP_REVERSE_VOUT,
-	POWER_SUPPLY_PROP_REVERSE_IOUT,
-	POWER_SUPPLY_PROP_CC_TOGGLE_ENABLE,
-	POWER_SUPPLY_PROP_FG_TYPE,
-	POWER_SUPPLY_PROP_CHARGER_STATUS,
-	/* Local extensions of type int64_t */
-	POWER_SUPPLY_PROP_CHARGE_COUNTER_EXT,
+	POWER_SUPPLY_PROP_MANUFACTURE_YEAR,
+	POWER_SUPPLY_PROP_MANUFACTURE_MONTH,
+	POWER_SUPPLY_PROP_MANUFACTURE_DAY,
+	POWER_SUPPLY_PROP_INTERNAL_RESISTANCE,
+	POWER_SUPPLY_PROP_STATE_OF_HEALTH,
 	/* Properties of type `const char *' */
 	POWER_SUPPLY_PROP_MODEL_NAME,
 	POWER_SUPPLY_PROP_MANUFACTURER,
-	POWER_SUPPLY_PROP_BATTERY_TYPE,
-	POWER_SUPPLY_PROP_CYCLE_COUNTS,
-	/*
-	 * Add local extensions for properties with string values between
-	 * MODEL_NAME and SERIAL_NUMBER. Don't add below SERIAL_NUMBER.
-	 */
 	POWER_SUPPLY_PROP_SERIAL_NUMBER,
-	// high temperature to intercept
-	POWER_SUPPLY_PROP_TEMP_MAX_FAC,
-	POWER_SUPPLY_PROP_TIME_OT,
 };
 
 enum power_supply_type {
@@ -534,21 +197,7 @@ enum power_supply_type {
 	POWER_SUPPLY_TYPE_USB_PD,		/* Power Delivery Port */
 	POWER_SUPPLY_TYPE_USB_PD_DRP,		/* PD Dual Role Port */
 	POWER_SUPPLY_TYPE_APPLE_BRICK_ID,	/* Apple Charging Method */
-	POWER_SUPPLY_TYPE_USB_HVDCP,		/* High Voltage DCP */
-	POWER_SUPPLY_TYPE_USB_HVDCP_3,		/* Efficient High Voltage DCP */
-	POWER_SUPPLY_TYPE_USB_HVDCP_3P5,	/* Efficient High Voltage DCP */
-	POWER_SUPPLY_TYPE_WIRELESS,		/* Accessory Charger Adapters */
-	POWER_SUPPLY_TYPE_USB_FLOAT,		/* Floating charger */
-	POWER_SUPPLY_TYPE_BMS,			/* Battery Monitor System */
-	POWER_SUPPLY_TYPE_PARALLEL,		/* Parallel Path */
-	POWER_SUPPLY_TYPE_MAIN,			/* Main Path */
-	POWER_SUPPLY_TYPE_WIPOWER,		/* Wipower */
-	POWER_SUPPLY_TYPE_UFP,			/* Type-C UFP */
-	POWER_SUPPLY_TYPE_DFP,			/* Type-C DFP */
-	POWER_SUPPLY_TYPE_CHARGE_PUMP,		/* Charge Pump */
-#if defined(CONFIG_BATT_VERIFY_BY_DS28E16) || defined(CONFIG_BATT_VERIFY_BY_DS28E16_PIPA)
-	POWER_SUPPLY_TYPE_BATT_VERIFY,          /* battery verify */
-#endif
+	POWER_SUPPLY_TYPE_WIRELESS,		/* Wireless */
 };
 
 enum power_supply_usb_type {
@@ -564,35 +213,11 @@ enum power_supply_usb_type {
 	POWER_SUPPLY_USB_TYPE_APPLE_BRICK_ID,	/* Apple Charging Method */
 };
 
-/* Indicates USB Type-C CC connection status */
-enum power_supply_typec_mode {
-	POWER_SUPPLY_TYPEC_NONE,
-
-	/* Acting as source */
-	POWER_SUPPLY_TYPEC_SINK,		/* Rd only */
-	POWER_SUPPLY_TYPEC_SINK_POWERED_CABLE,	/* Rd/Ra */
-	POWER_SUPPLY_TYPEC_SINK_DEBUG_ACCESSORY,/* Rd/Rd */
-	POWER_SUPPLY_TYPEC_SINK_AUDIO_ADAPTER,	/* Ra/Ra */
-	POWER_SUPPLY_TYPEC_POWERED_CABLE_ONLY,	/* Ra only */
-
-	/* Acting as sink */
-	POWER_SUPPLY_TYPEC_SOURCE_DEFAULT,	/* Rp default */
-	POWER_SUPPLY_TYPEC_SOURCE_MEDIUM,	/* Rp 1.5A */
-	POWER_SUPPLY_TYPEC_SOURCE_HIGH,		/* Rp 3A */
-	POWER_SUPPLY_TYPEC_NON_COMPLIANT,
-};
-
-enum power_supply_typec_src_rp {
-	POWER_SUPPLY_TYPEC_SRC_RP_STD,
-	POWER_SUPPLY_TYPEC_SRC_RP_1P5A,
-	POWER_SUPPLY_TYPEC_SRC_RP_3A
-};
-
-enum power_supply_typec_power_role {
-	POWER_SUPPLY_TYPEC_PR_NONE,		/* CC lines in high-Z */
-	POWER_SUPPLY_TYPEC_PR_DUAL,
-	POWER_SUPPLY_TYPEC_PR_SINK,
-	POWER_SUPPLY_TYPEC_PR_SOURCE,
+enum power_supply_charge_behaviour {
+	POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO = 0,
+	POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE,
+	POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE_AWAKE,
+	POWER_SUPPLY_CHARGE_BEHAVIOUR_FORCE_DISCHARGE,
 };
 
 enum power_supply_notifier_events {
@@ -602,10 +227,6 @@ enum power_supply_notifier_events {
 union power_supply_propval {
 	int intval;
 	const char *strval;
-	int64_t int64val;
-#if defined(CONFIG_BATT_VERIFY_BY_DS28E16) || defined(CONFIG_BATT_VERIFY_BY_DS28E16_PIPA)
-	unsigned char arrayval[50];
-#endif
 };
 
 struct device_node;
@@ -613,23 +234,28 @@ struct power_supply;
 
 /* Run-time specific power supply configuration */
 struct power_supply_config {
-	struct device_node *of_node;
 	struct fwnode_handle *fwnode;
 
 	/* Driver private data */
 	void *drv_data;
 
+	/* Device specific sysfs attributes */
+	const struct attribute_group **attr_grp;
+
 	char **supplied_to;
 	size_t num_supplicants;
+
+	bool no_wakeup_source;
 };
 
 /* Description of power supply */
 struct power_supply_desc {
 	const char *name;
 	enum power_supply_type type;
-	enum power_supply_usb_type *usb_types;
-	size_t num_usb_types;
-	enum power_supply_property *properties;
+	u8 charge_behaviours;
+	u32 charge_types;
+	u32 usb_types;
+	const enum power_supply_property *properties;
 	size_t num_properties;
 
 	/*
@@ -652,7 +278,6 @@ struct power_supply_desc {
 	int (*property_is_writeable)(struct power_supply *psy,
 				     enum power_supply_property psp);
 	void (*external_power_changed)(struct power_supply *psy);
-	void (*set_charged)(struct power_supply *psy);
 
 	/*
 	 * Set if thermal zone should not be created for this power supply.
@@ -664,6 +289,29 @@ struct power_supply_desc {
 	int use_for_apm;
 };
 
+struct power_supply_ext {
+	const char *const name;
+	u8 charge_behaviours;
+	u32 charge_types;
+	const enum power_supply_property *properties;
+	size_t num_properties;
+
+	int (*get_property)(struct power_supply *psy,
+			    const struct power_supply_ext *ext,
+			    void *data,
+			    enum power_supply_property psp,
+			    union power_supply_propval *val);
+	int (*set_property)(struct power_supply *psy,
+			    const struct power_supply_ext *ext,
+			    void *data,
+			    enum power_supply_property psp,
+			    const union power_supply_propval *val);
+	int (*property_is_writeable)(struct power_supply *psy,
+				     const struct power_supply_ext *ext,
+				     void *data,
+				     enum power_supply_property psp);
+};
+
 struct power_supply {
 	const struct power_supply_desc *desc;
 
@@ -672,7 +320,6 @@ struct power_supply {
 
 	char **supplied_from;
 	size_t num_supplies;
-	struct device_node *of_node;
 
 	/* Driver private data */
 	void *drv_data;
@@ -683,27 +330,28 @@ struct power_supply {
 	struct delayed_work deferred_register_work;
 	spinlock_t changed_lock;
 	bool changed;
+	bool update_groups;
 	bool initialized;
 	bool removing;
 	atomic_t use_cnt;
+	struct power_supply_battery_info *battery_info;
+	struct rw_semaphore extensions_sem; /* protects "extensions" */
+	struct list_head extensions;
 #ifdef CONFIG_THERMAL
 	struct thermal_zone_device *tzd;
 	struct thermal_cooling_device *tcd;
 #endif
 
 #ifdef CONFIG_LEDS_TRIGGERS
-	struct led_trigger *charging_full_trig;
-	char *charging_full_trig_name;
+	struct led_trigger *trig;
 	struct led_trigger *charging_trig;
-	char *charging_trig_name;
 	struct led_trigger *full_trig;
-	char *full_trig_name;
-	struct led_trigger *online_trig;
-	char *online_trig_name;
 	struct led_trigger *charging_blink_full_solid_trig;
-	char *charging_blink_full_solid_trig_name;
+	struct led_trigger *charging_orange_full_green_trig;
 #endif
 };
+
+#define dev_to_psy(__dev)	container_of_const(__dev, struct power_supply, dev)
 
 /*
  * This is recommended structure to specify static power supply parameters.
@@ -724,52 +372,504 @@ struct power_supply_info {
 	int use_for_apm;
 };
 
-/*
+struct power_supply_battery_ocv_table {
+	int ocv;	/* microVolts */
+	int capacity;	/* percent */
+};
+
+struct power_supply_resistance_temp_table {
+	int temp;	/* celsius */
+	int resistance;	/* internal resistance percent */
+};
+
+struct power_supply_vbat_ri_table {
+	int vbat_uv;	/* Battery voltage in microvolt */
+	int ri_uohm;	/* Internal resistance in microohm */
+};
+
+/**
+ * struct power_supply_maintenance_charge_table - setting for maintenace charging
+ * @charge_current_max_ua: maintenance charging current that is used to keep
+ *   the charge of the battery full as current is consumed after full charging.
+ *   The corresponding charge_voltage_max_uv is used as a safeguard: when we
+ *   reach this voltage the maintenance charging current is turned off. It is
+ *   turned back on if we fall below this voltage.
+ * @charge_voltage_max_uv: maintenance charging voltage that is usually a bit
+ *   lower than the constant_charge_voltage_max_uv. We can apply this settings
+ *   charge_current_max_ua until we get back up to this voltage.
+ * @safety_timer_minutes: maintenance charging safety timer, with an expiry
+ *   time in minutes. We will only use maintenance charging in this setting
+ *   for a certain amount of time, then we will first move to the next
+ *   maintenance charge current and voltage pair in respective array and wait
+ *   for the next safety timer timeout, or, if we reached the last maintencance
+ *   charging setting, disable charging until we reach
+ *   charge_restart_voltage_uv and restart ordinary CC/CV charging from there.
+ *   These timers should be chosen to align with the typical discharge curve
+ *   for the battery.
+ *
+ * Ordinary CC/CV charging will stop charging when the charge current goes
+ * below charge_term_current_ua, and then restart it (if the device is still
+ * plugged into the charger) at charge_restart_voltage_uv. This happens in most
+ * consumer products because the power usage while connected to a charger is
+ * not zero, and devices are not manufactured to draw power directly from the
+ * charger: instead they will at all times dissipate the battery a little, like
+ * the power used in standby mode. This will over time give a charge graph
+ * such as this:
+ *
+ * Energy
+ *  ^      ...        ...      ...      ...      ...      ...      ...
+ *  |    .   .       .  .     .  .     .  .     .  .     .  .     .
+ *  |  ..     .   ..     .  ..    .  ..    .  ..    .  ..    .  ..
+ *  |.          ..        ..       ..       ..       ..       ..
+ *  +-------------------------------------------------------------------> t
+ *
+ * Practically this means that the Li-ions are wandering back and forth in the
+ * battery and this causes degeneration of the battery anode and cathode.
+ * To prolong the life of the battery, maintenance charging is applied after
+ * reaching charge_term_current_ua to hold up the charge in the battery while
+ * consuming power, thus lowering the wear on the battery:
+ *
+ * Energy
+ *  ^      .......................................
+ *  |    .                                        ......................
+ *  |  ..
+ *  |.
+ *  +-------------------------------------------------------------------> t
+ *
+ * Maintenance charging uses the voltages from this table: a table of settings
+ * is traversed using a slightly lower current and voltage than what is used for
+ * CC/CV charging. The maintenance charging will for safety reasons not go on
+ * indefinately: we lower the current and voltage with successive maintenance
+ * settings, then disable charging completely after we reach the last one,
+ * and after that we do not restart charging until we reach
+ * charge_restart_voltage_uv (see struct power_supply_battery_info) and restart
+ * ordinary CC/CV charging from there.
+ *
+ * As an example, a Samsung EB425161LA Lithium-Ion battery is CC/CV charged
+ * at 900mA to 4340mV, then maintenance charged at 600mA and 4150mV for up to
+ * 60 hours, then maintenance charged at 600mA and 4100mV for up to 200 hours.
+ * After this the charge cycle is restarted waiting for
+ * charge_restart_voltage_uv.
+ *
+ * For most mobile electronics this type of maintenance charging is enough for
+ * the user to disconnect the device and make use of it before both maintenance
+ * charging cycles are complete, if the current and voltage has been chosen
+ * appropriately. These need to be determined from battery discharge curves
+ * and expected standby current.
+ *
+ * If the voltage anyway drops to charge_restart_voltage_uv during maintenance
+ * charging, ordinary CC/CV charging is restarted. This can happen if the
+ * device is e.g. actively used during charging, so more current is drawn than
+ * the expected stand-by current. Also overvoltage protection will be applied
+ * as usual.
+ */
+struct power_supply_maintenance_charge_table {
+	int charge_current_max_ua;
+	int charge_voltage_max_uv;
+	int charge_safety_timer_minutes;
+};
+
+#define POWER_SUPPLY_OCV_TEMP_MAX 20
+
+/**
+ * struct power_supply_battery_info - information about batteries
+ * @technology: from the POWER_SUPPLY_TECHNOLOGY_* enum
+ * @energy_full_design_uwh: energy content when fully charged in microwatt
+ *   hours
+ * @charge_full_design_uah: charge content when fully charged in microampere
+ *   hours
+ * @voltage_min_design_uv: minimum voltage across the poles when the battery
+ *   is at minimum voltage level in microvolts. If the voltage drops below this
+ *   level the battery will need precharging when using CC/CV charging.
+ * @voltage_max_design_uv: voltage across the poles when the battery is fully
+ *   charged in microvolts. This is the "nominal voltage" i.e. the voltage
+ *   printed on the label of the battery.
+ * @tricklecharge_current_ua: the tricklecharge current used when trickle
+ *   charging the battery in microamperes. This is the charging phase when the
+ *   battery is completely empty and we need to carefully trickle in some
+ *   charge until we reach the precharging voltage.
+ * @precharge_current_ua: current to use in the precharge phase in microamperes,
+ *   the precharge rate is limited by limiting the current to this value.
+ * @precharge_voltage_max_uv: the maximum voltage allowed when precharging in
+ *   microvolts. When we pass this voltage we will nominally switch over to the
+ *   CC (constant current) charging phase defined by constant_charge_current_ua
+ *   and constant_charge_voltage_max_uv.
+ * @charge_term_current_ua: when the current in the CV (constant voltage)
+ *   charging phase drops below this value in microamperes the charging will
+ *   terminate completely and not restart until the voltage over the battery
+ *   poles reach charge_restart_voltage_uv unless we use maintenance charging.
+ * @charge_restart_voltage_uv: when the battery has been fully charged by
+ *   CC/CV charging and charging has been disabled, and the voltage subsequently
+ *   drops below this value in microvolts, the charging will be restarted
+ *   (typically using CV charging).
+ * @overvoltage_limit_uv: If the voltage exceeds the nominal voltage
+ *   voltage_max_design_uv and we reach this voltage level, all charging must
+ *   stop and emergency procedures take place, such as shutting down the system
+ *   in some cases.
+ * @constant_charge_current_max_ua: current in microamperes to use in the CC
+ *   (constant current) charging phase. The charging rate is limited
+ *   by this current. This is the main charging phase and as the current is
+ *   constant into the battery the voltage slowly ascends to
+ *   constant_charge_voltage_max_uv.
+ * @constant_charge_voltage_max_uv: voltage in microvolts signifying the end of
+ *   the CC (constant current) charging phase and the beginning of the CV
+ *   (constant voltage) charging phase.
+ * @maintenance_charge: an array of maintenance charging settings to be used
+ *   after the main CC/CV charging phase is complete.
+ * @maintenance_charge_size: the number of maintenance charging settings in
+ *   maintenance_charge.
+ * @alert_low_temp_charge_current_ua: The charging current to use if the battery
+ *   enters low alert temperature, i.e. if the internal temperature is between
+ *   temp_alert_min and temp_min. No matter the charging phase, this
+ *   and alert_high_temp_charge_voltage_uv will be applied.
+ * @alert_low_temp_charge_voltage_uv: Same as alert_low_temp_charge_current_ua,
+ *   but for the charging voltage.
+ * @alert_high_temp_charge_current_ua: The charging current to use if the
+ *   battery enters high alert temperature, i.e. if the internal temperature is
+ *   between temp_alert_max and temp_max. No matter the charging phase, this
+ *   and alert_high_temp_charge_voltage_uv will be applied, usually lowering
+ *   the charging current as an evasive manouver.
+ * @alert_high_temp_charge_voltage_uv: Same as
+ *   alert_high_temp_charge_current_ua, but for the charging voltage.
+ * @factory_internal_resistance_uohm: the internal resistance of the battery
+ *   at fabrication time, expressed in microohms. This resistance will vary
+ *   depending on the lifetime and charge of the battery, so this is just a
+ *   nominal ballpark figure. This internal resistance is given for the state
+ *   when the battery is discharging.
+ * @factory_internal_resistance_charging_uohm: the internal resistance of the
+ *   battery at fabrication time while charging, expressed in microohms.
+ *   The charging process will affect the internal resistance of the battery
+ *   so this value provides a better resistance under these circumstances.
+ *   This resistance will vary depending on the lifetime and charge of the
+ *   battery, so this is just a nominal ballpark figure.
+ * @ocv_temp: array indicating the open circuit voltage (OCV) capacity
+ *   temperature indices. This is an array of temperatures in degrees Celsius
+ *   indicating which capacity table to use for a certain temperature, since
+ *   the capacity for reasons of chemistry will be different at different
+ *   temperatures. Determining capacity is a multivariate problem and the
+ *   temperature is the first variable we determine.
+ * @temp_ambient_alert_min: the battery will go outside of operating conditions
+ *   when the ambient temperature goes below this temperature in degrees
+ *   Celsius.
+ * @temp_ambient_alert_max: the battery will go outside of operating conditions
+ *   when the ambient temperature goes above this temperature in degrees
+ *   Celsius.
+ * @temp_alert_min: the battery should issue an alert if the internal
+ *   temperature goes below this temperature in degrees Celsius.
+ * @temp_alert_max: the battery should issue an alert if the internal
+ *   temperature goes above this temperature in degrees Celsius.
+ * @temp_min: the battery will go outside of operating conditions when
+ *   the internal temperature goes below this temperature in degrees Celsius.
+ *   Normally this means the system should shut down.
+ * @temp_max: the battery will go outside of operating conditions when
+ *   the internal temperature goes above this temperature in degrees Celsius.
+ *   Normally this means the system should shut down.
+ * @ocv_table: for each entry in ocv_temp there is a corresponding entry in
+ *   ocv_table and a size for each entry in ocv_table_size. These arrays
+ *   determine the capacity in percent in relation to the voltage in microvolts
+ *   at the indexed temperature.
+ * @ocv_table_size: for each entry in ocv_temp this array is giving the size of
+ *   each entry in the array of capacity arrays in ocv_table.
+ * @resist_table: this is a table that correlates a battery temperature to the
+ *   expected internal resistance at this temperature. The resistance is given
+ *   as a percentage of factory_internal_resistance_uohm. Knowing the
+ *   resistance of the battery is usually necessary for calculating the open
+ *   circuit voltage (OCV) that is then used with the ocv_table to calculate
+ *   the capacity of the battery. The resist_table must be ordered descending
+ *   by temperature: highest temperature with lowest resistance first, lowest
+ *   temperature with highest resistance last.
+ * @resist_table_size: the number of items in the resist_table.
+ * @vbat2ri_discharging: this is a table that correlates Battery voltage (VBAT)
+ *   to internal resistance (Ri). The resistance is given in microohm for the
+ *   corresponding voltage in microvolts. The internal resistance is used to
+ *   determine the open circuit voltage so that we can determine the capacity
+ *   of the battery. These voltages to resistance tables apply when the battery
+ *   is discharging. The table must be ordered descending by voltage: highest
+ *   voltage first.
+ * @vbat2ri_discharging_size: the number of items in the vbat2ri_discharging
+ *   table.
+ * @vbat2ri_charging: same function as vbat2ri_discharging but for the state
+ *   when the battery is charging. Being under charge changes the battery's
+ *   internal resistance characteristics so a separate table is needed.*
+ *   The table must be ordered descending by voltage: highest voltage first.
+ * @vbat2ri_charging_size: the number of items in the vbat2ri_charging
+ *   table.
+ * @bti_resistance_ohm: The Battery Type Indicator (BIT) nominal resistance
+ *   in ohms for this battery, if an identification resistor is mounted
+ *   between a third battery terminal and ground. This scheme is used by a lot
+ *   of mobile device batteries.
+ * @bti_resistance_tolerance: The tolerance in percent of the BTI resistance,
+ *   for example 10 for +/- 10%, if the bti_resistance is set to 7000 and the
+ *   tolerance is 10% we will detect a proper battery if the BTI resistance
+ *   is between 6300 and 7700 Ohm.
+ *
  * This is the recommended struct to manage static battery parameters,
  * populated by power_supply_get_battery_info(). Most platform drivers should
  * use these for consistency.
+ *
  * Its field names must correspond to elements in enum power_supply_property.
- * The default field value is -EINVAL.
- * Power supply class itself doesn't use this.
+ * The default field value is -EINVAL or NULL for pointers.
+ *
+ * CC/CV CHARGING:
+ *
+ * The charging parameters here assume a CC/CV charging scheme. This method
+ * is most common with Lithium Ion batteries (other methods are possible) and
+ * looks as follows:
+ *
+ * ^ Battery voltage
+ * |                                               --- overvoltage_limit_uv
+ * |
+ * |                    ...................................................
+ * |                 .. constant_charge_voltage_max_uv
+ * |              ..
+ * |             .
+ * |            .
+ * |           .
+ * |          .
+ * |         .
+ * |     .. precharge_voltage_max_uv
+ * |  ..
+ * |. (trickle charging)
+ * +------------------------------------------------------------------> time
+ *
+ * ^ Current into the battery
+ * |
+ * |      ............. constant_charge_current_max_ua
+ * |      .            .
+ * |      .             .
+ * |      .              .
+ * |      .               .
+ * |      .                ..
+ * |      .                  ....
+ * |      .                       .....
+ * |    ... precharge_current_ua       .......  charge_term_current_ua
+ * |    .                                    .
+ * |    .                                    .
+ * |.... tricklecharge_current_ua            .
+ * |                                         .
+ * +-----------------------------------------------------------------> time
+ *
+ * These diagrams are synchronized on time and the voltage and current
+ * follow each other.
+ *
+ * With CC/CV charging commence over time like this for an empty battery:
+ *
+ * 1. When the battery is completely empty it may need to be charged with
+ *    an especially small current so that electrons just "trickle in",
+ *    this is the tricklecharge_current_ua.
+ *
+ * 2. Next a small initial pre-charge current (precharge_current_ua)
+ *    is applied if the voltage is below precharge_voltage_max_uv until we
+ *    reach precharge_voltage_max_uv. CAUTION: in some texts this is referred
+ *    to as "trickle charging" but the use in the Linux kernel is different
+ *    see below!
+ *
+ * 3. Then the main charging current is applied, which is called the constant
+ *    current (CC) phase. A current regulator is set up to allow
+ *    constant_charge_current_max_ua of current to flow into the battery.
+ *    The chemical reaction in the battery will make the voltage go up as
+ *    charge goes into the battery. This current is applied until we reach
+ *    the constant_charge_voltage_max_uv voltage.
+ *
+ * 4. At this voltage we switch over to the constant voltage (CV) phase. This
+ *    means we allow current to go into the battery, but we keep the voltage
+ *    fixed. This current will continue to charge the battery while keeping
+ *    the voltage the same. A chemical reaction in the battery goes on
+ *    storing energy without affecting the voltage. Over time the current
+ *    will slowly drop and when we reach charge_term_current_ua we will
+ *    end the constant voltage phase.
+ *
+ * After this the battery is fully charged, and if we do not support maintenance
+ * charging, the charging will not restart until power dissipation makes the
+ * voltage fall so that we reach charge_restart_voltage_uv and at this point
+ * we restart charging at the appropriate phase, usually this will be inside
+ * the CV phase.
+ *
+ * If we support maintenance charging the voltage is however kept high after
+ * the CV phase with a very low current. This is meant to let the same charge
+ * go in for usage while the charger is still connected, mainly for
+ * dissipation for the power consuming entity while connected to the
+ * charger.
+ *
+ * All charging MUST terminate if the overvoltage_limit_uv is ever reached.
+ * Overcharging Lithium Ion cells can be DANGEROUS and lead to fire or
+ * explosions.
+ *
+ * DETERMINING BATTERY CAPACITY:
+ *
+ * Several members of the struct deal with trying to determine the remaining
+ * capacity in the battery, usually as a percentage of charge. In practice
+ * many chargers uses a so-called fuel gauge or coloumb counter that measure
+ * how much charge goes into the battery and how much goes out (+/- leak
+ * consumption). This does not help if we do not know how much capacity the
+ * battery has to begin with, such as when it is first used or was taken out
+ * and charged in a separate charger. Therefore many capacity algorithms use
+ * the open circuit voltage with a look-up table to determine the rough
+ * capacity of the battery. The open circuit voltage can be conceptualized
+ * with an ideal voltage source (V) in series with an internal resistance (Ri)
+ * like this:
+ *
+ *      +-------> IBAT >----------------+
+ *      |                    ^          |
+ *     [ ] Ri                |          |
+ *      |                    | VBAT     |
+ *      o <----------        |          |
+ *     +|           ^        |         [ ] Rload
+ *    .---.         |        |          |
+ *    | V |         | OCV    |          |
+ *    '---'         |        |          |
+ *      |           |        |          |
+ *  GND +-------------------------------+
+ *
+ * If we disconnect the load (here simplified as a fixed resistance Rload)
+ * and measure VBAT with a infinite impedance voltage meter we will get
+ * VBAT = OCV and this assumption is sometimes made even under load, assuming
+ * Rload is insignificant. However this will be of dubious quality because the
+ * load is rarely that small and Ri is strongly nonlinear depending on
+ * temperature and how much capacity is left in the battery due to the
+ * chemistry involved.
+ *
+ * In many practical applications we cannot just disconnect the battery from
+ * the load, so instead we often try to measure the instantaneous IBAT (the
+ * current out from the battery), estimate the Ri and thus calculate the
+ * voltage drop over Ri and compensate like this:
+ *
+ *   OCV = VBAT - (IBAT * Ri)
+ *
+ * The tables vbat2ri_discharging and vbat2ri_charging are used to determine
+ * (by interpolation) the Ri from the VBAT under load. These curves are highly
+ * nonlinear and may need many datapoints but can be found in datasheets for
+ * some batteries. This gives the compensated open circuit voltage (OCV) for
+ * the battery even under load. Using this method will also compensate for
+ * temperature changes in the environment: this will also make the internal
+ * resistance change, and it will affect the VBAT under load, so correlating
+ * VBAT to Ri takes both remaining capacity and temperature into consideration.
+ *
+ * Alternatively a manufacturer can specify how the capacity of the battery
+ * is dependent on the battery temperature which is the main factor affecting
+ * Ri. As we know all checmical reactions are faster when it is warm and slower
+ * when it is cold. You can put in 1500mAh and only get 800mAh out before the
+ * voltage drops too low for example. This effect is also highly nonlinear and
+ * the purpose of the table resist_table: this will take a temperature and
+ * tell us how big percentage of Ri the specified temperature correlates to.
+ * Usually we have 100% of the factory_internal_resistance_uohm at 25 degrees
+ * Celsius.
+ *
+ * The power supply class itself doesn't use this struct as of now.
  */
 
 struct power_supply_battery_info {
-	int energy_full_design_uwh;	    /* microWatt-hours */
-	int charge_full_design_uah;	    /* microAmp-hours */
-	int voltage_min_design_uv;	    /* microVolts */
-	int precharge_current_ua;	    /* microAmps */
-	int charge_term_current_ua;	    /* microAmps */
-	int constant_charge_current_max_ua; /* microAmps */
-	int constant_charge_voltage_max_uv; /* microVolts */
+	unsigned int technology;
+	int energy_full_design_uwh;
+	int charge_full_design_uah;
+	int voltage_min_design_uv;
+	int voltage_max_design_uv;
+	int tricklecharge_current_ua;
+	int precharge_current_ua;
+	int precharge_voltage_max_uv;
+	int charge_term_current_ua;
+	int charge_restart_voltage_uv;
+	int overvoltage_limit_uv;
+	int constant_charge_current_max_ua;
+	int constant_charge_voltage_max_uv;
+	const struct power_supply_maintenance_charge_table *maintenance_charge;
+	int maintenance_charge_size;
+	int alert_low_temp_charge_current_ua;
+	int alert_low_temp_charge_voltage_uv;
+	int alert_high_temp_charge_current_ua;
+	int alert_high_temp_charge_voltage_uv;
+	int factory_internal_resistance_uohm;
+	int factory_internal_resistance_charging_uohm;
+	int ocv_temp[POWER_SUPPLY_OCV_TEMP_MAX];
+	int temp_ambient_alert_min;
+	int temp_ambient_alert_max;
+	int temp_alert_min;
+	int temp_alert_max;
+	int temp_min;
+	int temp_max;
+	const struct power_supply_battery_ocv_table *ocv_table[POWER_SUPPLY_OCV_TEMP_MAX];
+	int ocv_table_size[POWER_SUPPLY_OCV_TEMP_MAX];
+	const struct power_supply_resistance_temp_table *resist_table;
+	int resist_table_size;
+	const struct power_supply_vbat_ri_table *vbat2ri_discharging;
+	int vbat2ri_discharging_size;
+	const struct power_supply_vbat_ri_table *vbat2ri_charging;
+	int vbat2ri_charging_size;
+	int bti_resistance_ohm;
+	int bti_resistance_tolerance;
 };
 
-extern struct atomic_notifier_head power_supply_notifier;
 extern int power_supply_reg_notifier(struct notifier_block *nb);
 extern void power_supply_unreg_notifier(struct notifier_block *nb);
+#if IS_ENABLED(CONFIG_POWER_SUPPLY)
 extern struct power_supply *power_supply_get_by_name(const char *name);
 extern void power_supply_put(struct power_supply *psy);
-#ifdef CONFIG_OF
-extern struct power_supply *power_supply_get_by_phandle(struct device_node *np,
-							const char *property);
-extern struct power_supply *devm_power_supply_get_by_phandle(
+#else
+static inline void power_supply_put(struct power_supply *psy) {}
+static inline struct power_supply *power_supply_get_by_name(const char *name)
+{ return NULL; }
+#endif
+extern struct power_supply *power_supply_get_by_reference(struct fwnode_handle *fwnode,
+							  const char *property);
+extern struct power_supply *devm_power_supply_get_by_reference(
 				    struct device *dev, const char *property);
-#else /* !CONFIG_OF */
-static inline struct power_supply *
-power_supply_get_by_phandle(struct device_node *np, const char *property)
-{ return NULL; }
-static inline struct power_supply *
-devm_power_supply_get_by_phandle(struct device *dev, const char *property)
-{ return NULL; }
-#endif /* CONFIG_OF */
 
+extern const enum power_supply_property power_supply_battery_info_properties[];
+extern const size_t power_supply_battery_info_properties_size;
 extern int power_supply_get_battery_info(struct power_supply *psy,
-					 struct power_supply_battery_info *info);
+					 struct power_supply_battery_info **info_out);
+extern void power_supply_put_battery_info(struct power_supply *psy,
+					  struct power_supply_battery_info *info);
+extern bool power_supply_battery_info_has_prop(struct power_supply_battery_info *info,
+					       enum power_supply_property psp);
+extern int power_supply_battery_info_get_prop(struct power_supply_battery_info *info,
+					      enum power_supply_property psp,
+					      union power_supply_propval *val);
+extern int power_supply_ocv2cap_simple(const struct power_supply_battery_ocv_table *table,
+				       int table_len, int ocv);
+extern const struct power_supply_battery_ocv_table *
+power_supply_find_ocv2cap_table(struct power_supply_battery_info *info,
+				int temp, int *table_len);
+extern int power_supply_batinfo_ocv2cap(struct power_supply_battery_info *info,
+					int ocv, int temp);
+extern int
+power_supply_temp2resist_simple(const struct power_supply_resistance_temp_table *table,
+				int table_len, int temp);
+extern int power_supply_vbat2ri(struct power_supply_battery_info *info,
+				int vbat_uv, bool charging);
+extern const struct power_supply_maintenance_charge_table *
+power_supply_get_maintenance_charging_setting(struct power_supply_battery_info *info, int index);
+extern bool power_supply_battery_bti_in_range(struct power_supply_battery_info *info,
+					      int resistance);
 extern void power_supply_changed(struct power_supply *psy);
 extern int power_supply_am_i_supplied(struct power_supply *psy);
 int power_supply_get_property_from_supplier(struct power_supply *psy,
 					    enum power_supply_property psp,
 					    union power_supply_propval *val);
-extern int power_supply_set_battery_charged(struct power_supply *psy);
+
+static inline bool
+power_supply_supports_maintenance_charging(struct power_supply_battery_info *info)
+{
+	const struct power_supply_maintenance_charge_table *mt;
+
+	mt = power_supply_get_maintenance_charging_setting(info, 0);
+
+	return (mt != NULL);
+}
+
+static inline bool
+power_supply_supports_vbat2ri(struct power_supply_battery_info *info)
+{
+	return ((info->vbat2ri_discharging != NULL) &&
+		info->vbat2ri_discharging_size > 0);
+}
+
+static inline bool
+power_supply_supports_temp2ri(struct power_supply_battery_info *info)
+{
+	return ((info->resist_table != NULL) &&
+		info->resist_table_size > 0);
+}
 
 #ifdef CONFIG_POWER_SUPPLY
 extern int power_supply_is_system_supplied(void);
@@ -780,11 +880,24 @@ static inline int power_supply_is_system_supplied(void) { return -ENOSYS; }
 extern int power_supply_get_property(struct power_supply *psy,
 			    enum power_supply_property psp,
 			    union power_supply_propval *val);
+int power_supply_get_property_direct(struct power_supply *psy, enum power_supply_property psp,
+				     union power_supply_propval *val);
+#if IS_ENABLED(CONFIG_POWER_SUPPLY)
 extern int power_supply_set_property(struct power_supply *psy,
 			    enum power_supply_property psp,
 			    const union power_supply_propval *val);
-extern int power_supply_property_is_writeable(struct power_supply *psy,
-					enum power_supply_property psp);
+int power_supply_set_property_direct(struct power_supply *psy, enum power_supply_property psp,
+				     const union power_supply_propval *val);
+#else
+static inline int power_supply_set_property(struct power_supply *psy,
+			    enum power_supply_property psp,
+			    const union power_supply_propval *val)
+{ return 0; }
+static inline int power_supply_set_property_direct(struct power_supply *psy,
+						   enum power_supply_property psp,
+						   const union power_supply_propval *val)
+{ return 0; }
+#endif
 extern void power_supply_external_power_changed(struct power_supply *psy);
 
 extern struct power_supply *__must_check
@@ -792,25 +905,24 @@ power_supply_register(struct device *parent,
 				 const struct power_supply_desc *desc,
 				 const struct power_supply_config *cfg);
 extern struct power_supply *__must_check
-power_supply_register_no_ws(struct device *parent,
-				 const struct power_supply_desc *desc,
-				 const struct power_supply_config *cfg);
-extern struct power_supply *__must_check
 devm_power_supply_register(struct device *parent,
-				 const struct power_supply_desc *desc,
-				 const struct power_supply_config *cfg);
-extern struct power_supply *__must_check
-devm_power_supply_register_no_ws(struct device *parent,
 				 const struct power_supply_desc *desc,
 				 const struct power_supply_config *cfg);
 extern void power_supply_unregister(struct power_supply *psy);
 extern int power_supply_powers(struct power_supply *psy, struct device *dev);
 
+extern int __must_check
+power_supply_register_extension(struct power_supply *psy,
+				const struct power_supply_ext *ext,
+				struct device *dev,
+				void *data);
+extern void power_supply_unregister_extension(struct power_supply *psy,
+					      const struct power_supply_ext *ext);
+
 #define to_power_supply(device) container_of(device, struct power_supply, dev)
 
 extern void *power_supply_get_drvdata(struct power_supply *psy);
-/* For APM emulation, think legacy userspace. */
-extern struct class *power_supply_class;
+extern int power_supply_for_each_psy(void *data, int (*fn)(struct power_supply *psy, void *data));
 
 static inline bool power_supply_is_amp_property(enum power_supply_property psp)
 {
@@ -830,12 +942,12 @@ static inline bool power_supply_is_amp_property(enum power_supply_property psp)
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
 	case POWER_SUPPLY_PROP_CURRENT_AVG:
 	case POWER_SUPPLY_PROP_CURRENT_BOOT:
-		return 1;
+		return true;
 	default:
 		break;
 	}
 
-	return 0;
+	return false;
 }
 
 static inline bool power_supply_is_watt_property(enum power_supply_property psp)
@@ -858,12 +970,55 @@ static inline bool power_supply_is_watt_property(enum power_supply_property psp)
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX:
 	case POWER_SUPPLY_PROP_POWER_NOW:
-		return 1;
+		return true;
 	default:
 		break;
 	}
 
-	return 0;
+	return false;
 }
+
+#ifdef CONFIG_SYSFS
+ssize_t power_supply_charge_behaviour_show(struct device *dev,
+					   unsigned int available_behaviours,
+					   enum power_supply_charge_behaviour behaviour,
+					   char *buf);
+
+int power_supply_charge_behaviour_parse(unsigned int available_behaviours, const char *buf);
+ssize_t power_supply_charge_types_show(struct device *dev,
+				       unsigned int available_types,
+				       enum power_supply_charge_type current_type,
+				       char *buf);
+int power_supply_charge_types_parse(unsigned int available_types, const char *buf);
+#else
+static inline
+ssize_t power_supply_charge_behaviour_show(struct device *dev,
+					   unsigned int available_behaviours,
+					   enum power_supply_charge_behaviour behaviour,
+					   char *buf)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int power_supply_charge_behaviour_parse(unsigned int available_behaviours,
+						      const char *buf)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline
+ssize_t power_supply_charge_types_show(struct device *dev,
+				       unsigned int available_types,
+				       enum power_supply_charge_type current_type,
+				       char *buf)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int power_supply_charge_types_parse(unsigned int available_types, const char *buf)
+{
+	return -EOPNOTSUPP;
+}
+#endif
 
 #endif /* __LINUX_POWER_SUPPLY_H__ */

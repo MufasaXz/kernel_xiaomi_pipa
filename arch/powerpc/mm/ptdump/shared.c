@@ -11,27 +11,30 @@
 
 static const struct flag_info flag_array[] = {
 	{
-		.mask	= _PAGE_USER,
-		.val	= _PAGE_USER,
-		.set	= "user",
-		.clear	= "    ",
-	}, {
-		.mask	= _PAGE_RW,
+		.mask	= _PAGE_READ,
 		.val	= 0,
-		.set	= "r ",
-		.clear	= "rw",
+		.set	= " ",
+		.clear	= "r",
 	}, {
-#ifndef CONFIG_PPC_BOOK3S_32
+		.mask	= _PAGE_WRITE,
+		.val	= 0,
+		.set	= " ",
+		.clear	= "w",
+	}, {
 		.mask	= _PAGE_EXEC,
 		.val	= _PAGE_EXEC,
 		.set	= " X ",
 		.clear	= "   ",
 	}, {
-#endif
 		.mask	= _PAGE_PRESENT,
 		.val	= _PAGE_PRESENT,
 		.set	= "present",
 		.clear	= "       ",
+	}, {
+		.mask	= _PAGE_COHERENT,
+		.val	= _PAGE_COHERENT,
+		.set	= "coherent",
+		.clear	= "        ",
 	}, {
 		.mask	= _PAGE_GUARDED,
 		.val	= _PAGE_GUARDED,
@@ -64,9 +67,11 @@ static const struct flag_info flag_array[] = {
 	}
 };
 
-struct pgtable_level pg_level[5] = {
-	{
-	}, { /* pgd */
+struct ptdump_pg_level pg_level[5] = {
+	{ /* pgd */
+		.flag	= flag_array,
+		.num	= ARRAY_SIZE(flag_array),
+	}, { /* p4d */
 		.flag	= flag_array,
 		.num	= ARRAY_SIZE(flag_array),
 	}, { /* pud */

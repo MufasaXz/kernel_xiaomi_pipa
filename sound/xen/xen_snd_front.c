@@ -16,12 +16,12 @@
 #include <xen/xen.h>
 #include <xen/xenbus.h>
 
+#include <xen/xen-front-pgdir-shbuf.h>
 #include <xen/interface/io/sndif.h>
 
 #include "xen_snd_front.h"
 #include "xen_snd_front_alsa.h"
 #include "xen_snd_front_evtchnl.h"
-#include "xen_snd_front_shbuf.h"
 
 static struct xensnd_req *
 be_stream_prepare_req(struct xen_snd_front_evtchnl *evtchnl, u8 operation)
@@ -62,12 +62,12 @@ int xen_snd_front_stream_query_hw_param(struct xen_snd_front_evtchnl *evtchnl,
 	struct xensnd_req *req;
 	int ret;
 
-	mutex_lock(&evtchnl->u.req.req_io_lock);
+	guard(mutex)(&evtchnl->u.req.req_io_lock);
 
-	mutex_lock(&evtchnl->ring_io_lock);
-	req = be_stream_prepare_req(evtchnl, XENSND_OP_HW_PARAM_QUERY);
-	req->op.hw_param = *hw_param_req;
-	mutex_unlock(&evtchnl->ring_io_lock);
+	scoped_guard(mutex, &evtchnl->ring_io_lock) {
+		req = be_stream_prepare_req(evtchnl, XENSND_OP_HW_PARAM_QUERY);
+		req->op.hw_param = *hw_param_req;
+	}
 
 	ret = be_stream_do_io(evtchnl);
 
@@ -77,12 +77,11 @@ int xen_snd_front_stream_query_hw_param(struct xen_snd_front_evtchnl *evtchnl,
 	if (ret == 0)
 		*hw_param_resp = evtchnl->u.req.resp.hw_param;
 
-	mutex_unlock(&evtchnl->u.req.req_io_lock);
 	return ret;
 }
 
 int xen_snd_front_stream_prepare(struct xen_snd_front_evtchnl *evtchnl,
-				 struct xen_snd_front_shbuf *sh_buf,
+				 struct xen_front_pgdir_shbuf *shbuf,
 				 u8 format, unsigned int channels,
 				 unsigned int rate, u32 buffer_sz,
 				 u32 period_sz)
@@ -90,44 +89,43 @@ int xen_snd_front_stream_prepare(struct xen_snd_front_evtchnl *evtchnl,
 	struct xensnd_req *req;
 	int ret;
 
-	mutex_lock(&evtchnl->u.req.req_io_lock);
+	guard(mutex)(&evtchnl->u.req.req_io_lock);
 
-	mutex_lock(&evtchnl->ring_io_lock);
-	req = be_stream_prepare_req(evtchnl, XENSND_OP_OPEN);
-	req->op.open.pcm_format = format;
-	req->op.open.pcm_channels = channels;
-	req->op.open.pcm_rate = rate;
-	req->op.open.buffer_sz = buffer_sz;
-	req->op.open.period_sz = period_sz;
-	req->op.open.gref_directory = xen_snd_front_shbuf_get_dir_start(sh_buf);
-	mutex_unlock(&evtchnl->ring_io_lock);
+	scoped_guard(mutex, &evtchnl->ring_io_lock) {
+		req = be_stream_prepare_req(evtchnl, XENSND_OP_OPEN);
+		req->op.open.pcm_format = format;
+		req->op.open.pcm_channels = channels;
+		req->op.open.pcm_rate = rate;
+		req->op.open.buffer_sz = buffer_sz;
+		req->op.open.period_sz = period_sz;
+		req->op.open.gref_directory =
+			xen_front_pgdir_shbuf_get_dir_start(shbuf);
+	}
 
 	ret = be_stream_do_io(evtchnl);
 
 	if (ret == 0)
 		ret = be_stream_wait_io(evtchnl);
 
-	mutex_unlock(&evtchnl->u.req.req_io_lock);
 	return ret;
 }
 
 int xen_snd_front_stream_close(struct xen_snd_front_evtchnl *evtchnl)
 {
-	struct xensnd_req *req;
+	__always_unused struct xensnd_req *req;
 	int ret;
 
-	mutex_lock(&evtchnl->u.req.req_io_lock);
+	guard(mutex)(&evtchnl->u.req.req_io_lock);
 
-	mutex_lock(&evtchnl->ring_io_lock);
-	req = be_stream_prepare_req(evtchnl, XENSND_OP_CLOSE);
-	mutex_unlock(&evtchnl->ring_io_lock);
+	scoped_guard(mutex, &evtchnl->ring_io_lock) {
+		req = be_stream_prepare_req(evtchnl, XENSND_OP_CLOSE);
+	}
 
 	ret = be_stream_do_io(evtchnl);
 
 	if (ret == 0)
 		ret = be_stream_wait_io(evtchnl);
 
-	mutex_unlock(&evtchnl->u.req.req_io_lock);
 	return ret;
 }
 
@@ -137,20 +135,19 @@ int xen_snd_front_stream_write(struct xen_snd_front_evtchnl *evtchnl,
 	struct xensnd_req *req;
 	int ret;
 
-	mutex_lock(&evtchnl->u.req.req_io_lock);
+	guard(mutex)(&evtchnl->u.req.req_io_lock);
 
-	mutex_lock(&evtchnl->ring_io_lock);
-	req = be_stream_prepare_req(evtchnl, XENSND_OP_WRITE);
-	req->op.rw.length = count;
-	req->op.rw.offset = pos;
-	mutex_unlock(&evtchnl->ring_io_lock);
+	scoped_guard(mutex, &evtchnl->ring_io_lock) {
+		req = be_stream_prepare_req(evtchnl, XENSND_OP_WRITE);
+		req->op.rw.length = count;
+		req->op.rw.offset = pos;
+	}
 
 	ret = be_stream_do_io(evtchnl);
 
 	if (ret == 0)
 		ret = be_stream_wait_io(evtchnl);
 
-	mutex_unlock(&evtchnl->u.req.req_io_lock);
 	return ret;
 }
 
@@ -160,20 +157,19 @@ int xen_snd_front_stream_read(struct xen_snd_front_evtchnl *evtchnl,
 	struct xensnd_req *req;
 	int ret;
 
-	mutex_lock(&evtchnl->u.req.req_io_lock);
+	guard(mutex)(&evtchnl->u.req.req_io_lock);
 
-	mutex_lock(&evtchnl->ring_io_lock);
-	req = be_stream_prepare_req(evtchnl, XENSND_OP_READ);
-	req->op.rw.length = count;
-	req->op.rw.offset = pos;
-	mutex_unlock(&evtchnl->ring_io_lock);
+	scoped_guard(mutex, &evtchnl->ring_io_lock) {
+		req = be_stream_prepare_req(evtchnl, XENSND_OP_READ);
+		req->op.rw.length = count;
+		req->op.rw.offset = pos;
+	}
 
 	ret = be_stream_do_io(evtchnl);
 
 	if (ret == 0)
 		ret = be_stream_wait_io(evtchnl);
 
-	mutex_unlock(&evtchnl->u.req.req_io_lock);
 	return ret;
 }
 
@@ -183,19 +179,18 @@ int xen_snd_front_stream_trigger(struct xen_snd_front_evtchnl *evtchnl,
 	struct xensnd_req *req;
 	int ret;
 
-	mutex_lock(&evtchnl->u.req.req_io_lock);
+	guard(mutex)(&evtchnl->u.req.req_io_lock);
 
-	mutex_lock(&evtchnl->ring_io_lock);
-	req = be_stream_prepare_req(evtchnl, XENSND_OP_TRIGGER);
-	req->op.trigger.type = type;
-	mutex_unlock(&evtchnl->ring_io_lock);
+	scoped_guard(mutex, &evtchnl->ring_io_lock) {
+		req = be_stream_prepare_req(evtchnl, XENSND_OP_TRIGGER);
+		req->op.trigger.type = type;
+	}
 
 	ret = be_stream_do_io(evtchnl);
 
 	if (ret == 0)
 		ret = be_stream_wait_io(evtchnl);
 
-	mutex_unlock(&evtchnl->u.req.req_io_lock);
 	return ret;
 }
 
@@ -245,11 +240,8 @@ static void sndback_changed(struct xenbus_device *xb_dev,
 
 	switch (backend_state) {
 	case XenbusStateReconfiguring:
-		/* fall through */
 	case XenbusStateReconfigured:
-		/* fall through */
 	case XenbusStateInitialised:
-		/* fall through */
 		break;
 
 	case XenbusStateInitialising:
@@ -288,7 +280,6 @@ static void sndback_changed(struct xenbus_device *xb_dev,
 		break;
 
 	case XenbusStateUnknown:
-		/* fall through */
 	case XenbusStateClosed:
 		if (xb_dev->state == XenbusStateClosed)
 			break;
@@ -314,7 +305,7 @@ static int xen_drv_probe(struct xenbus_device *xb_dev,
 	return xenbus_switch_state(xb_dev, XenbusStateInitialising);
 }
 
-static int xen_drv_remove(struct xenbus_device *dev)
+static void xen_drv_remove(struct xenbus_device *dev)
 {
 	struct xen_snd_front_info *front_info = dev_get_drvdata(&dev->dev);
 	int to = 100;
@@ -348,7 +339,6 @@ static int xen_drv_remove(struct xenbus_device *dev)
 
 	xen_snd_drv_fini(front_info);
 	xenbus_frontend_closed(dev);
-	return 0;
 }
 
 static const struct xenbus_device_id xen_drv_ids[] = {
@@ -361,6 +351,7 @@ static struct xenbus_driver xen_driver = {
 	.probe = xen_drv_probe,
 	.remove = xen_drv_remove,
 	.otherend_changed = sndback_changed,
+	.not_essential = true,
 };
 
 static int __init xen_drv_init(void)
@@ -394,4 +385,3 @@ module_exit(xen_drv_fini);
 MODULE_DESCRIPTION("Xen virtual sound device frontend");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("xen:" XENSND_DRIVER_NAME);
-MODULE_SUPPORTED_DEVICE("{{ALSA,Virtual soundcard}}");

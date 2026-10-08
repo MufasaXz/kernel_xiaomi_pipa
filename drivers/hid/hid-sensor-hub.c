@@ -1,20 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * HID Sensors Driver
  * Copyright (c) 2012, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
- *
  */
 
 #include <linux/device.h>
@@ -31,7 +18,6 @@
 
 /**
  * struct sensor_hub_data - Hold a instance data for a HID hub device
- * @hsdev:		Stored hid instance for current hub device.
  * @mutex:		Mutex to serialize synchronous request.
  * @lock:		Spin lock to protect pending request structure.
  * @dyn_callback_list:	Holds callback function
@@ -47,7 +33,6 @@ struct sensor_hub_data {
 	spinlock_t dyn_callback_lock;
 	struct mfd_cell *hid_sensor_hub_client_devs;
 	int hid_sensor_client_cnt;
-	unsigned long quirks;
 	int ref_cnt;
 };
 
@@ -55,6 +40,7 @@ struct sensor_hub_data {
  * struct hid_sensor_hub_callbacks_list - Stores callback list
  * @list:		list head.
  * @usage_id:		usage id for a physical device.
+ * @hsdev:		Stored hid instance for current hub device.
  * @usage_callback:	Stores registered callback functions.
  * @priv:		Private data for a physical device.
  */
@@ -411,7 +397,8 @@ int sensor_hub_input_get_attribute_info(struct hid_sensor_hub_device *hsdev,
 		for (i = 0; i < report->maxfield; ++i) {
 			field = report->field[i];
 			if (field->maxusage) {
-				if (field->physical == usage_id &&
+				if ((field->physical == usage_id ||
+				     field->application == usage_id) &&
 					(field->logical == attr_usage_id ||
 					field->usage[0].hid ==
 							attr_usage_id) &&
@@ -520,7 +507,8 @@ static int sensor_hub_raw_event(struct hid_device *hdev,
 					collection->usage);
 
 		callback = sensor_hub_get_callback(hdev,
-				report->field[i]->physical,
+				report->field[i]->physical ? report->field[i]->physical :
+							     report->field[i]->application,
 				report->field[i]->usage[0].collection_index,
 				&hsdev, &priv);
 		if (!callback) {
@@ -592,7 +580,7 @@ void sensor_hub_device_close(struct hid_sensor_hub_device *hsdev)
 }
 EXPORT_SYMBOL_GPL(sensor_hub_device_close);
 
-static __u8 *sensor_hub_report_fixup(struct hid_device *hdev, __u8 *rdesc,
+static const __u8 *sensor_hub_report_fixup(struct hid_device *hdev, __u8 *rdesc,
 		unsigned int *rsize)
 {
 	/*
@@ -633,7 +621,6 @@ static int sensor_hub_probe(struct hid_device *hdev,
 	}
 
 	hid_set_drvdata(hdev, sd);
-	sd->quirks = id->driver_data;
 
 	spin_lock_init(&sd->lock);
 	spin_lock_init(&sd->dyn_callback_lock);
@@ -645,7 +632,7 @@ static int sensor_hub_probe(struct hid_device *hdev,
 	}
 	INIT_LIST_HEAD(&hdev->inputs);
 
-	ret = hid_hw_start(hdev, 0);
+	ret = hid_hw_start(hdev, HID_CONNECT_DEFAULT | HID_CONNECT_DRIVER);
 	if (ret) {
 		hid_err(hdev, "hw start failed\n");
 		return ret;
@@ -768,7 +755,6 @@ static void sensor_hub_remove(struct hid_device *hdev)
 	spin_unlock_irqrestore(&data->lock, flags);
 
 	mfd_remove_devices(&hdev->dev);
-	hid_set_drvdata(hdev, NULL);
 	mutex_destroy(&data->mutex);
 }
 

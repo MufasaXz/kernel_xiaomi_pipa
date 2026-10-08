@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	Sound core.  This file is composed of two parts.  sound_class
  *	which is common to both OSS and ALSA and OSS sound core which
@@ -22,19 +23,22 @@ static inline int init_oss_soundcore(void)	{ return 0; }
 static inline void cleanup_oss_soundcore(void)	{ }
 #endif
 
-struct class *sound_class;
-EXPORT_SYMBOL(sound_class);
-
 MODULE_DESCRIPTION("Core sound module");
 MODULE_AUTHOR("Alan Cox");
 MODULE_LICENSE("GPL");
 
-static char *sound_devnode(struct device *dev, umode_t *mode)
+static char *sound_devnode(const struct device *dev, umode_t *mode)
 {
 	if (MAJOR(dev->devt) == SOUND_MAJOR)
 		return NULL;
 	return kasprintf(GFP_KERNEL, "snd/%s", dev_name(dev));
 }
+
+const struct class sound_class = {
+	.name = "sound",
+	.devnode = sound_devnode,
+};
+EXPORT_SYMBOL(sound_class);
 
 static int __init init_soundcore(void)
 {
@@ -44,13 +48,11 @@ static int __init init_soundcore(void)
 	if (rc)
 		return rc;
 
-	sound_class = class_create(THIS_MODULE, "sound");
-	if (IS_ERR(sound_class)) {
+	rc = class_register(&sound_class);
+	if (rc) {
 		cleanup_oss_soundcore();
-		return PTR_ERR(sound_class);
+		return rc;
 	}
-
-	sound_class->devnode = sound_devnode;
 
 	return 0;
 }
@@ -58,7 +60,7 @@ static int __init init_soundcore(void)
 static void __exit cleanup_soundcore(void)
 {
 	cleanup_oss_soundcore();
-	class_destroy(sound_class);
+	class_unregister(&sound_class);
 }
 
 subsys_initcall(init_soundcore);
@@ -72,12 +74,6 @@ module_exit(cleanup_soundcore);
  *	Author:		Alan Cox <alan@lxorguk.ukuu.org.uk>
  *
  *	Fixes:
- *
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
  *
  *                         --------------------
  * 
@@ -141,11 +137,7 @@ struct sound_unit
  * All these clutters are scheduled to be removed along with
  * sound-slot/service-* module aliases.
  */
-#ifdef CONFIG_SOUND_OSS_CORE_PRECLAIM
-static int preclaim_oss = 1;
-#else
-static int preclaim_oss = 0;
-#endif
+static int preclaim_oss = IS_ENABLED(CONFIG_SOUND_OSS_CORE_PRECLAIM);
 
 module_param(preclaim_oss, int, 0444);
 
@@ -285,7 +277,7 @@ retry:
 		}
 	}
 
-	device_create(sound_class, dev, MKDEV(SOUND_MAJOR, s->unit_minor),
+	device_create(&sound_class, dev, MKDEV(SOUND_MAJOR, s->unit_minor),
 		      NULL, "%s", s->name+6);
 	return s->unit_minor;
 
@@ -311,7 +303,7 @@ static void sound_remove_unit(struct sound_unit **list, int unit)
 		if (!preclaim_oss)
 			__unregister_chrdev(SOUND_MAJOR, p->unit_minor, 1,
 					    p->name);
-		device_destroy(sound_class, MKDEV(SOUND_MAJOR, p->unit_minor));
+		device_destroy(&sound_class, MKDEV(SOUND_MAJOR, p->unit_minor));
 		kfree(p);
 	}
 }
@@ -586,20 +578,20 @@ static int soundcore_open(struct inode *inode, struct file *file)
 			new_fops = fops_get(s->unit_fops);
 	}
 	spin_unlock(&sound_loader_lock);
-	if (new_fops) {
-		/*
-		 * We rely upon the fact that we can't be unloaded while the
-		 * subdriver is there.
-		 */
-		int err = 0;
-		replace_fops(file, new_fops);
 
-		if (file->f_op->open)
-			err = file->f_op->open(inode,file);
+	if (!new_fops)
+		return -ENODEV;
 
-		return err;
-	}
-	return -ENODEV;
+	/*
+	 * We rely upon the fact that we can't be unloaded while the
+	 * subdriver is there.
+	 */
+	replace_fops(file, new_fops);
+
+	if (!file->f_op->open)
+		return -ENODEV;
+
+	return file->f_op->open(inode, file);
 }
 
 MODULE_ALIAS_CHARDEV_MAJOR(SOUND_MAJOR);

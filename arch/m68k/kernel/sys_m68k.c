@@ -27,6 +27,7 @@
 #include <asm/cachectl.h>
 #include <asm/traps.h>
 #include <asm/page.h>
+#include <asm/syscalls.h>
 #include <asm/unistd.h>
 #include <asm/cacheflush.h>
 
@@ -34,8 +35,7 @@
 
 #include <asm/tlb.h>
 
-asmlinkage int do_page_fault(struct pt_regs *regs, unsigned long address,
-			     unsigned long error_code);
+#include "../mm/fault.h"
 
 asmlinkage long sys_mmap2(unsigned long addr, unsigned long len,
 	unsigned long prot, unsigned long flags,
@@ -402,8 +402,8 @@ sys_cacheflush (unsigned long addr, int scope, int cache, unsigned long len)
 		 * to this process.
 		 */
 		mmap_read_lock(current->mm);
-		vma = find_vma(current->mm, addr);
-		if (!vma || addr < vma->vm_start || addr + len > vma->vm_end)
+		vma = vma_lookup(current->mm, addr);
+		if (!vma || addr + len > vma->vm_end)
 			goto out_unlock;
 	}
 
@@ -467,6 +467,8 @@ sys_atomic_cmpxchg_32(unsigned long newval, int oldval, int d3, int d4, int d5,
 	for (;;) {
 		struct mm_struct *mm = current->mm;
 		pgd_t *pgd;
+		p4d_t *p4d;
+		pud_t *pud;
 		pmd_t *pmd;
 		pte_t *pte;
 		spinlock_t *ptl;
@@ -476,10 +478,18 @@ sys_atomic_cmpxchg_32(unsigned long newval, int oldval, int d3, int d4, int d5,
 		pgd = pgd_offset(mm, (unsigned long)mem);
 		if (!pgd_present(*pgd))
 			goto bad_access;
-		pmd = pmd_offset(pgd, (unsigned long)mem);
+		p4d = p4d_offset(pgd, (unsigned long)mem);
+		if (!p4d_present(*p4d))
+			goto bad_access;
+		pud = pud_offset(p4d, (unsigned long)mem);
+		if (!pud_present(*pud))
+			goto bad_access;
+		pmd = pmd_offset(pud, (unsigned long)mem);
 		if (!pmd_present(*pmd))
 			goto bad_access;
 		pte = pte_offset_map_lock(mm, pmd, (unsigned long)mem, &ptl);
+		if (!pte)
+			goto bad_access;
 		if (!pte_present(*pte) || !pte_dirty(*pte)
 		    || !pte_write(*pte)) {
 			pte_unmap_unlock(pte, ptl);

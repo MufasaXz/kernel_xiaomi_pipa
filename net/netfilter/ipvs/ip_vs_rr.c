@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * IPVS:        Round-Robin Scheduling module
  *
  * Authors:     Wensong Zhang <wensong@linuxvirtualserver.org>
  *              Peter Kese <peter.kese@ijs.si>
- *
- *              This program is free software; you can redistribute it and/or
- *              modify it under the terms of the GNU General Public License
- *              as published by the Free Software Foundation; either version
- *              2 of the License, or (at your option) any later version.
  *
  * Fixes/Changes:
  *     Wensong Zhang            :     changed the ip_vs_rr_schedule to return dest
@@ -16,7 +12,6 @@
  *     Wensong Zhang            :     changed for the d-linked destination list
  *     Wensong Zhang            :     added the ip_vs_rr_update_svc
  *     Wensong Zhang            :     added any dest with weight=0 is quiesced
- *
  */
 
 #define KMSG_COMPONENT "IPVS"
@@ -127,4 +122,5 @@ static void __exit ip_vs_rr_cleanup(void)
 
 module_init(ip_vs_rr_init);
 module_exit(ip_vs_rr_cleanup);
+MODULE_DESCRIPTION("ipvs round-robin scheduler");
 MODULE_LICENSE("GPL");

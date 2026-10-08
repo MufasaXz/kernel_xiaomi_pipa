@@ -72,7 +72,7 @@ static int check_node_data(struct jffs2_sb_info *c, struct jffs2_tmp_dnode_info 
 		if (err != -EOPNOTSUPP)
 			JFFS2_WARNING("MTD point failed: error code %d.\n", err);
 	} else
-		pointed = 1; /* succefully pointed to device */
+		pointed = 1; /* successfully pointed to device */
 #endif
 
 	if (!pointed) {
@@ -1289,7 +1289,7 @@ static int jffs2_do_read_inode_internal(struct jffs2_sb_info *c,
 			dbg_readinode("symlink's target '%s' cached\n", f->target);
 		}
 
-		/* fall through... */
+		fallthrough;
 
 	case S_IFBLK:
 	case S_IFCHR:

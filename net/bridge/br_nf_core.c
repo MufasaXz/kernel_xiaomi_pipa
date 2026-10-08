@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	Handle firewalling core
  *	Linux ethernet bridge
@@ -5,11 +6,6 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *	Bart De Schuymer		<bdschuym@pandora.be>
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
  *
  *	Lennert dedicates this file to Kerstin Wurdinger.
  */
@@ -73,7 +69,7 @@ void br_netfilter_rtable_init(struct net_bridge *br)
 {
 	struct rtable *rt = &br->fake_rtable;
 
-	atomic_set(&rt->dst.__refcnt, 1);
+	rcuref_init(&rt->dst.__rcuref, 1);
 	rt->dst.dev = br->dev;
 	dst_init_metrics(&rt->dst, br->metrics, false);
 	dst_metric_set(&rt->dst, RTAX_MTU, br->dev->mtu);

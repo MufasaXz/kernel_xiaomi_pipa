@@ -70,8 +70,8 @@ static ssize_t notrace sth_stm_packet(struct stm_data *stm_data,
 	struct sth_device *sth = container_of(stm_data, struct sth_device, stm);
 	struct intel_th_channel __iomem *out =
 		sth_channel(sth, master, channel);
-	u64 __iomem *outp = &out->Dn;
 	unsigned long reg = REG_STH_TRIG;
+	u64 __iomem *outp;
 
 #ifndef CONFIG_64BIT
 	if (size > 4)
@@ -84,8 +84,12 @@ static ssize_t notrace sth_stm_packet(struct stm_data *stm_data,
 	/* Global packets (GERR, XSYNC, TRIG) are sent with register writes */
 	case STP_PACKET_GERR:
 		reg += 4;
+		fallthrough;
+
 	case STP_PACKET_XSYNC:
 		reg += 8;
+		fallthrough;
+
 	case STP_PACKET_TRIG:
 		if (flags & STP_PACKET_TIMESTAMPED)
 			reg += 4;

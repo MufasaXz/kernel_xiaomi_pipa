@@ -283,6 +283,7 @@ static int valid_args(__u32 *pdev_nr, __u32 *rhport,
 	case USB_SPEED_HIGH:
 	case USB_SPEED_WIRELESS:
 	case USB_SPEED_SUPER:
+	case USB_SPEED_SUPER_PLUS:
 		break;
 	default:
 		pr_err("Failed attach request for unsupported USB speed: %s\n",
@@ -349,7 +350,7 @@ static ssize_t attach_store(struct device *dev, struct device_attribute *attr,
 	vhci_hcd = hcd_to_vhci_hcd(hcd);
 	vhci = vhci_hcd->vhci;
 
-	if (speed == USB_SPEED_SUPER)
+	if (speed >= USB_SPEED_SUPER)
 		vdev = &vhci->vhci_hcd_ss->vdev[rhport];
 	else
 		vdev = &vhci->vhci_hcd_hs->vdev[rhport];
@@ -424,6 +425,7 @@ static ssize_t attach_store(struct device *dev, struct device_attribute *attr,
 	vdev->ud.tcp_rx     = tcp_rx;
 	vdev->ud.tcp_tx     = tcp_tx;
 	vdev->ud.status     = VDEV_ST_NOTASSIGNED;
+	usbip_kcov_handle_init(&vdev->ud);
 
 	spin_unlock(&vdev->ud.lock);
 	spin_unlock_irqrestore(&vhci->lock, flags);

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 #
 # Near Field Communication (NFC) devices
 #
@@ -48,6 +49,17 @@ config NFC_PORT100
 
 	  If unsure, say N.
 
+config NFC_VIRTUAL_NCI
+	tristate "NCI device simulator driver"
+	depends on NFC_NCI
+	help
+	  NCI virtual device simulates a NCI device to the user.
+	  It can be used to validate the NCI module and applications.
+	  This driver supports communication between the virtual NCI device and
+	  module.
+
+	  If unsure, say N.
+
 source "drivers/nfc/fdp/Kconfig"
 source "drivers/nfc/pn544/Kconfig"
 source "drivers/nfc/pn533/Kconfig"
@@ -59,11 +71,3 @@ source "drivers/nfc/nxp-nci/Kconfig"
 source "drivers/nfc/s3fwrn5/Kconfig"
 source "drivers/nfc/st95hf/Kconfig"
 endmenu
-
-config NFC_NQ
-        tristate "QTI NCI based NFC Controller Driver for NQx"
-        depends on I2C
-        help
-          This enables the NFC driver for NQx based devices.
-          This is for i2c connected version. NCI protocol logic
-          resides in the usermode and it has no other NFC dependencies.

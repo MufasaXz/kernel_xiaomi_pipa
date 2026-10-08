@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * HID driver for Holtek gaming mice
  * Copyright (c) 2013 Christian Ohm
@@ -6,10 +7,6 @@
 */
 
 /*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
  */
 
 #include <linux/hid.h>
@@ -32,8 +29,8 @@
  * - USB ID 04d9:a0c2, sold as ETEKCITY Scroll T-140 Gaming Mouse
  */
 
-static __u8 *holtek_mouse_report_fixup(struct hid_device *hdev, __u8 *rdesc,
-		unsigned int *rsize)
+static const __u8 *holtek_mouse_report_fixup(struct hid_device *hdev,
+		__u8 *rdesc, unsigned int *rsize)
 {
 	struct usb_interface *intf = to_usb_interface(hdev->dev.parent);
 
@@ -113,4 +110,5 @@ static struct hid_driver holtek_mouse_driver = {
 };
 
 module_hid_driver(holtek_mouse_driver);
+MODULE_DESCRIPTION("HID driver for Holtek gaming mice");
 MODULE_LICENSE("GPL");

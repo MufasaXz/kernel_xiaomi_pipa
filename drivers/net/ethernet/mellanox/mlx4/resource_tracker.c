@@ -300,7 +300,7 @@ static const char *resource_str(enum mlx4_resource rt)
 	case RES_FS_RULE: return "RES_FS_RULE";
 	case RES_XRCD: return "RES_XRCD";
 	default: return "Unknown resource type !!!";
-	};
+	}
 }
 
 static void rem_slave_vlans(struct mlx4_dev *dev, int slave);
@@ -2660,6 +2660,7 @@ int mlx4_FREE_RES_wrapper(struct mlx4_dev *dev, int slave,
 	case RES_XRCD:
 		err = xrcdn_free_res(dev, slave, vhcr->op_modifier, alop,
 				     vhcr->in_param, &vhcr->out_param);
+		break;
 
 	default:
 		break;
@@ -4739,7 +4740,6 @@ static void rem_slave_srqs(struct mlx4_dev *dev, int slave)
 	struct res_srq *tmp;
 	int state;
 	u64 in_param;
-	LIST_HEAD(tlist);
 	int srqn;
 	int err;
 
@@ -4805,7 +4805,6 @@ static void rem_slave_cqs(struct mlx4_dev *dev, int slave)
 	struct res_cq *tmp;
 	int state;
 	u64 in_param;
-	LIST_HEAD(tlist);
 	int cqn;
 	int err;
 
@@ -4868,7 +4867,6 @@ static void rem_slave_mrs(struct mlx4_dev *dev, int slave)
 	struct res_mpt *tmp;
 	int state;
 	u64 in_param;
-	LIST_HEAD(tlist);
 	int mptn;
 	int err;
 
@@ -4936,7 +4934,6 @@ static void rem_slave_mtts(struct mlx4_dev *dev, int slave)
 	struct res_mtt *mtt;
 	struct res_mtt *tmp;
 	int state;
-	LIST_HEAD(tlist);
 	int base;
 	int err;
 
@@ -5126,7 +5123,6 @@ static void rem_slave_eqs(struct mlx4_dev *dev, int slave)
 	struct res_eq *tmp;
 	int err;
 	int state;
-	LIST_HEAD(tlist);
 	int eqn;
 
 	err = move_all_busy(dev, slave, RES_EQ);

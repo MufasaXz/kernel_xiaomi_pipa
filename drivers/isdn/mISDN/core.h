@@ -1,15 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright 2008  by Karsten Keil <kkeil@novell.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #ifndef mISDN_CORE_H
@@ -64,7 +55,6 @@ extern void	__add_layer2(struct mISDNchannel *, struct mISDNstack *);
 
 extern u_int		get_all_Bprotocols(void);
 struct Bprotocol	*get_Bprotocol4mask(u_int);
-struct Bprotocol	*get_Bprotocol4id(u_int);
 
 extern int	mISDN_inittimer(u_int *);
 extern void	mISDN_timer_cleanup(void);

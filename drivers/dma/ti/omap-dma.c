@@ -1,10 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * OMAP DMAengine support
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
+#include <linux/cpu_pm.h>
 #include <linux/delay.h>
 #include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
@@ -18,13 +16,28 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/of.h>
 #include <linux/of_dma.h>
-#include <linux/of_device.h>
 
 #include "../virt-dma.h"
 
 #define OMAP_SDMA_REQUESTS	127
 #define OMAP_SDMA_CHANNELS	32
+
+struct omap_dma_config {
+	int lch_end;
+	unsigned int rw_priority:1;
+	unsigned int needs_busy_check:1;
+	unsigned int may_lose_context:1;
+	unsigned int needs_lch_clear:1;
+};
+
+struct omap_dma_context {
+	u32 irqenable_l0;
+	u32 irqenable_l1;
+	u32 ocp_sysconfig;
+	u32 gcr;
+};
 
 struct omap_dmadev {
 	struct dma_device ddev;
@@ -32,6 +45,12 @@ struct omap_dmadev {
 	void __iomem *base;
 	const struct omap_dma_reg *reg_map;
 	struct omap_system_dma_plat_info *plat;
+	const struct omap_dma_config *cfg;
+	struct notifier_block nb;
+	struct omap_dma_context context;
+	int lch_count;
+	DECLARE_BITMAP(lch_bitmap, OMAP_SDMA_CHANNELS);
+	struct mutex lch_lock;		/* for assigning logical channels */
 	bool legacy;
 	bool ll123_supported;
 	struct dma_pool *desc_pool;
@@ -94,6 +113,7 @@ struct omap_desc {
 	bool using_ll;
 	enum dma_transfer_direction dir;
 	dma_addr_t dev_addr;
+	bool polled;
 
 	int32_t fi;		/* for OMAP_DMA_SYNC_PACKET / double indexing */
 	int16_t ei;		/* for double indexing */
@@ -104,7 +124,7 @@ struct omap_desc {
 	uint32_t csdp;		/* CSDP value */
 
 	unsigned sglen;
-	struct omap_sg sg[0];
+	struct omap_sg sg[] __counted_by(sglen);
 };
 
 enum {
@@ -205,6 +225,7 @@ static const unsigned es_bytes[] = {
 	[CSDP_DATA_TYPE_32] = 4,
 };
 
+static bool omap_dma_filter_fn(struct dma_chan *chan, void *param);
 static struct of_dma_filter_info omap_dma_info = {
 	.filter_fn = omap_dma_filter_fn,
 };
@@ -375,6 +396,19 @@ static unsigned omap_dma_get_csr(struct omap_chan *c)
 		omap_dma_chan_write(c, CSR, val);
 
 	return val;
+}
+
+static void omap_dma_clear_lch(struct omap_dmadev *od, int lch)
+{
+	struct omap_chan *c;
+	int i;
+
+	c = od->lch_map[lch];
+	if (!c)
+		return;
+
+	for (i = CSDP; i <= od->cfg->lch_end; i++)
+		omap_dma_chan_write(c, i, 0);
 }
 
 static void omap_dma_assign(struct omap_dmadev *od, struct omap_chan *c,
@@ -634,6 +668,42 @@ static irqreturn_t omap_dma_irq(int irq, void *devid)
 	return IRQ_HANDLED;
 }
 
+static int omap_dma_get_lch(struct omap_dmadev *od, int *lch)
+{
+	int channel;
+
+	mutex_lock(&od->lch_lock);
+	channel = find_first_zero_bit(od->lch_bitmap, od->lch_count);
+	if (channel >= od->lch_count)
+		goto out_busy;
+	set_bit(channel, od->lch_bitmap);
+	mutex_unlock(&od->lch_lock);
+
+	omap_dma_clear_lch(od, channel);
+	*lch = channel;
+
+	return 0;
+
+out_busy:
+	mutex_unlock(&od->lch_lock);
+	*lch = -EINVAL;
+
+	return -EBUSY;
+}
+
+static void omap_dma_put_lch(struct omap_dmadev *od, int lch)
+{
+	omap_dma_clear_lch(od, lch);
+	mutex_lock(&od->lch_lock);
+	clear_bit(lch, od->lch_bitmap);
+	mutex_unlock(&od->lch_lock);
+}
+
+static inline bool omap_dma_legacy(struct omap_dmadev *od)
+{
+	return IS_ENABLED(CONFIG_ARCH_OMAP1) && od->legacy;
+}
+
 static int omap_dma_alloc_chan_resources(struct dma_chan *chan)
 {
 	struct omap_dmadev *od = to_omap_dma_dev(chan->device);
@@ -641,12 +711,11 @@ static int omap_dma_alloc_chan_resources(struct dma_chan *chan)
 	struct device *dev = od->ddev.dev;
 	int ret;
 
-	if (od->legacy) {
+	if (omap_dma_legacy(od)) {
 		ret = omap_request_dma(c->dma_sig, "DMA engine",
 				       omap_dma_callback, c, &c->dma_ch);
 	} else {
-		ret = omap_request_dma(c->dma_sig, "DMA engine", NULL, NULL,
-				       &c->dma_ch);
+		ret = omap_dma_get_lch(od, &c->dma_ch);
 	}
 
 	dev_dbg(dev, "allocating channel %u for %u\n", c->dma_ch, c->dma_sig);
@@ -654,7 +723,7 @@ static int omap_dma_alloc_chan_resources(struct dma_chan *chan)
 	if (ret >= 0) {
 		omap_dma_assign(od, c, c->dma_ch);
 
-		if (!od->legacy) {
+		if (!omap_dma_legacy(od)) {
 			unsigned val;
 
 			spin_lock_irq(&od->irq_lock);
@@ -693,7 +762,7 @@ static void omap_dma_free_chan_resources(struct dma_chan *chan)
 	struct omap_dmadev *od = to_omap_dma_dev(chan->device);
 	struct omap_chan *c = to_omap_dma_chan(chan);
 
-	if (!od->legacy) {
+	if (!omap_dma_legacy(od)) {
 		spin_lock_irq(&od->irq_lock);
 		od->irq_enable_mask &= ~BIT(c->dma_ch);
 		omap_dma_glbl_write(od, IRQENABLE_L1, od->irq_enable_mask);
@@ -703,7 +772,11 @@ static void omap_dma_free_chan_resources(struct dma_chan *chan)
 	c->channel_base = NULL;
 	od->lch_map[c->dma_ch] = NULL;
 	vchan_free_chan_resources(&c->vc);
-	omap_free_dma(c->dma_ch);
+
+	if (omap_dma_legacy(od))
+		omap_free_dma(c->dma_ch);
+	else
+		omap_dma_put_lch(od, c->dma_ch);
 
 	dev_dbg(od->ddev.dev, "freeing channel %u used for %u\n", c->dma_ch,
 		c->dma_sig);
@@ -815,31 +888,22 @@ static enum dma_status omap_dma_tx_status(struct dma_chan *chan,
 	dma_cookie_t cookie, struct dma_tx_state *txstate)
 {
 	struct omap_chan *c = to_omap_dma_chan(chan);
-	struct virt_dma_desc *vd;
 	enum dma_status ret;
 	unsigned long flags;
+	struct omap_desc *d = NULL;
 
 	ret = dma_cookie_status(chan, cookie, txstate);
-
-	if (!c->paused && c->running) {
-		uint32_t ccr = omap_dma_chan_read(c, CCR);
-		/*
-		 * The channel is no longer active, set the return value
-		 * accordingly
-		 */
-		if (!(ccr & CCR_ENABLE))
-			ret = DMA_COMPLETE;
-	}
-
-	if (ret == DMA_COMPLETE || !txstate)
+	if (ret == DMA_COMPLETE)
 		return ret;
 
 	spin_lock_irqsave(&c->vc.lock, flags);
-	vd = vchan_find_desc(&c->vc, cookie);
-	if (vd) {
-		txstate->residue = omap_dma_desc_size(to_omap_dma_desc(&vd->tx));
-	} else if (c->desc && c->desc->vd.tx.cookie == cookie) {
-		struct omap_desc *d = c->desc;
+	if (c->desc && c->desc->vd.tx.cookie == cookie)
+		d = c->desc;
+
+	if (!txstate)
+		goto out;
+
+	if (d) {
 		dma_addr_t pos;
 
 		if (d->dir == DMA_MEM_TO_DEV)
@@ -851,10 +915,31 @@ static enum dma_status omap_dma_tx_status(struct dma_chan *chan,
 
 		txstate->residue = omap_dma_desc_size_pos(d, pos);
 	} else {
-		txstate->residue = 0;
+		struct virt_dma_desc *vd = vchan_find_desc(&c->vc, cookie);
+
+		if (vd)
+			txstate->residue = omap_dma_desc_size(
+						to_omap_dma_desc(&vd->tx));
+		else
+			txstate->residue = 0;
 	}
-	if (ret == DMA_IN_PROGRESS && c->paused)
+
+out:
+	if (ret == DMA_IN_PROGRESS && c->paused) {
 		ret = DMA_PAUSED;
+	} else if (d && d->polled && c->running) {
+		uint32_t ccr = omap_dma_chan_read(c, CCR);
+		/*
+		 * The channel is no longer active, set the return value
+		 * accordingly and mark it as completed
+		 */
+		if (!(ccr & CCR_ENABLE)) {
+			ret = DMA_COMPLETE;
+			omap_dma_start_desc(c);
+			vchan_cookie_complete(&d->vd);
+		}
+	}
+
 	spin_unlock_irqrestore(&c->vc.lock, flags);
 
 	return ret;
@@ -920,6 +1005,7 @@ static struct dma_async_tx_descriptor *omap_dma_prep_slave_sg(
 	d = kzalloc(struct_size(d, sg, sglen), GFP_ATOMIC);
 	if (!d)
 		return NULL;
+	d->sglen = sglen;
 
 	d->dir = dir;
 	d->dev_addr = dev_addr;
@@ -1035,8 +1121,6 @@ static struct dma_async_tx_descriptor *omap_dma_prep_slave_sg(
 		}
 	}
 
-	d->sglen = sglen;
-
 	/* Release the dma_pool entries if one allocation failed */
 	if (ll_failed) {
 		for (i = 0; i < d->sglen; i++) {
@@ -1102,10 +1186,10 @@ static struct dma_async_tx_descriptor *omap_dma_prep_dma_cyclic(
 	d->dev_addr = dev_addr;
 	d->fi = burst;
 	d->es = es;
+	d->sglen = 1;
 	d->sg[0].addr = buf_addr;
 	d->sg[0].en = period_len / es_bytes[es];
 	d->sg[0].fn = buf_len / period_len;
-	d->sglen = 1;
 
 	d->ccr = c->ccr;
 	if (dir == DMA_DEV_TO_MEM)
@@ -1174,14 +1258,17 @@ static struct dma_async_tx_descriptor *omap_dma_prep_dma_memcpy(
 	d->dev_addr = src;
 	d->fi = 0;
 	d->es = data_type;
+	d->sglen = 1;
 	d->sg[0].en = len / BIT(data_type);
 	d->sg[0].fn = 1;
 	d->sg[0].addr = dest;
-	d->sglen = 1;
 	d->ccr = c->ccr;
 	d->ccr |= CCR_DST_AMODE_POSTINC | CCR_SRC_AMODE_POSTINC;
 
-	d->cicr = CICR_DROP_IE | CICR_FRAME_IE;
+	if (tx_flags & DMA_PREP_INTERRUPT)
+		d->cicr |= CICR_FRAME_IE;
+	else
+		d->polled = true;
 
 	d->csdp = data_type;
 
@@ -1222,6 +1309,7 @@ static struct dma_async_tx_descriptor *omap_dma_prep_dma_interleaved(
 	if (data_type > CSDP_DATA_TYPE_32)
 		data_type = CSDP_DATA_TYPE_32;
 
+	d->sglen = 1;
 	sg = &d->sg[0];
 	d->dir = DMA_MEM_TO_MEM;
 	d->dev_addr = xt->src_start;
@@ -1229,7 +1317,6 @@ static struct dma_async_tx_descriptor *omap_dma_prep_dma_interleaved(
 	sg->en = xt->sgl[0].size / BIT(data_type);
 	sg->fn = xt->numf;
 	sg->addr = xt->dst_start;
-	d->sglen = 1;
 	d->ccr = c->ccr;
 
 	src_icg = dmaengine_get_src_icg(xt, &xt->sgl[0]);
@@ -1359,7 +1446,7 @@ static int omap_dma_pause(struct dma_chan *chan)
 	 * A source-synchronised channel is one where the fetching of data is
 	 * under control of the device. In other words, a device-to-memory
 	 * transfer. So, a destination-synchronised channel (which would be a
-	 * memory-to-device transfer) undergoes an abort if the the CCR_ENABLE
+	 * memory-to-device transfer) undergoes an abort if the CCR_ENABLE
 	 * bit is cleared.
 	 * From 16.1.4.20.4.6.2 Abort: "If an abort trigger occurs, the channel
 	 * aborts immediately after completion of current read/write
@@ -1439,29 +1526,165 @@ static void omap_dma_free(struct omap_dmadev *od)
 	}
 }
 
+/* Currently used by omap2 & 3 to block deeper SoC idle states */
+static bool omap_dma_busy(struct omap_dmadev *od)
+{
+	struct omap_chan *c;
+	int lch = -1;
+
+	while (1) {
+		lch = find_next_bit(od->lch_bitmap, od->lch_count, lch + 1);
+		if (lch >= od->lch_count)
+			break;
+		c = od->lch_map[lch];
+		if (!c)
+			continue;
+		if (omap_dma_chan_read(c, CCR) & CCR_ENABLE)
+			return true;
+	}
+
+	return false;
+}
+
+/* Currently only used for omap2. For omap1, also a check for lcd_dma is needed */
+static int omap_dma_busy_notifier(struct notifier_block *nb,
+				  unsigned long cmd, void *v)
+{
+	struct omap_dmadev *od;
+
+	od = container_of(nb, struct omap_dmadev, nb);
+
+	switch (cmd) {
+	case CPU_CLUSTER_PM_ENTER:
+		if (omap_dma_busy(od))
+			return NOTIFY_BAD;
+		break;
+	case CPU_CLUSTER_PM_ENTER_FAILED:
+	case CPU_CLUSTER_PM_EXIT:
+		break;
+	}
+
+	return NOTIFY_OK;
+}
+
+/*
+ * We are using IRQENABLE_L1, and legacy DMA code was using IRQENABLE_L0.
+ * As the DSP may be using IRQENABLE_L2 and L3, let's not touch those for
+ * now. Context save seems to be only currently needed on omap3.
+ */
+static void omap_dma_context_save(struct omap_dmadev *od)
+{
+	od->context.irqenable_l0 = omap_dma_glbl_read(od, IRQENABLE_L0);
+	od->context.irqenable_l1 = omap_dma_glbl_read(od, IRQENABLE_L1);
+	od->context.ocp_sysconfig = omap_dma_glbl_read(od, OCP_SYSCONFIG);
+	od->context.gcr = omap_dma_glbl_read(od, GCR);
+}
+
+static void omap_dma_context_restore(struct omap_dmadev *od)
+{
+	int i;
+
+	omap_dma_glbl_write(od, GCR, od->context.gcr);
+	omap_dma_glbl_write(od, OCP_SYSCONFIG, od->context.ocp_sysconfig);
+	omap_dma_glbl_write(od, IRQENABLE_L0, od->context.irqenable_l0);
+	omap_dma_glbl_write(od, IRQENABLE_L1, od->context.irqenable_l1);
+
+	/* Clear IRQSTATUS_L0 as legacy DMA code is no longer doing it */
+	if (od->plat->errata & DMA_ROMCODE_BUG)
+		omap_dma_glbl_write(od, IRQSTATUS_L0, 0);
+
+	/* Clear dma channels */
+	for (i = 0; i < od->lch_count; i++)
+		omap_dma_clear_lch(od, i);
+}
+
+/* Currently only used for omap3 */
+static int omap_dma_context_notifier(struct notifier_block *nb,
+				     unsigned long cmd, void *v)
+{
+	struct omap_dmadev *od;
+
+	od = container_of(nb, struct omap_dmadev, nb);
+
+	switch (cmd) {
+	case CPU_CLUSTER_PM_ENTER:
+		if (omap_dma_busy(od))
+			return NOTIFY_BAD;
+		omap_dma_context_save(od);
+		break;
+	case CPU_CLUSTER_PM_ENTER_FAILED:	/* No need to restore context */
+		break;
+	case CPU_CLUSTER_PM_EXIT:
+		omap_dma_context_restore(od);
+		break;
+	}
+
+	return NOTIFY_OK;
+}
+
+static void omap_dma_init_gcr(struct omap_dmadev *od, int arb_rate,
+			      int max_fifo_depth, int tparams)
+{
+	u32 val;
+
+	/* Set only for omap2430 and later */
+	if (!od->cfg->rw_priority)
+		return;
+
+	if (max_fifo_depth == 0)
+		max_fifo_depth = 1;
+	if (arb_rate == 0)
+		arb_rate = 1;
+
+	val = 0xff & max_fifo_depth;
+	val |= (0x3 & tparams) << 12;
+	val |= (arb_rate & 0xff) << 16;
+
+	omap_dma_glbl_write(od, GCR, val);
+}
+
 #define OMAP_DMA_BUSWIDTHS	(BIT(DMA_SLAVE_BUSWIDTH_1_BYTE) | \
 				 BIT(DMA_SLAVE_BUSWIDTH_2_BYTES) | \
 				 BIT(DMA_SLAVE_BUSWIDTH_4_BYTES))
 
+/*
+ * No flags currently set for default configuration as omap1 is still
+ * using platform data.
+ */
+static const struct omap_dma_config default_cfg;
+
 static int omap_dma_probe(struct platform_device *pdev)
 {
+	const struct omap_dma_config *conf;
 	struct omap_dmadev *od;
-	struct resource *res;
 	int rc, i, irq;
-	u32 lch_count;
+	u32 val;
 
 	od = devm_kzalloc(&pdev->dev, sizeof(*od), GFP_KERNEL);
 	if (!od)
 		return -ENOMEM;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	od->base = devm_ioremap_resource(&pdev->dev, res);
+	od->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(od->base))
 		return PTR_ERR(od->base);
 
-	od->plat = omap_get_plat_info();
-	if (!od->plat)
-		return -EPROBE_DEFER;
+	conf = of_device_get_match_data(&pdev->dev);
+	if (conf) {
+		od->cfg = conf;
+		od->plat = dev_get_platdata(&pdev->dev);
+		if (!od->plat) {
+			dev_err(&pdev->dev, "omap_system_dma_plat_info is missing");
+			return -ENODEV;
+		}
+	} else if (IS_ENABLED(CONFIG_ARCH_OMAP1)) {
+		od->cfg = &default_cfg;
+
+		od->plat = omap_get_plat_info();
+		if (!od->plat)
+			return -EPROBE_DEFER;
+	} else {
+		return -ENODEV;
+	}
 
 	od->reg_map = od->plat->reg_map;
 
@@ -1493,6 +1716,7 @@ static int omap_dma_probe(struct platform_device *pdev)
 	od->ddev.max_burst = SZ_16M - 1; /* CCEN: 24bit unsigned */
 	od->ddev.dev = &pdev->dev;
 	INIT_LIST_HEAD(&od->ddev.channels);
+	mutex_init(&od->lch_lock);
 	spin_lock_init(&od->lock);
 	spin_lock_init(&od->irq_lock);
 
@@ -1508,18 +1732,30 @@ static int omap_dma_probe(struct platform_device *pdev)
 
 	/* Number of available logical channels */
 	if (!pdev->dev.of_node) {
-		lch_count = od->plat->dma_attr->lch_count;
-		if (unlikely(!lch_count))
-			lch_count = OMAP_SDMA_CHANNELS;
+		od->lch_count = od->plat->dma_attr->lch_count;
+		if (unlikely(!od->lch_count))
+			od->lch_count = OMAP_SDMA_CHANNELS;
 	} else if (of_property_read_u32(pdev->dev.of_node, "dma-channels",
-					&lch_count)) {
+					&od->lch_count)) {
 		dev_info(&pdev->dev,
 			 "Missing dma-channels property, using %u.\n",
 			 OMAP_SDMA_CHANNELS);
-		lch_count = OMAP_SDMA_CHANNELS;
+		od->lch_count = OMAP_SDMA_CHANNELS;
 	}
 
-	od->lch_map = devm_kcalloc(&pdev->dev, lch_count, sizeof(*od->lch_map),
+	/* Mask of allowed logical channels */
+	if (pdev->dev.of_node && !of_property_read_u32(pdev->dev.of_node,
+						       "dma-channel-mask",
+						       &val)) {
+		/* Tag channels not in mask as reserved */
+		val = ~val;
+		bitmap_from_arr32(od->lch_bitmap, &val, od->lch_count);
+	}
+	if (od->plat->dma_attr->dev_caps & HS_CHANNELS_RESERVED)
+		bitmap_set(od->lch_bitmap, 0, 2);
+
+	od->lch_map = devm_kcalloc(&pdev->dev, od->lch_count,
+				   sizeof(*od->lch_map),
 				   GFP_KERNEL);
 	if (!od->lch_map)
 		return -ENOMEM;
@@ -1572,6 +1808,8 @@ static int omap_dma_probe(struct platform_device *pdev)
 	if (rc) {
 		pr_warn("OMAP-DMA: failed to register slave DMA engine device: %d\n",
 			rc);
+		if (od->ll123_supported)
+			dma_pool_destroy(od->desc_pool);
 		omap_dma_free(od);
 		return rc;
 	}
@@ -1587,8 +1825,20 @@ static int omap_dma_probe(struct platform_device *pdev)
 		if (rc) {
 			pr_warn("OMAP-DMA: failed to register DMA controller\n");
 			dma_async_device_unregister(&od->ddev);
+			if (od->ll123_supported)
+				dma_pool_destroy(od->desc_pool);
 			omap_dma_free(od);
 		}
+	}
+
+	omap_dma_init_gcr(od, DMA_DEFAULT_ARB_RATE, DMA_DEFAULT_FIFO_DEPTH, 0);
+
+	if (od->cfg->needs_busy_check) {
+		od->nb.notifier_call = omap_dma_busy_notifier;
+		cpu_pm_register_notifier(&od->nb);
+	} else if (od->cfg->may_lose_context) {
+		od->nb.notifier_call = omap_dma_context_notifier;
+		cpu_pm_register_notifier(&od->nb);
 	}
 
 	dev_info(&pdev->dev, "OMAP DMA engine driver%s\n",
@@ -1597,10 +1847,13 @@ static int omap_dma_probe(struct platform_device *pdev)
 	return rc;
 }
 
-static int omap_dma_remove(struct platform_device *pdev)
+static void omap_dma_remove(struct platform_device *pdev)
 {
 	struct omap_dmadev *od = platform_get_drvdata(pdev);
 	int irq;
+
+	if (od->cfg->may_lose_context)
+		cpu_pm_unregister_notifier(&od->nb);
 
 	if (pdev->dev.of_node)
 		of_dma_controller_free(pdev->dev.of_node);
@@ -1610,7 +1863,7 @@ static int omap_dma_remove(struct platform_device *pdev)
 
 	dma_async_device_unregister(&od->ddev);
 
-	if (!od->legacy) {
+	if (!omap_dma_legacy(od)) {
 		/* Disable all interrupts */
 		omap_dma_glbl_write(od, IRQENABLE_L0, 0);
 	}
@@ -1619,30 +1872,61 @@ static int omap_dma_remove(struct platform_device *pdev)
 		dma_pool_destroy(od->desc_pool);
 
 	omap_dma_free(od);
-
-	return 0;
 }
 
+static const struct omap_dma_config omap2420_data = {
+	.lch_end = CCFN,
+	.rw_priority = true,
+	.needs_lch_clear = true,
+	.needs_busy_check = true,
+};
+
+static const struct omap_dma_config omap2430_data = {
+	.lch_end = CCFN,
+	.rw_priority = true,
+	.needs_lch_clear = true,
+};
+
+static const struct omap_dma_config omap3430_data = {
+	.lch_end = CCFN,
+	.rw_priority = true,
+	.needs_lch_clear = true,
+	.may_lose_context = true,
+};
+
+static const struct omap_dma_config omap3630_data = {
+	.lch_end = CCDN,
+	.rw_priority = true,
+	.needs_lch_clear = true,
+	.may_lose_context = true,
+};
+
+static const struct omap_dma_config omap4_data = {
+	.lch_end = CCDN,
+	.rw_priority = true,
+	.needs_lch_clear = true,
+};
+
 static const struct of_device_id omap_dma_match[] = {
-	{ .compatible = "ti,omap2420-sdma", },
-	{ .compatible = "ti,omap2430-sdma", },
-	{ .compatible = "ti,omap3430-sdma", },
-	{ .compatible = "ti,omap3630-sdma", },
-	{ .compatible = "ti,omap4430-sdma", },
+	{ .compatible = "ti,omap2420-sdma", .data = &omap2420_data, },
+	{ .compatible = "ti,omap2430-sdma", .data = &omap2430_data, },
+	{ .compatible = "ti,omap3430-sdma", .data = &omap3430_data, },
+	{ .compatible = "ti,omap3630-sdma", .data = &omap3630_data, },
+	{ .compatible = "ti,omap4430-sdma", .data = &omap4_data, },
 	{},
 };
 MODULE_DEVICE_TABLE(of, omap_dma_match);
 
 static struct platform_driver omap_dma_driver = {
 	.probe	= omap_dma_probe,
-	.remove	= omap_dma_remove,
+	.remove = omap_dma_remove,
 	.driver = {
 		.name = "omap-dma-engine",
-		.of_match_table = of_match_ptr(omap_dma_match),
+		.of_match_table = omap_dma_match,
 	},
 };
 
-bool omap_dma_filter_fn(struct dma_chan *chan, void *param)
+static bool omap_dma_filter_fn(struct dma_chan *chan, void *param)
 {
 	if (chan->device->dev->driver == &omap_dma_driver.driver) {
 		struct omap_dmadev *od = to_omap_dma_dev(chan->device);
@@ -1656,7 +1940,6 @@ bool omap_dma_filter_fn(struct dma_chan *chan, void *param)
 	}
 	return false;
 }
-EXPORT_SYMBOL_GPL(omap_dma_filter_fn);
 
 static int omap_dma_init(void)
 {
@@ -1671,4 +1954,5 @@ static void __exit omap_dma_exit(void)
 module_exit(omap_dma_exit);
 
 MODULE_AUTHOR("Russell King");
+MODULE_DESCRIPTION("Texas Instruments sDMA DMAengine support");
 MODULE_LICENSE("GPL");

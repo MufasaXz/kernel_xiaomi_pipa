@@ -12,60 +12,137 @@
  */
 
 #include <linux/bitops.h>
+#include <linux/cleanup.h>
 #include <linux/clk.h>
+#include <linux/clk-provider.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
+#include <linux/irqchip/irq-msi-lib.h>
 #include <linux/irqdomain.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/iopoll.h>
 #include <linux/msi.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
-#include <linux/of_pci.h>
 #include <linux/of_platform.h>
 #include <linux/pci.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
-#include <linux/slab.h>
+#include <linux/regulator/consumer.h>
 
-#include "../pci.h"
 #include "pcie-rcar.h"
 
 struct rcar_msi {
 	DECLARE_BITMAP(used, INT_PCI_MSI_NR);
 	struct irq_domain *domain;
-	struct msi_controller chip;
-	unsigned long pages;
-	struct mutex lock;
+	struct mutex map_lock;
+	raw_spinlock_t mask_lock;
 	int irq1;
 	int irq2;
 };
 
-static inline struct rcar_msi *to_rcar_msi(struct msi_controller *chip)
-{
-	return container_of(chip, struct rcar_msi, chip);
-}
-
 /* Structure representing the PCIe interface */
 struct rcar_pcie_host {
 	struct rcar_pcie	pcie;
-	struct device		*dev;
 	struct phy		*phy;
-	void __iomem		*base;
-	struct list_head	resources;
-	int			root_bus_nr;
 	struct clk		*bus_clk;
 	struct			rcar_msi msi;
+	int			(*phy_init_fn)(struct rcar_pcie_host *host);
 };
+
+static int rcar_pcie_wakeup(struct device *pcie_dev, void __iomem *pcie_base)
+{
+	u32 pmsr, val;
+	int ret = 0;
+
+	if (!pcie_base || pm_runtime_suspended(pcie_dev))
+		return -EINVAL;
+
+	pmsr = readl(pcie_base + PMSR);
+
+	/*
+	 * Test if the PCIe controller received PM_ENTER_L1 DLLP and
+	 * the PCIe controller is not in L1 link state. If true, apply
+	 * fix, which will put the controller into L1 link state, from
+	 * which it can return to L0s/L0 on its own.
+	 */
+	if ((pmsr & PMEL1RX) && ((pmsr & PMSTATE) != PMSTATE_L1)) {
+		writel(L1IATN, pcie_base + PMCTLR);
+		ret = readl_poll_timeout_atomic(pcie_base + PMSR, val,
+						val & L1FAEG, 10, 1000);
+		if (ret) {
+			dev_warn_ratelimited(pcie_dev,
+					     "Timeout waiting for L1 link state, ret=%d\n",
+					     ret);
+		}
+		writel(L1FAEG | PMEL1RX, pcie_base + PMSR);
+	}
+
+	return ret;
+}
+
+static struct rcar_pcie_host *msi_to_host(struct rcar_msi *msi)
+{
+	return container_of(msi, struct rcar_pcie_host, msi);
+}
 
 static u32 rcar_read_conf(struct rcar_pcie *pcie, int where)
 {
-	unsigned int shift = 8 * (where & 3);
+	unsigned int shift = BITS_PER_BYTE * (where & 3);
 	u32 val = rcar_pci_read_reg(pcie, where & ~3);
 
 	return val >> shift;
+}
+
+#ifdef CONFIG_ARM
+#define __rcar_pci_rw_reg_workaround(instr)				\
+		"	.arch armv7-a\n"				\
+		"1:	" instr " %1, [%2]\n"				\
+		"2:	isb\n"						\
+		"3:	.pushsection .text.fixup,\"ax\"\n"		\
+		"	.align	2\n"					\
+		"4:	mov	%0, #" __stringify(PCIBIOS_SET_FAILED) "\n" \
+		"	b	3b\n"					\
+		"	.popsection\n"					\
+		"	.pushsection __ex_table,\"a\"\n"		\
+		"	.align	3\n"					\
+		"	.long	1b, 4b\n"				\
+		"	.long	2b, 4b\n"				\
+		"	.popsection\n"
+#endif
+
+static int rcar_pci_write_reg_workaround(struct rcar_pcie *pcie, u32 val,
+					 unsigned int reg)
+{
+	int error = PCIBIOS_SUCCESSFUL;
+#ifdef CONFIG_ARM
+	asm volatile(
+		__rcar_pci_rw_reg_workaround("str")
+	: "+r"(error):"r"(val), "r"(pcie->base + reg) : "memory");
+#else
+	rcar_pci_write_reg(pcie, val, reg);
+#endif
+	return error;
+}
+
+static int rcar_pci_read_reg_workaround(struct rcar_pcie *pcie, u32 *val,
+					unsigned int reg)
+{
+	int error = PCIBIOS_SUCCESSFUL;
+#ifdef CONFIG_ARM
+	asm volatile(
+		__rcar_pci_rw_reg_workaround("ldr")
+	: "+r"(error), "=r"(*val) : "r"(pcie->base + reg) : "memory");
+
+	if (error != PCIBIOS_SUCCESSFUL)
+		PCI_SET_ERROR_RESPONSE(val);
+#else
+	*val = rcar_pci_read_reg(pcie, reg);
+#endif
+	return error;
 }
 
 /* Serialization is provided by 'pci_lock' in drivers/pci/access.c */
@@ -75,6 +152,14 @@ static int rcar_pcie_config_access(struct rcar_pcie_host *host,
 {
 	struct rcar_pcie *pcie = &host->pcie;
 	unsigned int dev, func, reg, index;
+	int ret;
+
+	/* Wake the bus up in case it is in L1 state. */
+	ret = rcar_pcie_wakeup(pcie->dev, pcie->base);
+	if (ret) {
+		PCI_SET_ERROR_RESPONSE(data);
+		return PCIBIOS_SET_FAILED;
+	}
 
 	dev = PCI_SLOT(devfn);
 	func = PCI_FUNC(devfn);
@@ -86,8 +171,8 @@ static int rcar_pcie_config_access(struct rcar_pcie_host *host,
 	 * space, it's generally only accessible when in endpoint mode.
 	 * When in root complex mode, the controller is unable to target
 	 * itself with either type 0 or type 1 accesses, and indeed, any
-	 * controller initiated target transfer to its own config space
-	 * result in a completer abort.
+	 * controller-initiated target transfer to its own config space
+	 * results in a completer abort.
 	 *
 	 * Each channel effectively only supports a single device, but as
 	 * the same channel <-> device access works for any PCI_SLOT()
@@ -100,21 +185,13 @@ static int rcar_pcie_config_access(struct rcar_pcie_host *host,
 		if (dev != 0)
 			return PCIBIOS_DEVICE_NOT_FOUND;
 
-		if (access_type == RCAR_PCI_ACCESS_READ) {
+		if (access_type == RCAR_PCI_ACCESS_READ)
 			*data = rcar_pci_read_reg(pcie, PCICONF(index));
-		} else {
-			/* Keep an eye out for changes to the root bus number */
-			if (pci_is_root_bus(bus) && (reg == PCI_PRIMARY_BUS))
-				host->root_bus_nr = *data & 0xff;
-
+		else
 			rcar_pci_write_reg(pcie, *data, PCICONF(index));
-		}
 
 		return PCIBIOS_SUCCESSFUL;
 	}
-
-	if (host->root_bus_nr < 0)
-		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	/* Clear errors */
 	rcar_pci_write_reg(pcie, rcar_pci_read_reg(pcie, PCIEERRFR), PCIEERRFR);
@@ -124,10 +201,10 @@ static int rcar_pcie_config_access(struct rcar_pcie_host *host,
 		PCIE_CONF_DEV(dev) | PCIE_CONF_FUNC(func) | reg, PCIECAR);
 
 	/* Enable the configuration access */
-	if (bus->parent->number == host->root_bus_nr)
-		rcar_pci_write_reg(pcie, CONFIG_SEND_ENABLE | TYPE0, PCIECCTLR);
+	if (pci_is_root_bus(bus->parent))
+		rcar_pci_write_reg(pcie, PCIECCTLR_CCIE | TYPE0, PCIECCTLR);
 	else
-		rcar_pci_write_reg(pcie, CONFIG_SEND_ENABLE | TYPE1, PCIECCTLR);
+		rcar_pci_write_reg(pcie, PCIECCTLR_CCIE | TYPE1, PCIECCTLR);
 
 	/* Check for errors */
 	if (rcar_pci_read_reg(pcie, PCIEERRFR) & UNSUPPORTED_REQUEST)
@@ -139,14 +216,14 @@ static int rcar_pcie_config_access(struct rcar_pcie_host *host,
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	if (access_type == RCAR_PCI_ACCESS_READ)
-		*data = rcar_pci_read_reg(pcie, PCIECDR);
+		ret = rcar_pci_read_reg_workaround(pcie, data, PCIECDR);
 	else
-		rcar_pci_write_reg(pcie, *data, PCIECDR);
+		ret = rcar_pci_write_reg_workaround(pcie, *data, PCIECDR);
 
 	/* Disable the configuration access */
 	rcar_pci_write_reg(pcie, 0, PCIECCTLR);
 
-	return PCIBIOS_SUCCESSFUL;
+	return ret;
 }
 
 static int rcar_pcie_read_conf(struct pci_bus *bus, unsigned int devfn,
@@ -157,15 +234,13 @@ static int rcar_pcie_read_conf(struct pci_bus *bus, unsigned int devfn,
 
 	ret = rcar_pcie_config_access(host, RCAR_PCI_ACCESS_READ,
 				      bus, devfn, where, val);
-	if (ret != PCIBIOS_SUCCESSFUL) {
-		*val = 0xffffffff;
+	if (ret != PCIBIOS_SUCCESSFUL)
 		return ret;
-	}
 
 	if (size == 1)
-		*val = (*val >> (8 * (where & 3))) & 0xff;
+		*val = (*val >> (BITS_PER_BYTE * (where & 3))) & 0xff;
 	else if (size == 2)
-		*val = (*val >> (8 * (where & 2))) & 0xffff;
+		*val = (*val >> (BITS_PER_BYTE * (where & 2))) & 0xffff;
 
 	dev_dbg(&bus->dev, "pcie-config-read: bus=%3d devfn=0x%04x where=0x%04x size=%d val=0x%08x\n",
 		bus->number, devfn, where, size, *val);
@@ -191,11 +266,11 @@ static int rcar_pcie_write_conf(struct pci_bus *bus, unsigned int devfn,
 		bus->number, devfn, where, size, val);
 
 	if (size == 1) {
-		shift = 8 * (where & 3);
+		shift = BITS_PER_BYTE * (where & 3);
 		data &= ~(0xff << shift);
 		data |= ((val & 0xff) << shift);
 	} else if (size == 2) {
-		shift = 8 * (where & 2);
+		shift = BITS_PER_BYTE * (where & 2);
 		data &= ~(0xffff << shift);
 		data |= ((val & 0xffff) << shift);
 	} else
@@ -211,38 +286,6 @@ static struct pci_ops rcar_pcie_ops = {
 	.read	= rcar_pcie_read_conf,
 	.write	= rcar_pcie_write_conf,
 };
-
-static int rcar_pcie_setup(struct list_head *resource,
-			   struct rcar_pcie_host *host)
-{
-	struct resource_entry *win;
-	int i = 0;
-
-	/* Setup PCI resources */
-	resource_list_for_each_entry(win, &host->resources) {
-		struct resource *res = win->res;
-
-		if (!res->flags)
-			continue;
-
-		switch (resource_type(res)) {
-		case IORESOURCE_IO:
-		case IORESOURCE_MEM:
-			rcar_pcie_set_outbound(&host->pcie, i, win);
-			i++;
-			break;
-		case IORESOURCE_BUS:
-			host->root_bus_nr = res->start;
-			break;
-		default:
-			continue;
-		}
-
-		pci_add_resource(resource, res);
-	}
-
-	return 1;
-}
 
 static void rcar_pcie_force_speedup(struct rcar_pcie *pcie)
 {
@@ -298,45 +341,46 @@ done:
 		 (macsr & LINK_SPEED) == LINK_SPEED_5_0GTS ? "5" : "2.5");
 }
 
-static int rcar_pcie_enable(struct rcar_pcie_host *host)
+static void rcar_pcie_hw_enable(struct rcar_pcie_host *host)
 {
-	struct pci_host_bridge *bridge = pci_host_bridge_from_priv(host);
 	struct rcar_pcie *pcie = &host->pcie;
-	struct device *dev = pcie->dev;
-	struct pci_bus *bus, *child;
-	int ret;
+	struct pci_host_bridge *bridge = pci_host_bridge_from_priv(host);
+	struct resource_entry *win;
+	LIST_HEAD(res);
+	int i = 0;
 
 	/* Try setting 5 GT/s link speed */
 	rcar_pcie_force_speedup(pcie);
 
-	rcar_pcie_setup(&bridge->windows, host);
+	/* Setup PCI resources */
+	resource_list_for_each_entry(win, &bridge->windows) {
+		struct resource *res = win->res;
+
+		if (!res->flags)
+			continue;
+
+		switch (resource_type(res)) {
+		case IORESOURCE_IO:
+		case IORESOURCE_MEM:
+			rcar_pcie_set_outbound(pcie, i, win);
+			i++;
+			break;
+		}
+	}
+}
+
+static int rcar_pcie_enable(struct rcar_pcie_host *host)
+{
+	struct pci_host_bridge *bridge = pci_host_bridge_from_priv(host);
+
+	rcar_pcie_hw_enable(host);
 
 	pci_add_flags(PCI_REASSIGN_ALL_BUS);
 
-	bridge->dev.parent = dev;
 	bridge->sysdata = host;
-	bridge->busnr = host->root_bus_nr;
 	bridge->ops = &rcar_pcie_ops;
-	bridge->map_irq = of_irq_parse_and_map_pci;
-	bridge->swizzle_irq = pci_common_swizzle;
-	if (IS_ENABLED(CONFIG_PCI_MSI))
-		bridge->msi = &host->msi.chip;
 
-	ret = pci_scan_root_bus_bridge(bridge);
-	if (ret < 0)
-		return ret;
-
-	bus = bridge->bus;
-
-	pci_bus_size_bridges(bus);
-	pci_bus_assign_resources(bus);
-
-	list_for_each_entry(child, &bus->children, node)
-		pcie_bus_configure_settings(child);
-
-	pci_bus_add_devices(bus);
-
-	return 0;
+	return pci_host_probe(bridge);
 }
 
 static int phy_wait_for_ack(struct rcar_pcie *pcie)
@@ -401,7 +445,7 @@ static int rcar_pcie_hw_init(struct rcar_pcie *pcie)
 	 * class to match. Hardware takes care of propagating the IDSETR
 	 * settings, so there is no need to bother with a quirk.
 	 */
-	rcar_pci_write_reg(pcie, PCI_CLASS_BRIDGE_PCI << 16, IDSETR1);
+	rcar_pci_write_reg(pcie, PCI_CLASS_BRIDGE_PCI_NORMAL << 8, IDSETR1);
 
 	/*
 	 * Setup Secondary Bus Number & Subordinate Bus Number, even though
@@ -414,7 +458,7 @@ static int rcar_pcie_hw_init(struct rcar_pcie *pcie)
 	rcar_rmw32(pcie, REXPCAP(0), 0xff, PCI_CAP_ID_EXP);
 	rcar_rmw32(pcie, REXPCAP(PCI_EXP_FLAGS),
 		PCI_EXP_FLAGS_TYPE, PCI_EXP_TYPE_ROOT_PORT << 4);
-	rcar_rmw32(pcie, RCONF(PCI_HEADER_TYPE), 0x7f,
+	rcar_rmw32(pcie, RCONF(PCI_HEADER_TYPE), PCI_HEADER_TYPE_MASK,
 		PCI_HEADER_TYPE_BRIDGE);
 
 	/* Enable data link layer active state reporting */
@@ -514,42 +558,6 @@ static int rcar_pcie_phy_init_gen3(struct rcar_pcie_host *host)
 	return err;
 }
 
-static int rcar_msi_alloc(struct rcar_msi *chip)
-{
-	int msi;
-
-	mutex_lock(&chip->lock);
-
-	msi = find_first_zero_bit(chip->used, INT_PCI_MSI_NR);
-	if (msi < INT_PCI_MSI_NR)
-		set_bit(msi, chip->used);
-	else
-		msi = -ENOSPC;
-
-	mutex_unlock(&chip->lock);
-
-	return msi;
-}
-
-static int rcar_msi_alloc_region(struct rcar_msi *chip, int no_irqs)
-{
-	int msi;
-
-	mutex_lock(&chip->lock);
-	msi = bitmap_find_free_region(chip->used, INT_PCI_MSI_NR,
-				      order_base_2(no_irqs));
-	mutex_unlock(&chip->lock);
-
-	return msi;
-}
-
-static void rcar_msi_free(struct rcar_msi *chip, unsigned long irq)
-{
-	mutex_lock(&chip->lock);
-	clear_bit(irq, chip->used);
-	mutex_unlock(&chip->lock);
-}
-
 static irqreturn_t rcar_pcie_msi_irq(int irq, void *data)
 {
 	struct rcar_pcie_host *host = data;
@@ -566,20 +574,13 @@ static irqreturn_t rcar_pcie_msi_irq(int irq, void *data)
 
 	while (reg) {
 		unsigned int index = find_first_bit(&reg, 32);
-		unsigned int msi_irq;
+		int ret;
 
-		/* clear the interrupt */
-		rcar_pci_write_reg(pcie, 1 << index, PCIEMSIFR);
-
-		msi_irq = irq_find_mapping(msi->domain, index);
-		if (msi_irq) {
-			if (test_bit(index, msi->used))
-				generic_handle_irq(msi_irq);
-			else
-				dev_info(dev, "unhandled MSI\n");
-		} else {
+		ret = generic_handle_domain_irq(msi->domain, index);
+		if (ret) {
 			/* Unknown MSI, just clear it */
 			dev_dbg(dev, "unexpected MSI\n");
+			rcar_pci_write_reg(pcie, BIT(index), PCIEMSIFR);
 		}
 
 		/* see if there's any more pending in this vector */
@@ -589,132 +590,139 @@ static irqreturn_t rcar_pcie_msi_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static int rcar_msi_setup_irq(struct msi_controller *chip, struct pci_dev *pdev,
-			      struct msi_desc *desc)
+static void rcar_msi_irq_ack(struct irq_data *d)
 {
-	struct rcar_msi *msi = to_rcar_msi(chip);
-	struct rcar_pcie_host *host = container_of(chip, struct rcar_pcie_host,
-						   msi.chip);
-	struct rcar_pcie *pcie = &host->pcie;
-	struct msi_msg msg;
-	unsigned int irq;
-	int hwirq;
+	struct rcar_msi *msi = irq_data_get_irq_chip_data(d);
+	struct rcar_pcie *pcie = &msi_to_host(msi)->pcie;
 
-	hwirq = rcar_msi_alloc(msi);
-	if (hwirq < 0)
-		return hwirq;
-
-	irq = irq_find_mapping(msi->domain, hwirq);
-	if (!irq) {
-		rcar_msi_free(msi, hwirq);
-		return -EINVAL;
-	}
-
-	irq_set_msi_desc(irq, desc);
-
-	msg.address_lo = rcar_pci_read_reg(pcie, PCIEMSIALR) & ~MSIFE;
-	msg.address_hi = rcar_pci_read_reg(pcie, PCIEMSIAUR);
-	msg.data = hwirq;
-
-	pci_write_msi_msg(irq, &msg);
-
-	return 0;
+	/* clear the interrupt */
+	rcar_pci_write_reg(pcie, BIT(d->hwirq), PCIEMSIFR);
 }
 
-static int rcar_msi_setup_irqs(struct msi_controller *chip,
-			       struct pci_dev *pdev, int nvec, int type)
+static void rcar_msi_irq_mask(struct irq_data *d)
 {
-	struct rcar_msi *msi = to_rcar_msi(chip);
-	struct rcar_pcie_host *host = container_of(chip, struct rcar_pcie_host,
-						   msi.chip);
-	struct rcar_pcie *pcie = &host->pcie;
-	struct msi_desc *desc;
-	struct msi_msg msg;
-	unsigned int irq;
+	struct rcar_msi *msi = irq_data_get_irq_chip_data(d);
+	struct rcar_pcie *pcie = &msi_to_host(msi)->pcie;
+	u32 value;
+
+	scoped_guard(raw_spinlock_irqsave, &msi->mask_lock) {
+		value = rcar_pci_read_reg(pcie, PCIEMSIIER);
+		value &= ~BIT(d->hwirq);
+		rcar_pci_write_reg(pcie, value, PCIEMSIIER);
+	}
+}
+
+static void rcar_msi_irq_unmask(struct irq_data *d)
+{
+	struct rcar_msi *msi = irq_data_get_irq_chip_data(d);
+	struct rcar_pcie *pcie = &msi_to_host(msi)->pcie;
+	u32 value;
+
+	scoped_guard(raw_spinlock_irqsave, &msi->mask_lock) {
+		value = rcar_pci_read_reg(pcie, PCIEMSIIER);
+		value |= BIT(d->hwirq);
+		rcar_pci_write_reg(pcie, value, PCIEMSIIER);
+	}
+}
+
+static void rcar_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
+{
+	struct rcar_msi *msi = irq_data_get_irq_chip_data(data);
+	struct rcar_pcie *pcie = &msi_to_host(msi)->pcie;
+
+	msg->address_lo = rcar_pci_read_reg(pcie, PCIEMSIALR) & ~MSIFE;
+	msg->address_hi = rcar_pci_read_reg(pcie, PCIEMSIAUR);
+	msg->data = data->hwirq;
+}
+
+static struct irq_chip rcar_msi_bottom_chip = {
+	.name			= "R-Car MSI",
+	.irq_ack		= rcar_msi_irq_ack,
+	.irq_mask		= rcar_msi_irq_mask,
+	.irq_unmask		= rcar_msi_irq_unmask,
+	.irq_compose_msi_msg	= rcar_compose_msi_msg,
+};
+
+static int rcar_msi_domain_alloc(struct irq_domain *domain, unsigned int virq,
+				  unsigned int nr_irqs, void *args)
+{
+	struct rcar_msi *msi = domain->host_data;
+	unsigned int i;
 	int hwirq;
-	int i;
 
-	/* MSI-X interrupts are not supported */
-	if (type == PCI_CAP_ID_MSIX)
-		return -EINVAL;
+	mutex_lock(&msi->map_lock);
 
-	WARN_ON(!list_is_singular(&pdev->dev.msi_list));
-	desc = list_entry(pdev->dev.msi_list.next, struct msi_desc, list);
+	hwirq = bitmap_find_free_region(msi->used, INT_PCI_MSI_NR, order_base_2(nr_irqs));
 
-	hwirq = rcar_msi_alloc_region(msi, nvec);
+	mutex_unlock(&msi->map_lock);
+
 	if (hwirq < 0)
 		return -ENOSPC;
 
-	irq = irq_find_mapping(msi->domain, hwirq);
-	if (!irq)
-		return -ENOSPC;
-
-	for (i = 0; i < nvec; i++) {
-		/*
-		 * irq_create_mapping() called from rcar_pcie_probe() pre-
-		 * allocates descs,  so there is no need to allocate descs here.
-		 * We can therefore assume that if irq_find_mapping() above
-		 * returns non-zero, then the descs are also successfully
-		 * allocated.
-		 */
-		if (irq_set_msi_desc_off(irq, i, desc)) {
-			/* TODO: clear */
-			return -EINVAL;
-		}
-	}
-
-	desc->nvec_used = nvec;
-	desc->msi_attrib.multiple = order_base_2(nvec);
-
-	msg.address_lo = rcar_pci_read_reg(pcie, PCIEMSIALR) & ~MSIFE;
-	msg.address_hi = rcar_pci_read_reg(pcie, PCIEMSIAUR);
-	msg.data = hwirq;
-
-	pci_write_msi_msg(irq, &msg);
+	for (i = 0; i < nr_irqs; i++)
+		irq_domain_set_info(domain, virq + i, hwirq + i,
+				    &rcar_msi_bottom_chip, domain->host_data,
+				    handle_edge_irq, NULL, NULL);
 
 	return 0;
 }
 
-static void rcar_msi_teardown_irq(struct msi_controller *chip, unsigned int irq)
+static void rcar_msi_domain_free(struct irq_domain *domain, unsigned int virq,
+				  unsigned int nr_irqs)
 {
-	struct rcar_msi *msi = to_rcar_msi(chip);
-	struct irq_data *d = irq_get_irq_data(irq);
+	struct irq_data *d = irq_domain_get_irq_data(domain, virq);
+	struct rcar_msi *msi = domain->host_data;
 
-	rcar_msi_free(msi, d->hwirq);
+	mutex_lock(&msi->map_lock);
+
+	bitmap_release_region(msi->used, d->hwirq, order_base_2(nr_irqs));
+
+	mutex_unlock(&msi->map_lock);
 }
 
-static struct irq_chip rcar_msi_irq_chip = {
-	.name = "R-Car PCIe MSI",
-	.irq_enable = pci_msi_unmask_irq,
-	.irq_disable = pci_msi_mask_irq,
-	.irq_mask = pci_msi_mask_irq,
-	.irq_unmask = pci_msi_unmask_irq,
+static const struct irq_domain_ops rcar_msi_domain_ops = {
+	.alloc	= rcar_msi_domain_alloc,
+	.free	= rcar_msi_domain_free,
 };
 
-static int rcar_msi_map(struct irq_domain *domain, unsigned int irq,
-			irq_hw_number_t hwirq)
+#define RCAR_MSI_FLAGS_REQUIRED (MSI_FLAG_USE_DEF_DOM_OPS	| \
+				 MSI_FLAG_USE_DEF_CHIP_OPS	| \
+				 MSI_FLAG_PCI_MSI_MASK_PARENT	| \
+				 MSI_FLAG_NO_AFFINITY)
+
+#define RCAR_MSI_FLAGS_SUPPORTED (MSI_GENERIC_FLAGS_MASK	| \
+				  MSI_FLAG_MULTI_PCI_MSI)
+
+static const struct msi_parent_ops rcar_msi_parent_ops = {
+	.required_flags		= RCAR_MSI_FLAGS_REQUIRED,
+	.supported_flags	= RCAR_MSI_FLAGS_SUPPORTED,
+	.bus_select_token	= DOMAIN_BUS_PCI_MSI,
+	.chip_flags		= MSI_CHIP_FLAG_SET_ACK,
+	.prefix			= "RCAR-",
+	.init_dev_msi_info	= msi_lib_init_dev_msi_info,
+};
+
+static int rcar_allocate_domains(struct rcar_msi *msi)
 {
-	irq_set_chip_and_handler(irq, &rcar_msi_irq_chip, handle_simple_irq);
-	irq_set_chip_data(irq, domain->host_data);
+	struct rcar_pcie *pcie = &msi_to_host(msi)->pcie;
+	struct irq_domain_info info = {
+		.fwnode		= dev_fwnode(pcie->dev),
+		.ops		= &rcar_msi_domain_ops,
+		.host_data	= msi,
+		.size		= INT_PCI_MSI_NR,
+	};
+
+	msi->domain = msi_create_parent_irq_domain(&info, &rcar_msi_parent_ops);
+	if (!msi->domain) {
+		dev_err(pcie->dev, "failed to create IRQ domain\n");
+		return -ENOMEM;
+	}
 
 	return 0;
 }
 
-static const struct irq_domain_ops msi_domain_ops = {
-	.map = rcar_msi_map,
-};
-
-static void rcar_pcie_unmap_msi(struct rcar_pcie_host *host)
+static void rcar_free_domains(struct rcar_msi *msi)
 {
-	struct rcar_msi *msi = &host->msi;
-	int i, irq;
-
-	for (i = 0; i < INT_PCI_MSI_NR; i++) {
-		irq = irq_find_mapping(msi->domain, i);
-		if (irq > 0)
-			irq_dispose_mapping(irq);
-	}
-
 	irq_domain_remove(msi->domain);
 }
 
@@ -723,30 +731,24 @@ static int rcar_pcie_enable_msi(struct rcar_pcie_host *host)
 	struct rcar_pcie *pcie = &host->pcie;
 	struct device *dev = pcie->dev;
 	struct rcar_msi *msi = &host->msi;
-	phys_addr_t base;
-	int err, i;
+	struct resource res;
+	int err;
 
-	mutex_init(&msi->lock);
+	mutex_init(&msi->map_lock);
+	raw_spin_lock_init(&msi->mask_lock);
 
-	msi->chip.dev = dev;
-	msi->chip.setup_irq = rcar_msi_setup_irq;
-	msi->chip.setup_irqs = rcar_msi_setup_irqs;
-	msi->chip.teardown_irq = rcar_msi_teardown_irq;
+	err = of_address_to_resource(dev->of_node, 0, &res);
+	if (err)
+		return err;
 
-	msi->domain = irq_domain_add_linear(dev->of_node, INT_PCI_MSI_NR,
-					    &msi_domain_ops, &msi->chip);
-	if (!msi->domain) {
-		dev_err(dev, "failed to create IRQ domain\n");
-		return -ENOMEM;
-	}
+	err = rcar_allocate_domains(msi);
+	if (err)
+		return err;
 
-	for (i = 0; i < INT_PCI_MSI_NR; i++)
-		irq_create_mapping(msi->domain, i);
-
-	/* Two irqs are for MSI, but they are also used for non-MSI irqs */
+	/* Two IRQs are for MSI, but they are also used for non-MSI IRQs */
 	err = devm_request_irq(dev, msi->irq1, rcar_pcie_msi_irq,
 			       IRQF_SHARED | IRQF_NO_THREAD,
-			       rcar_msi_irq_chip.name, host);
+			       rcar_msi_bottom_chip.name, host);
 	if (err < 0) {
 		dev_err(dev, "failed to request IRQ: %d\n", err);
 		goto err;
@@ -754,37 +756,32 @@ static int rcar_pcie_enable_msi(struct rcar_pcie_host *host)
 
 	err = devm_request_irq(dev, msi->irq2, rcar_pcie_msi_irq,
 			       IRQF_SHARED | IRQF_NO_THREAD,
-			       rcar_msi_irq_chip.name, host);
+			       rcar_msi_bottom_chip.name, host);
 	if (err < 0) {
 		dev_err(dev, "failed to request IRQ: %d\n", err);
 		goto err;
 	}
 
-	/* setup MSI data target */
-	msi->pages = __get_free_pages(GFP_KERNEL, 0);
-	if (!msi->pages) {
-		err = -ENOMEM;
-		goto err;
-	}
-	base = virt_to_phys((void *)msi->pages);
+	/* Disable all MSIs */
+	rcar_pci_write_reg(pcie, 0, PCIEMSIIER);
 
-	rcar_pci_write_reg(pcie, lower_32_bits(base) | MSIFE, PCIEMSIALR);
-	rcar_pci_write_reg(pcie, upper_32_bits(base), PCIEMSIAUR);
-
-	/* enable all MSI interrupts */
-	rcar_pci_write_reg(pcie, 0xffffffff, PCIEMSIIER);
+	/*
+	 * Setup MSI data target using RC base address, which is guaranteed
+	 * to be in the low 32bit range on any R-Car HW.
+	 */
+	rcar_pci_write_reg(pcie, lower_32_bits(res.start) | MSIFE, PCIEMSIALR);
+	rcar_pci_write_reg(pcie, upper_32_bits(res.start), PCIEMSIAUR);
 
 	return 0;
 
 err:
-	rcar_pcie_unmap_msi(host);
+	rcar_free_domains(msi);
 	return err;
 }
 
 static void rcar_pcie_teardown_msi(struct rcar_pcie_host *host)
 {
 	struct rcar_pcie *pcie = &host->pcie;
-	struct rcar_msi *msi = &host->msi;
 
 	/* Disable all MSI interrupts */
 	rcar_pci_write_reg(pcie, 0, PCIEMSIIER);
@@ -792,9 +789,7 @@ static void rcar_pcie_teardown_msi(struct rcar_pcie_host *host)
 	/* Disable address decoding of the MSI interrupt, MSIFE */
 	rcar_pci_write_reg(pcie, 0, PCIEMSIALR);
 
-	free_pages(msi->pages, 0);
-
-	rcar_pcie_unmap_msi(host);
+	rcar_free_domains(&host->msi);
 }
 
 static int rcar_pcie_get_resources(struct rcar_pcie_host *host)
@@ -847,82 +842,70 @@ err_irq1:
 }
 
 static int rcar_pcie_inbound_ranges(struct rcar_pcie *pcie,
-				    struct of_pci_range *range,
+				    struct resource_entry *entry,
 				    int *index)
 {
-	u64 restype = range->flags;
-	u64 cpu_addr = range->cpu_addr;
-	u64 cpu_end = range->cpu_addr + range->size;
-	u64 pci_addr = range->pci_addr;
+	u64 restype = entry->res->flags;
+	u64 cpu_addr = entry->res->start;
+	u64 cpu_end = entry->res->end;
+	u64 pci_addr = entry->res->start - entry->offset;
 	u32 flags = LAM_64BIT | LAR_ENABLE;
 	u64 mask;
-	u64 size;
+	u64 size = resource_size(entry->res);
 	int idx = *index;
 
 	if (restype & IORESOURCE_PREFETCH)
 		flags |= LAM_PREFETCH;
 
-	/*
-	 * If the size of the range is larger than the alignment of the start
-	 * address, we have to use multiple entries to perform the mapping.
-	 */
-	if (cpu_addr > 0) {
-		unsigned long nr_zeros = __ffs64(cpu_addr);
-		u64 alignment = 1ULL << nr_zeros;
-
-		size = min(range->size, alignment);
-	} else {
-		size = range->size;
-	}
-	/* Hardware supports max 4GiB inbound region */
-	size = min(size, 1ULL << 32);
-
-	mask = roundup_pow_of_two(size) - 1;
-	mask &= ~0xf;
-
 	while (cpu_addr < cpu_end) {
+		if (idx >= MAX_NR_INBOUND_MAPS - 1) {
+			dev_err(pcie->dev, "Failed to map inbound regions!\n");
+			return -EINVAL;
+		}
+
+		/*
+		 * If the size of the range is larger than the alignment of
+		 * the start address, we have to use multiple entries to
+		 * perform the mapping.
+		 */
+		if (cpu_addr > 0) {
+			unsigned long nr_zeros = __ffs64(cpu_addr);
+			u64 alignment = 1ULL << nr_zeros;
+
+			size = min(size, alignment);
+		}
+
+		/* Hardware supports max 4GiB inbound region */
+		size = min(size, 1ULL << 32);
+
+		mask = roundup_pow_of_two(size) - 1;
+		mask &= ~0xf;
+
 		rcar_pcie_set_inbound(pcie, cpu_addr, pci_addr,
 				      lower_32_bits(mask) | flags, idx, true);
 
 		pci_addr += size;
 		cpu_addr += size;
 		idx += 2;
-
-		if (idx > MAX_NR_INBOUND_MAPS) {
-			dev_err(pcie->dev, "Failed to map inbound regions!\n");
-			return -EINVAL;
-		}
 	}
 	*index = idx;
 
 	return 0;
 }
 
-static int rcar_pcie_parse_map_dma_ranges(struct rcar_pcie_host *host,
-					  struct device_node *np)
+static int rcar_pcie_parse_map_dma_ranges(struct rcar_pcie_host *host)
 {
-	struct rcar_pcie *pcie = &host->pcie;
-	struct of_pci_range range;
-	struct of_pci_range_parser parser;
-	int index = 0;
-	int err;
+	struct pci_host_bridge *bridge = pci_host_bridge_from_priv(host);
+	struct resource_entry *entry;
+	int index = 0, err = 0;
 
-	if (of_pci_dma_range_parser_init(&parser, np))
-		return -EINVAL;
-
-	/* Get the dma-ranges from DT */
-	for_each_of_pci_range(&parser, &range) {
-		u64 end = range.cpu_addr + range.size - 1;
-
-		dev_dbg(pcie->dev, "0x%08x 0x%016llx..0x%016llx -> 0x%016llx\n",
-			range.flags, range.cpu_addr, end, range.pci_addr);
-
-		err = rcar_pcie_inbound_ranges(pcie, &range, &index);
+	resource_list_for_each_entry(entry, &bridge->dma_ranges) {
+		err = rcar_pcie_inbound_ranges(&host->pcie, entry, &index);
 		if (err)
-			return err;
+			break;
 	}
 
-	return 0;
+	return err;
 }
 
 static const struct of_device_id rcar_pcie_of_match[] = {
@@ -941,17 +924,24 @@ static const struct of_device_id rcar_pcie_of_match[] = {
 	{},
 };
 
+/* Design note 346 from Linear Technology says order is not important. */
+static const char * const rcar_pcie_supplies[] = {
+	"vpcie1v5",
+	"vpcie3v3",
+	"vpcie12v",
+};
+
 static int rcar_pcie_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	struct pci_host_bridge *bridge;
 	struct rcar_pcie_host *host;
 	struct rcar_pcie *pcie;
+	unsigned int i;
 	u32 data;
 	int err;
-	int (*phy_init_fn)(struct rcar_pcie_host *);
-	struct pci_host_bridge *bridge;
 
-	bridge = pci_alloc_host_bridge(sizeof(*host));
+	bridge = devm_pci_alloc_host_bridge(dev, sizeof(*host));
 	if (!bridge)
 		return -ENOMEM;
 
@@ -960,15 +950,18 @@ static int rcar_pcie_probe(struct platform_device *pdev)
 	pcie->dev = dev;
 	platform_set_drvdata(pdev, host);
 
-	err = pci_parse_request_of_pci_ranges(dev, &host->resources, NULL);
-	if (err)
-		goto err_free_bridge;
+	for (i = 0; i < ARRAY_SIZE(rcar_pcie_supplies); i++) {
+		err = devm_regulator_get_enable_optional(dev, rcar_pcie_supplies[i]);
+		if (err < 0 && err != -ENODEV)
+			return dev_err_probe(dev, err, "failed to enable regulator: %s\n",
+					     rcar_pcie_supplies[i]);
+	}
 
 	pm_runtime_enable(pcie->dev);
 	err = pm_runtime_get_sync(pcie->dev);
 	if (err < 0) {
 		dev_err(pcie->dev, "pm_runtime_get_sync failed\n");
-		goto err_pm_disable;
+		goto err_pm_put;
 	}
 
 	err = rcar_pcie_get_resources(host);
@@ -983,12 +976,12 @@ static int rcar_pcie_probe(struct platform_device *pdev)
 		goto err_unmap_msi_irqs;
 	}
 
-	err = rcar_pcie_parse_map_dma_ranges(host, dev->of_node);
+	err = rcar_pcie_parse_map_dma_ranges(host);
 	if (err)
 		goto err_clk_disable;
 
-	phy_init_fn = of_device_get_match_data(dev);
-	err = phy_init_fn(host);
+	host->phy_init_fn = of_device_get_match_data(dev);
+	err = host->phy_init_fn(host);
 	if (err) {
 		dev_err(dev, "failed to init PCIe PHY\n");
 		goto err_clk_disable;
@@ -1039,15 +1032,48 @@ err_unmap_msi_irqs:
 
 err_pm_put:
 	pm_runtime_put(dev);
-
-err_pm_disable:
 	pm_runtime_disable(dev);
-	pci_free_resource_list(&host->resources);
-
-err_free_bridge:
-	pci_free_host_bridge(bridge);
 
 	return err;
+}
+
+static int rcar_pcie_resume(struct device *dev)
+{
+	struct rcar_pcie_host *host = dev_get_drvdata(dev);
+	struct rcar_pcie *pcie = &host->pcie;
+	unsigned int data;
+	int err;
+
+	err = rcar_pcie_parse_map_dma_ranges(host);
+	if (err)
+		return 0;
+
+	/* Failure to get a link might just be that no cards are inserted */
+	err = host->phy_init_fn(host);
+	if (err) {
+		dev_info(dev, "PCIe link down\n");
+		return 0;
+	}
+
+	data = rcar_pci_read_reg(pcie, MACSR);
+	dev_info(dev, "PCIe x%d: link up\n", (data >> 20) & 0x3f);
+
+	/* Enable MSI */
+	if (IS_ENABLED(CONFIG_PCI_MSI)) {
+		struct resource res;
+		u32 val;
+
+		of_address_to_resource(dev->of_node, 0, &res);
+		rcar_pci_write_reg(pcie, upper_32_bits(res.start), PCIEMSIAUR);
+		rcar_pci_write_reg(pcie, lower_32_bits(res.start) | MSIFE, PCIEMSIALR);
+
+		bitmap_to_arr32(&val, host->msi.used, INT_PCI_MSI_NR);
+		rcar_pci_write_reg(pcie, val, PCIEMSIIER);
+	}
+
+	rcar_pcie_hw_enable(host);
+
+	return 0;
 }
 
 static int rcar_pcie_resume_noirq(struct device *dev)
@@ -1066,6 +1092,7 @@ static int rcar_pcie_resume_noirq(struct device *dev)
 }
 
 static const struct dev_pm_ops rcar_pcie_pm_ops = {
+	SYSTEM_SLEEP_PM_OPS(NULL, rcar_pcie_resume)
 	.resume_noirq = rcar_pcie_resume_noirq,
 };
 
@@ -1078,4 +1105,37 @@ static struct platform_driver rcar_pcie_driver = {
 	},
 	.probe = rcar_pcie_probe,
 };
+
+#ifdef CONFIG_ARM
+static int rcar_pcie_aarch32_abort_handler(unsigned long addr,
+		unsigned int fsr, struct pt_regs *regs)
+{
+	return !fixup_exception(regs);
+}
+
+static const struct of_device_id rcar_pcie_abort_handler_of_match[] __initconst = {
+	{ .compatible = "renesas,pcie-r8a7779" },
+	{ .compatible = "renesas,pcie-r8a7790" },
+	{ .compatible = "renesas,pcie-r8a7791" },
+	{ .compatible = "renesas,pcie-rcar-gen2" },
+	{},
+};
+
+static int __init rcar_pcie_init(void)
+{
+	if (of_find_matching_node(NULL, rcar_pcie_abort_handler_of_match)) {
+#ifdef CONFIG_ARM_LPAE
+		hook_fault_code(17, rcar_pcie_aarch32_abort_handler, SIGBUS, 0,
+				"asynchronous external abort");
+#else
+		hook_fault_code(22, rcar_pcie_aarch32_abort_handler, SIGBUS, 0,
+				"imprecise external abort");
+#endif
+	}
+
+	return platform_driver_register(&rcar_pcie_driver);
+}
+device_initcall(rcar_pcie_init);
+#else
 builtin_platform_driver(rcar_pcie_driver);
+#endif

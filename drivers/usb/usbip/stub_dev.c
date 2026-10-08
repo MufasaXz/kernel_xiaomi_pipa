@@ -30,7 +30,7 @@ static ssize_t usbip_status_show(struct device *dev,
 	status = sdev->ud.status;
 	spin_unlock_irq(&sdev->ud.lock);
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", status);
+	return sysfs_emit(buf, "%d\n", status);
 }
 static DEVICE_ATTR_RO(usbip_status);
 
@@ -118,6 +118,8 @@ static ssize_t usbip_sockfd_store(struct device *dev, struct device_attribute *a
 	} else {
 		dev_info(dev, "stub down\n");
 
+		mutex_lock(&sdev->ud.sysfs_lock);
+
 		spin_lock_irq(&sdev->ud.lock);
 		if (sdev->ud.status != SDEV_ST_USED)
 			goto err;
@@ -140,38 +142,13 @@ unlock_mutex:
 }
 static DEVICE_ATTR_WO(usbip_sockfd);
 
-static int stub_add_files(struct device *dev)
-{
-	int err = 0;
-
-	err = device_create_file(dev, &dev_attr_usbip_status);
-	if (err)
-		goto err_status;
-
-	err = device_create_file(dev, &dev_attr_usbip_sockfd);
-	if (err)
-		goto err_sockfd;
-
-	err = device_create_file(dev, &dev_attr_usbip_debug);
-	if (err)
-		goto err_debug;
-
-	return 0;
-
-err_debug:
-	device_remove_file(dev, &dev_attr_usbip_sockfd);
-err_sockfd:
-	device_remove_file(dev, &dev_attr_usbip_status);
-err_status:
-	return err;
-}
-
-static void stub_remove_files(struct device *dev)
-{
-	device_remove_file(dev, &dev_attr_usbip_status);
-	device_remove_file(dev, &dev_attr_usbip_sockfd);
-	device_remove_file(dev, &dev_attr_usbip_debug);
-}
+static struct attribute *usbip_attrs[] = {
+	&dev_attr_usbip_status.attr,
+	&dev_attr_usbip_sockfd.attr,
+	&dev_attr_usbip_debug.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(usbip);
 
 static void stub_shutdown_connection(struct usbip_device *ud)
 {
@@ -414,17 +391,8 @@ static int stub_probe(struct usb_device *udev)
 		goto err_port;
 	}
 
-	rc = stub_add_files(&udev->dev);
-	if (rc) {
-		dev_err(&udev->dev, "stub_add_files for %s\n", udev_busid);
-		goto err_files;
-	}
-
 	return 0;
 
-err_files:
-	usb_hub_release_port(udev->parent, udev->portnum,
-			     (struct usb_dev_state *) udev);
 err_port:
 	dev_set_drvdata(&udev->dev, NULL);
 
@@ -492,7 +460,6 @@ static void stub_disconnect(struct usb_device *udev)
 	/*
 	 * NOTE: rx/tx threads are invoked for each usb_device.
 	 */
-	stub_remove_files(&udev->dev);
 
 	/* release port */
 	rc = usb_hub_release_port(udev->parent, udev->portnum,
@@ -566,4 +533,5 @@ struct usb_device_driver stub_driver = {
 	.resume		= stub_resume,
 #endif
 	.supports_autosuspend	=	0,
+	.dev_groups	= usbip_groups,
 };

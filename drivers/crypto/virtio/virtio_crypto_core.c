@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
  /* Driver for Virtio crypto device.
   *
   * Copyright 2016 HUAWEI TECHNOLOGIES CO., LTD.
-  *
-  * This program is free software; you can redistribute it and/or modify
-  * it under the terms of the GNU General Public License as published by
-  * the Free Software Foundation; either version 2 of the License, or
-  * (at your option) any later version.
-  *
-  * This program is distributed in the hope that it will be useful,
-  * but WITHOUT ANY WARRANTY; without even the implied warranty of
-  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  * GNU General Public License for more details.
-  *
-  * You should have received a copy of the GNU General Public License
-  * along with this program; if not, see <http://www.gnu.org/licenses/>.
   */
 
 #include <linux/err.h>
@@ -29,9 +17,57 @@ void
 virtcrypto_clear_request(struct virtio_crypto_request *vc_req)
 {
 	if (vc_req) {
-		kzfree(vc_req->req_data);
+		kfree_sensitive(vc_req->req_data);
 		kfree(vc_req->sgs);
 	}
+}
+
+static void virtio_crypto_ctrlq_callback(struct virtio_crypto_ctrl_request *vc_ctrl_req)
+{
+	complete(&vc_ctrl_req->compl);
+}
+
+static void virtcrypto_ctrlq_callback(struct virtqueue *vq)
+{
+	struct virtio_crypto *vcrypto = vq->vdev->priv;
+	struct virtio_crypto_ctrl_request *vc_ctrl_req;
+	unsigned long flags;
+	unsigned int len;
+
+	spin_lock_irqsave(&vcrypto->ctrl_lock, flags);
+	do {
+		virtqueue_disable_cb(vq);
+		while ((vc_ctrl_req = virtqueue_get_buf(vq, &len)) != NULL) {
+			spin_unlock_irqrestore(&vcrypto->ctrl_lock, flags);
+			virtio_crypto_ctrlq_callback(vc_ctrl_req);
+			spin_lock_irqsave(&vcrypto->ctrl_lock, flags);
+		}
+	} while (!virtqueue_enable_cb(vq));
+	spin_unlock_irqrestore(&vcrypto->ctrl_lock, flags);
+}
+
+int virtio_crypto_ctrl_vq_request(struct virtio_crypto *vcrypto, struct scatterlist *sgs[],
+		unsigned int out_sgs, unsigned int in_sgs,
+		struct virtio_crypto_ctrl_request *vc_ctrl_req)
+{
+	int err;
+	unsigned long flags;
+
+	init_completion(&vc_ctrl_req->compl);
+
+	spin_lock_irqsave(&vcrypto->ctrl_lock, flags);
+	err = virtqueue_add_sgs(vcrypto->ctrl_vq, sgs, out_sgs, in_sgs, vc_ctrl_req, GFP_ATOMIC);
+	if (err < 0) {
+		spin_unlock_irqrestore(&vcrypto->ctrl_lock, flags);
+		return err;
+	}
+
+	virtqueue_kick(vcrypto->ctrl_vq);
+	spin_unlock_irqrestore(&vcrypto->ctrl_lock, flags);
+
+	wait_for_completion(&vc_ctrl_req->compl);
+
+	return 0;
 }
 
 static void virtcrypto_done_task(unsigned long data)
@@ -39,15 +75,20 @@ static void virtcrypto_done_task(unsigned long data)
 	struct data_queue *data_vq = (struct data_queue *)data;
 	struct virtqueue *vq = data_vq->vq;
 	struct virtio_crypto_request *vc_req;
+	unsigned long flags;
 	unsigned int len;
 
+	spin_lock_irqsave(&data_vq->lock, flags);
 	do {
 		virtqueue_disable_cb(vq);
 		while ((vc_req = virtqueue_get_buf(vq, &len)) != NULL) {
+			spin_unlock_irqrestore(&data_vq->lock, flags);
 			if (vc_req->alg_cb)
 				vc_req->alg_cb(vc_req, len);
+			spin_lock_irqsave(&data_vq->lock, flags);
 		}
 	} while (!virtqueue_enable_cb(vq));
+	spin_unlock_irqrestore(&data_vq->lock, flags);
 }
 
 static void virtcrypto_dataq_callback(struct virtqueue *vq)
@@ -60,11 +101,10 @@ static void virtcrypto_dataq_callback(struct virtqueue *vq)
 
 static int virtcrypto_find_vqs(struct virtio_crypto *vi)
 {
-	vq_callback_t **callbacks;
+	struct virtqueue_info *vqs_info;
 	struct virtqueue **vqs;
 	int ret = -ENOMEM;
 	int i, total_vqs;
-	const char **names;
 	struct device *dev = &vi->vdev->dev;
 
 	/*
@@ -78,26 +118,23 @@ static int virtcrypto_find_vqs(struct virtio_crypto *vi)
 	vqs = kcalloc(total_vqs, sizeof(*vqs), GFP_KERNEL);
 	if (!vqs)
 		goto err_vq;
-	callbacks = kcalloc(total_vqs, sizeof(*callbacks), GFP_KERNEL);
-	if (!callbacks)
-		goto err_callback;
-	names = kcalloc(total_vqs, sizeof(*names), GFP_KERNEL);
-	if (!names)
-		goto err_names;
+	vqs_info = kcalloc(total_vqs, sizeof(*vqs_info), GFP_KERNEL);
+	if (!vqs_info)
+		goto err_vqs_info;
 
 	/* Parameters for control virtqueue */
-	callbacks[total_vqs - 1] = NULL;
-	names[total_vqs - 1] = "controlq";
+	vqs_info[total_vqs - 1].callback = virtcrypto_ctrlq_callback;
+	vqs_info[total_vqs - 1].name = "controlq";
 
 	/* Allocate/initialize parameters for data virtqueues */
 	for (i = 0; i < vi->max_data_queues; i++) {
-		callbacks[i] = virtcrypto_dataq_callback;
+		vqs_info[i].callback = virtcrypto_dataq_callback;
 		snprintf(vi->data_vq[i].name, sizeof(vi->data_vq[i].name),
 				"dataq.%d", i);
-		names[i] = vi->data_vq[i].name;
+		vqs_info[i].name = vi->data_vq[i].name;
 	}
 
-	ret = virtio_find_vqs(vi->vdev, total_vqs, vqs, callbacks, names, NULL);
+	ret = virtio_find_vqs(vi->vdev, total_vqs, vqs, vqs_info, NULL);
 	if (ret)
 		goto err_find;
 
@@ -107,7 +144,8 @@ static int virtcrypto_find_vqs(struct virtio_crypto *vi)
 		spin_lock_init(&vi->data_vq[i].lock);
 		vi->data_vq[i].vq = vqs[i];
 		/* Initialize crypto engine */
-		vi->data_vq[i].engine = crypto_engine_alloc_init(dev, 1);
+		vi->data_vq[i].engine = crypto_engine_alloc_init_and_set(dev, true, true,
+						virtqueue_get_vring_size(vqs[i]));
 		if (!vi->data_vq[i].engine) {
 			ret = -ENOMEM;
 			goto err_engine;
@@ -116,18 +154,15 @@ static int virtcrypto_find_vqs(struct virtio_crypto *vi)
 				(unsigned long)&vi->data_vq[i]);
 	}
 
-	kfree(names);
-	kfree(callbacks);
+	kfree(vqs_info);
 	kfree(vqs);
 
 	return 0;
 
 err_engine:
 err_find:
-	kfree(names);
-err_names:
-	kfree(callbacks);
-err_callback:
+	kfree(vqs_info);
+err_vqs_info:
 	kfree(vqs);
 err_vq:
 	return ret;
@@ -202,9 +237,9 @@ static int virtcrypto_init_vqs(struct virtio_crypto *vi)
 	if (ret)
 		goto err_free;
 
-	get_online_cpus();
+	cpus_read_lock();
 	virtcrypto_set_affinity(vi);
-	put_online_cpus();
+	cpus_read_unlock();
 
 	return 0;
 
@@ -219,8 +254,8 @@ static int virtcrypto_update_status(struct virtio_crypto *vcrypto)
 	u32 status;
 	int err;
 
-	virtio_cread(vcrypto->vdev,
-	    struct virtio_crypto_config, status, &status);
+	virtio_cread_le(vcrypto->vdev,
+			struct virtio_crypto_config, status, &status);
 
 	/*
 	 * Unknown status bits would be a host error and the driver
@@ -299,6 +334,14 @@ static void virtcrypto_del_vqs(struct virtio_crypto *vcrypto)
 	virtcrypto_free_queues(vcrypto);
 }
 
+static void vcrypto_config_changed_work(struct work_struct *work)
+{
+	struct virtio_crypto *vcrypto =
+		container_of(work, struct virtio_crypto, config_work);
+
+	virtcrypto_update_status(vcrypto);
+}
+
 static int virtcrypto_probe(struct virtio_device *vdev)
 {
 	int err = -EFAULT;
@@ -312,6 +355,7 @@ static int virtcrypto_probe(struct virtio_device *vdev)
 	u32 mac_algo_l = 0;
 	u32 mac_algo_h = 0;
 	u32 aead_algo = 0;
+	u32 akcipher_algo = 0;
 	u32 crypto_services = 0;
 
 	if (!virtio_has_feature(vdev, VIRTIO_F_VERSION_1))
@@ -338,31 +382,34 @@ static int virtcrypto_probe(struct virtio_device *vdev)
 	if (!vcrypto)
 		return -ENOMEM;
 
-	virtio_cread(vdev, struct virtio_crypto_config,
+	virtio_cread_le(vdev, struct virtio_crypto_config,
 			max_dataqueues, &max_data_queues);
 	if (max_data_queues < 1)
 		max_data_queues = 1;
 
-	virtio_cread(vdev, struct virtio_crypto_config,
-		max_cipher_key_len, &max_cipher_key_len);
-	virtio_cread(vdev, struct virtio_crypto_config,
-		max_auth_key_len, &max_auth_key_len);
-	virtio_cread(vdev, struct virtio_crypto_config,
-		max_size, &max_size);
-	virtio_cread(vdev, struct virtio_crypto_config,
-		crypto_services, &crypto_services);
-	virtio_cread(vdev, struct virtio_crypto_config,
-		cipher_algo_l, &cipher_algo_l);
-	virtio_cread(vdev, struct virtio_crypto_config,
-		cipher_algo_h, &cipher_algo_h);
-	virtio_cread(vdev, struct virtio_crypto_config,
-		hash_algo, &hash_algo);
-	virtio_cread(vdev, struct virtio_crypto_config,
-		mac_algo_l, &mac_algo_l);
-	virtio_cread(vdev, struct virtio_crypto_config,
-		mac_algo_h, &mac_algo_h);
-	virtio_cread(vdev, struct virtio_crypto_config,
-		aead_algo, &aead_algo);
+	virtio_cread_le(vdev, struct virtio_crypto_config,
+			max_cipher_key_len, &max_cipher_key_len);
+	virtio_cread_le(vdev, struct virtio_crypto_config,
+			max_auth_key_len, &max_auth_key_len);
+	virtio_cread_le(vdev, struct virtio_crypto_config,
+			max_size, &max_size);
+	virtio_cread_le(vdev, struct virtio_crypto_config,
+			crypto_services, &crypto_services);
+	virtio_cread_le(vdev, struct virtio_crypto_config,
+			cipher_algo_l, &cipher_algo_l);
+	virtio_cread_le(vdev, struct virtio_crypto_config,
+			cipher_algo_h, &cipher_algo_h);
+	virtio_cread_le(vdev, struct virtio_crypto_config,
+			hash_algo, &hash_algo);
+	virtio_cread_le(vdev, struct virtio_crypto_config,
+			mac_algo_l, &mac_algo_l);
+	virtio_cread_le(vdev, struct virtio_crypto_config,
+			mac_algo_h, &mac_algo_h);
+	virtio_cread_le(vdev, struct virtio_crypto_config,
+			aead_algo, &aead_algo);
+	if (crypto_services & (1 << VIRTIO_CRYPTO_SERVICE_AKCIPHER))
+		virtio_cread_le(vdev, struct virtio_crypto_config,
+				akcipher_algo, &akcipher_algo);
 
 	/* Add virtio crypto device to global table */
 	err = virtcrypto_devmgr_add_dev(vcrypto);
@@ -389,7 +436,7 @@ static int virtcrypto_probe(struct virtio_device *vdev)
 	vcrypto->mac_algo_h = mac_algo_h;
 	vcrypto->hash_algo = hash_algo;
 	vcrypto->aead_algo = aead_algo;
-
+	vcrypto->akcipher_algo = akcipher_algo;
 
 	dev_info(&vdev->dev,
 		"max_queues: %u, max_cipher_key_len: %u, max_auth_key_len: %u, max_size 0x%llx\n",
@@ -414,12 +461,14 @@ static int virtcrypto_probe(struct virtio_device *vdev)
 	if (err)
 		goto free_engines;
 
+	INIT_WORK(&vcrypto->config_work, vcrypto_config_changed_work);
+
 	return 0;
 
 free_engines:
 	virtcrypto_clear_crypto_engines(vcrypto);
 free_vqs:
-	vcrypto->vdev->config->reset(vdev);
+	virtio_reset_device(vdev);
 	virtcrypto_del_vqs(vcrypto);
 free_dev:
 	virtcrypto_devmgr_rm_dev(vcrypto);
@@ -436,10 +485,9 @@ static void virtcrypto_free_unused_reqs(struct virtio_crypto *vcrypto)
 
 	for (i = 0; i < vcrypto->max_data_queues; i++) {
 		vq = vcrypto->data_vq[i].vq;
-		while ((vc_req = virtqueue_detach_unused_buf(vq)) != NULL) {
-			kfree(vc_req->req_data);
-			kfree(vc_req->sgs);
-		}
+		while ((vc_req = virtqueue_detach_unused_buf(vq)) != NULL)
+			virtcrypto_clear_request(vc_req);
+		cond_resched();
 	}
 }
 
@@ -450,11 +498,12 @@ static void virtcrypto_remove(struct virtio_device *vdev)
 
 	dev_info(&vdev->dev, "Start virtcrypto_remove.\n");
 
+	flush_work(&vcrypto->config_work);
 	if (virtcrypto_dev_started(vcrypto))
 		virtcrypto_dev_stop(vcrypto);
 	for (i = 0; i < vcrypto->max_data_queues; i++)
 		tasklet_kill(&vcrypto->data_vq[i].done_task);
-	vdev->config->reset(vdev);
+	virtio_reset_device(vdev);
 	virtcrypto_free_unused_reqs(vcrypto);
 	virtcrypto_clear_crypto_engines(vcrypto);
 	virtcrypto_del_vqs(vcrypto);
@@ -466,7 +515,7 @@ static void virtcrypto_config_changed(struct virtio_device *vdev)
 {
 	struct virtio_crypto *vcrypto = vdev->priv;
 
-	virtcrypto_update_status(vcrypto);
+	schedule_work(&vcrypto->config_work);
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -474,7 +523,8 @@ static int virtcrypto_freeze(struct virtio_device *vdev)
 {
 	struct virtio_crypto *vcrypto = vdev->priv;
 
-	vdev->config->reset(vdev);
+	flush_work(&vcrypto->config_work);
+	virtio_reset_device(vdev);
 	virtcrypto_free_unused_reqs(vcrypto);
 	if (virtcrypto_dev_started(vcrypto))
 		virtcrypto_dev_stop(vcrypto);
@@ -510,24 +560,23 @@ static int virtcrypto_restore(struct virtio_device *vdev)
 free_engines:
 	virtcrypto_clear_crypto_engines(vcrypto);
 free_vqs:
-	vcrypto->vdev->config->reset(vdev);
+	virtio_reset_device(vdev);
 	virtcrypto_del_vqs(vcrypto);
 	return err;
 }
 #endif
 
-static unsigned int features[] = {
+static const unsigned int features[] = {
 	/* none */
 };
 
-static struct virtio_device_id id_table[] = {
+static const struct virtio_device_id id_table[] = {
 	{ VIRTIO_ID_CRYPTO, VIRTIO_DEV_ANY_ID },
 	{ 0 },
 };
 
 static struct virtio_driver virtio_crypto_driver = {
 	.driver.name         = KBUILD_MODNAME,
-	.driver.owner        = THIS_MODULE,
 	.feature_table       = features,
 	.feature_table_size  = ARRAY_SIZE(features),
 	.id_table            = id_table,

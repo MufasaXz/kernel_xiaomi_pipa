@@ -1,18 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2012  Intel Corporation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 #define pr_fmt(fmt) "hci: %s: " fmt, __func__
@@ -140,7 +128,7 @@ static void nfc_hci_msg_rx_work(struct work_struct *work)
 	struct nfc_hci_dev *hdev = container_of(work, struct nfc_hci_dev,
 						msg_rx_work);
 	struct sk_buff *skb;
-	struct hcp_message *message;
+	const struct hcp_message *message;
 	u8 pipe;
 	u8 type;
 	u8 instruction;
@@ -160,7 +148,7 @@ static void nfc_hci_msg_rx_work(struct work_struct *work)
 static void __nfc_hci_cmd_completion(struct nfc_hci_dev *hdev, int err,
 				     struct sk_buff *skb)
 {
-	del_timer_sync(&hdev->cmd_timer);
+	timer_delete_sync(&hdev->cmd_timer);
 
 	if (hdev->cmd_pending_msg->cb)
 		hdev->cmd_pending_msg->cb(hdev->cmd_pending_msg->cb_context,
@@ -194,9 +182,9 @@ void nfc_hci_cmd_received(struct nfc_hci_dev *hdev, u8 pipe, u8 cmd,
 			  struct sk_buff *skb)
 {
 	u8 status = NFC_HCI_ANY_OK;
-	struct hci_create_pipe_resp *create_info;
-	struct hci_delete_pipe_noti *delete_info;
-	struct hci_all_pipe_cleared_noti *cleared_info;
+	const struct hci_create_pipe_resp *create_info;
+	const struct hci_delete_pipe_noti *delete_info;
+	const struct hci_all_pipe_cleared_noti *cleared_info;
 	u8 gate;
 
 	pr_debug("from pipe %x cmd %x\n", pipe, cmd);
@@ -453,13 +441,13 @@ exit_noskb:
 
 static void nfc_hci_cmd_timeout(struct timer_list *t)
 {
-	struct nfc_hci_dev *hdev = from_timer(hdev, t, cmd_timer);
+	struct nfc_hci_dev *hdev = timer_container_of(hdev, t, cmd_timer);
 
 	schedule_work(&hdev->msg_tx_work);
 }
 
 static int hci_dev_connect_gates(struct nfc_hci_dev *hdev, u8 gate_count,
-				 struct nfc_hci_gate *gates)
+				 const struct nfc_hci_gate *gates)
 {
 	int r;
 	while (gate_count--) {
@@ -717,7 +705,7 @@ static void hci_transceive_cb(void *context, struct sk_buff *skb, int err)
 		/*
 		 * TODO: Check RF Error indicator to make sure data is valid.
 		 * It seems that HCI cmd can complete without error, but data
-		 * can be invalid if an RF error occured? Ignore for now.
+		 * can be invalid if an RF error occurred? Ignore for now.
 		 */
 		if (err == 0)
 			skb_trim(skb, skb->len - 1); /* RF Err ind */
@@ -940,7 +928,7 @@ static int hci_fw_download(struct nfc_dev *nfc_dev, const char *firmware_name)
 	return hdev->ops->fw_download(hdev, firmware_name);
 }
 
-static struct nfc_ops hci_nfc_ops = {
+static const struct nfc_ops hci_nfc_ops = {
 	.dev_up = hci_dev_up,
 	.dev_down = hci_dev_down,
 	.start_poll = hci_start_poll,
@@ -959,7 +947,7 @@ static struct nfc_ops hci_nfc_ops = {
 	.se_io = hci_se_io,
 };
 
-struct nfc_hci_dev *nfc_hci_allocate_device(struct nfc_hci_ops *ops,
+struct nfc_hci_dev *nfc_hci_allocate_device(const struct nfc_hci_ops *ops,
 					    struct nfc_hci_init_data *init_data,
 					    unsigned long quirks,
 					    u32 protocols,
@@ -1058,7 +1046,7 @@ void nfc_hci_unregister_device(struct nfc_hci_dev *hdev)
 
 	mutex_unlock(&hdev->msg_tx_mutex);
 
-	del_timer_sync(&hdev->cmd_timer);
+	timer_delete_sync(&hdev->cmd_timer);
 	cancel_work_sync(&hdev->msg_tx_work);
 
 	cancel_work_sync(&hdev->msg_rx_work);

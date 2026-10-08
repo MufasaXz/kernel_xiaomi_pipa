@@ -54,12 +54,12 @@ static int uas_find_endpoints(struct usb_host_interface *alt,
 
 static int uas_use_uas_driver(struct usb_interface *intf,
 			      const struct usb_device_id *id,
-			      unsigned long *flags_ret)
+			      u64 *flags_ret)
 {
 	struct usb_host_endpoint *eps[4] = { };
 	struct usb_device *udev = interface_to_usbdev(intf);
 	struct usb_hcd *hcd = bus_to_hcd(udev->bus);
-	unsigned long flags = id->driver_info;
+	u64 flags = id->driver_info;
 	struct usb_host_interface *alt;
 	int r;
 
@@ -133,7 +133,7 @@ static int uas_use_uas_driver(struct usb_interface *intf,
 
 	if (flags & US_FL_IGNORE_UAS) {
 		dev_warn(&udev->dev,
-			"UAS is blacklisted for this device, using usb-storage instead\n");
+			"UAS is ignored for this device, using usb-storage instead\n");
 		return 0;
 	}
 

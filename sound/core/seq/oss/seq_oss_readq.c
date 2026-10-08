@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * OSS compatible sequencer driver
  *
  * seq_oss_readq.c - MIDI input queue
  *
  * Copyright (C) 1998,99 Takashi Iwai <tiwai@suse.de>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include "seq_oss_readq.h"
@@ -153,13 +140,9 @@ int snd_seq_oss_readq_sysex(struct seq_oss_readq *q, int dev,
 int
 snd_seq_oss_readq_put_event(struct seq_oss_readq *q, union evrec *ev)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&q->lock, flags);
-	if (q->qlen >= q->maxlen - 1) {
-		spin_unlock_irqrestore(&q->lock, flags);
+	guard(spinlock_irqsave)(&q->lock);
+	if (q->qlen >= q->maxlen - 1)
 		return -ENOMEM;
-	}
 
 	memcpy(&q->q[q->tail], ev, sizeof(*ev));
 	q->tail = (q->tail + 1) % q->maxlen;
@@ -167,8 +150,6 @@ snd_seq_oss_readq_put_event(struct seq_oss_readq *q, union evrec *ev)
 
 	/* wake up sleeper */
 	wake_up(&q->midi_sleep);
-
-	spin_unlock_irqrestore(&q->lock, flags);
 
 	return 0;
 }

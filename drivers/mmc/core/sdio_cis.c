@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * linux/drivers/mmc/core/sdio_cis.c
  *
@@ -6,11 +7,6 @@
  * Copyright:	MontaVista Software Inc.
  *
  * Copyright 2007 Pierre Ossman
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or (at
- * your option) any later version.
  */
 
 #include <linux/kernel.h>
@@ -29,11 +25,15 @@
 static int cistpl_vers_1(struct mmc_card *card, struct sdio_func *func,
 			 const unsigned char *buf, unsigned size)
 {
+	u8 major_rev, minor_rev;
 	unsigned i, nr_strings;
 	char **buffer, *string;
 
 	if (size < 2)
 		return 0;
+
+	major_rev = buf[0];
+	minor_rev = buf[1];
 
 	/* Find all null-terminated (including zero length) strings in
 	   the TPLLV1_INFO field. Trailing garbage is ignored. */
@@ -59,17 +59,20 @@ static int cistpl_vers_1(struct mmc_card *card, struct sdio_func *func,
 	string = (char*)(buffer + nr_strings);
 
 	for (i = 0; i < nr_strings; i++) {
-		size_t buf_len = strlen(buf);
 		buffer[i] = string;
-		strlcpy(string, buf, buf_len + 1);
+		strcpy(string, buf);
 		string += strlen(string) + 1;
 		buf += strlen(buf) + 1;
 	}
 
 	if (func) {
+		func->major_rev = major_rev;
+		func->minor_rev = minor_rev;
 		func->num_info = nr_strings;
 		func->info = (const char**)buffer;
 	} else {
+		card->major_rev = major_rev;
+		card->minor_rev = minor_rev;
 		card->num_info = nr_strings;
 		card->info = (const char**)buffer;
 	}
@@ -285,15 +288,9 @@ static int sdio_read_cis(struct mmc_card *card, struct sdio_func *func)
 			break;
 
 		/* null entries have no link field or data */
-		if (tpl_code == 0x00) {
-			if (card->cis.vendor == 0x70 &&
-				(card->cis.device == 0x2460 ||
-				card->cis.device == 0x0460 ||
-				card->cis.device == 0x23F1 ||
-				card->cis.device == 0x23F0))
-				break;
+		if (tpl_code == 0x00)
 			continue;
-		}
+
 		ret = mmc_io_rw_direct(card, 0, 0, ptr++, 0, &tpl_link);
 		if (ret)
 			break;
@@ -333,13 +330,25 @@ static int sdio_read_cis(struct mmc_card *card, struct sdio_func *func)
 			prev = &this->next;
 
 			if (ret == -ENOENT) {
+
 				if (time_after(jiffies, timeout))
 					break;
-				/* warn about unknown tuples */
-				pr_warn_ratelimited("%s: queuing unknown"
-				       " CIS tuple 0x%02x (%u bytes)\n",
-				       mmc_hostname(card->host),
-				       tpl_code, tpl_link);
+
+#define FMT(type) "%s: queuing " type " CIS tuple 0x%02x [%*ph] (%u bytes)\n"
+				/*
+				 * Tuples in this range are reserved for
+				 * vendors, so don't warn about them
+				 */
+				if (tpl_code >= 0x80 && tpl_code <= 0x8f)
+					pr_debug_ratelimited(FMT("vendor"),
+						mmc_hostname(card->host),
+						tpl_code, tpl_link, this->data,
+						tpl_link);
+				else
+					pr_warn_ratelimited(FMT("unknown"),
+						mmc_hostname(card->host),
+						tpl_code, tpl_link, this->data,
+						tpl_link);
 			}
 
 			/* keep on analyzing tuples */

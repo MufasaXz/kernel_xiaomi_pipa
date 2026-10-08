@@ -21,18 +21,27 @@
  *
  * Authors: Alex Deucher
  */
+
 #include <linux/firmware.h>
-#include <linux/slab.h>
 #include <linux/module.h>
-#include <drm/drmP.h>
+#include <linux/pci.h>
+#include <linux/slab.h>
+
+#include <drm/drm_vblank.h>
+
+#include "atom.h"
+#include "evergreen.h"
+#include "cik_blit_shaders.h"
+#include "cik.h"
+#include "cikd.h"
+#include "clearstate_ci.h"
+#include "r600.h"
 #include "radeon.h"
 #include "radeon_asic.h"
 #include "radeon_audio.h"
-#include "cikd.h"
-#include "atom.h"
-#include "cik_blit_shaders.h"
 #include "radeon_ucode.h"
-#include "clearstate_ci.h"
+#include "si.h"
+#include "vce.h"
 
 #define SH_MEM_CONFIG_GFX_DEFAULT \
 	ALIGNMENT_MODE(SH_MEM_ALIGNMENT_MODE_UNALIGNED)
@@ -120,21 +129,7 @@ MODULE_FIRMWARE("radeon/mullins_mec.bin");
 MODULE_FIRMWARE("radeon/mullins_rlc.bin");
 MODULE_FIRMWARE("radeon/mullins_sdma.bin");
 
-extern int r600_ih_ring_alloc(struct radeon_device *rdev);
-extern void r600_ih_ring_fini(struct radeon_device *rdev);
-extern void evergreen_mc_stop(struct radeon_device *rdev, struct evergreen_mc_save *save);
-extern void evergreen_mc_resume(struct radeon_device *rdev, struct evergreen_mc_save *save);
-extern bool evergreen_is_display_hung(struct radeon_device *rdev);
-extern void sumo_rlc_fini(struct radeon_device *rdev);
-extern int sumo_rlc_init(struct radeon_device *rdev);
-extern void si_vram_gtt_location(struct radeon_device *rdev, struct radeon_mc *mc);
-extern void si_rlc_reset(struct radeon_device *rdev);
-extern void si_init_uvd_internal_cg(struct radeon_device *rdev);
 static u32 cik_get_cu_active_bitmap(struct radeon_device *rdev, u32 se, u32 sh);
-extern int cik_sdma_resume(struct radeon_device *rdev);
-extern void cik_sdma_enable(struct radeon_device *rdev, bool enable);
-extern void cik_sdma_fini(struct radeon_device *rdev);
-extern void vce_v2_0_enable_mgcg(struct radeon_device *rdev, bool enable);
 static void cik_rlc_stop(struct radeon_device *rdev);
 static void cik_pcie_gen3_enable(struct radeon_device *rdev);
 static void cik_program_aspm(struct radeon_device *rdev);
@@ -217,9 +212,7 @@ int ci_get_temp(struct radeon_device *rdev)
 	else
 		actual_temp = temp & 0x1ff;
 
-	actual_temp = actual_temp * 1000;
-
-	return actual_temp;
+	return actual_temp * 1000;
 }
 
 /* get temperature in millidegrees */
@@ -235,9 +228,7 @@ int kv_get_temp(struct radeon_device *rdev)
 	else
 		actual_temp = 0;
 
-	actual_temp = actual_temp * 1000;
-
-	return actual_temp;
+	return actual_temp * 1000;
 }
 
 /*
@@ -3071,8 +3062,7 @@ static u32 cik_create_bitmask(u32 bit_width)
  * cik_get_rb_disabled - computes the mask of disabled RBs
  *
  * @rdev: radeon_device pointer
- * @max_rb_num: max RBs (render backends) for the asic
- * @se_num: number of SEs (shader engines) for the asic
+ * @max_rb_num_per_se: max RBs (render backends) per SE (shader engine) for the asic
  * @sh_per_se: number of SH blocks per SE for the asic
  *
  * Calculates the bitmask of disabled RBs (CIK).
@@ -3104,7 +3094,7 @@ static u32 cik_get_rb_disabled(struct radeon_device *rdev,
  * @rdev: radeon_device pointer
  * @se_num: number of SEs (shader engines) for the asic
  * @sh_per_se: number of SH blocks per SE for the asic
- * @max_rb_num: max RBs (render backends) for the asic
+ * @max_rb_num_per_se: max RBs (render backends) per SE for the asic
  *
  * Configures per-SE/SH RB registers (CIK).
  */
@@ -3178,7 +3168,7 @@ static void cik_setup_rb(struct radeon_device *rdev,
 static void cik_gpu_init(struct radeon_device *rdev)
 {
 	u32 gb_addr_config = RREG32(GB_ADDR_CONFIG);
-	u32 mc_shared_chmap, mc_arb_ramcfg;
+	u32 mc_arb_ramcfg;
 	u32 hdp_host_path_cntl;
 	u32 tmp;
 	int i, j;
@@ -3271,7 +3261,7 @@ static void cik_gpu_init(struct radeon_device *rdev)
 
 	WREG32(BIF_FB_EN, FB_READ_EN | FB_WRITE_EN);
 
-	mc_shared_chmap = RREG32(MC_SHARED_CHMAP);
+	RREG32(MC_SHARED_CHMAP);
 	mc_arb_ramcfg = RREG32(MC_ARB_RAMCFG);
 
 	rdev->config.cik.num_tile_pipes = rdev->config.cik.max_tile_pipes;
@@ -3480,7 +3470,7 @@ int cik_ring_test(struct radeon_device *rdev, struct radeon_ring *ring)
 		tmp = RREG32(scratch);
 		if (tmp == 0xDEADBEEF)
 			break;
-		DRM_UDELAY(1);
+		udelay(1);
 	}
 	if (i < rdev->usec_timeout) {
 		DRM_INFO("ring test on %d succeeded in %d usecs\n", ring->idx, i);
@@ -3613,7 +3603,7 @@ void cik_fence_compute_ring_emit(struct radeon_device *rdev,
  * @rdev: radeon_device pointer
  * @ring: radeon ring buffer object
  * @semaphore: radeon semaphore object
- * @emit_wait: Is this a sempahore wait?
+ * @emit_wait: Is this a semaphore wait?
  *
  * Emits a semaphore signal/wait packet to the CP ring and prevents the PFP
  * from running ahead of semaphore waits.
@@ -3655,7 +3645,7 @@ bool cik_semaphore_ring_emit(struct radeon_device *rdev,
 struct radeon_fence *cik_copy_cpdma(struct radeon_device *rdev,
 				    uint64_t src_offset, uint64_t dst_offset,
 				    unsigned num_gpu_pages,
-				    struct reservation_object *resv)
+				    struct dma_resv *resv)
 {
 	struct radeon_fence *fence;
 	struct radeon_sync sync;
@@ -3825,7 +3815,7 @@ int cik_ib_test(struct radeon_device *rdev, struct radeon_ring *ring)
 		tmp = RREG32(scratch);
 		if (tmp == 0xDEADBEEF)
 			break;
-		DRM_UDELAY(1);
+		udelay(1);
 	}
 	if (i < rdev->usec_timeout) {
 		DRM_INFO("ib test on ring %d succeeded in %u usecs\n", ib.fence->ring, i);
@@ -5654,6 +5644,7 @@ void cik_vm_fini(struct radeon_device *rdev)
  * @rdev: radeon_device pointer
  * @status: VM_CONTEXT1_PROTECTION_FAULT_STATUS register value
  * @addr: VM_CONTEXT1_PROTECTION_FAULT_ADDR register value
+ * @mc_client: VM_CONTEXT1_PROTECTION_FAULT_MCCLIENT register value
  *
  * Print human readable fault information (CIK).
  */
@@ -5677,10 +5668,8 @@ static void cik_vm_decode_fault(struct radeon_device *rdev,
 	       block, mc_client, mc_id);
 }
 
-/**
+/*
  * cik_vm_flush - cik vm flush using the CP
- *
- * @rdev: radeon_device pointer
  *
  * Update the page table base and flush the VM TLB
  * using the CP (CIK).
@@ -7450,7 +7439,7 @@ static void cik_irq_disable(struct radeon_device *rdev)
 }
 
 /**
- * cik_irq_disable - disable interrupts for suspend
+ * cik_irq_suspend - disable interrupts for suspend
  *
  * @rdev: radeon_device pointer
  *
@@ -7596,7 +7585,7 @@ restart_ih:
 					DRM_DEBUG("IH: IH event w/o asserted irq bit?\n");
 
 				if (rdev->irq.crtc_vblank_int[0]) {
-					drm_handle_vblank(rdev->ddev, 0);
+					drm_handle_vblank(rdev_to_drm(rdev), 0);
 					rdev->pm.vblank_sync = true;
 					wake_up(&rdev->irq.vblank_queue);
 				}
@@ -7626,7 +7615,7 @@ restart_ih:
 					DRM_DEBUG("IH: IH event w/o asserted irq bit?\n");
 
 				if (rdev->irq.crtc_vblank_int[1]) {
-					drm_handle_vblank(rdev->ddev, 1);
+					drm_handle_vblank(rdev_to_drm(rdev), 1);
 					rdev->pm.vblank_sync = true;
 					wake_up(&rdev->irq.vblank_queue);
 				}
@@ -7656,7 +7645,7 @@ restart_ih:
 					DRM_DEBUG("IH: IH event w/o asserted irq bit?\n");
 
 				if (rdev->irq.crtc_vblank_int[2]) {
-					drm_handle_vblank(rdev->ddev, 2);
+					drm_handle_vblank(rdev_to_drm(rdev), 2);
 					rdev->pm.vblank_sync = true;
 					wake_up(&rdev->irq.vblank_queue);
 				}
@@ -7686,7 +7675,7 @@ restart_ih:
 					DRM_DEBUG("IH: IH event w/o asserted irq bit?\n");
 
 				if (rdev->irq.crtc_vblank_int[3]) {
-					drm_handle_vblank(rdev->ddev, 3);
+					drm_handle_vblank(rdev_to_drm(rdev), 3);
 					rdev->pm.vblank_sync = true;
 					wake_up(&rdev->irq.vblank_queue);
 				}
@@ -7716,7 +7705,7 @@ restart_ih:
 					DRM_DEBUG("IH: IH event w/o asserted irq bit?\n");
 
 				if (rdev->irq.crtc_vblank_int[4]) {
-					drm_handle_vblank(rdev->ddev, 4);
+					drm_handle_vblank(rdev_to_drm(rdev), 4);
 					rdev->pm.vblank_sync = true;
 					wake_up(&rdev->irq.vblank_queue);
 				}
@@ -7746,7 +7735,7 @@ restart_ih:
 					DRM_DEBUG("IH: IH event w/o asserted irq bit?\n");
 
 				if (rdev->irq.crtc_vblank_int[5]) {
-					drm_handle_vblank(rdev->ddev, 5);
+					drm_handle_vblank(rdev_to_drm(rdev), 5);
 					rdev->pm.vblank_sync = true;
 					wake_up(&rdev->irq.vblank_queue);
 				}
@@ -7959,8 +7948,6 @@ restart_ih:
 			DRM_ERROR("Illegal register access in command stream\n");
 			/* XXX check the bitfield order! */
 			me_id = (ring_id & 0x60) >> 5;
-			pipe_id = (ring_id & 0x18) >> 3;
-			queue_id = (ring_id & 0x7) >> 0;
 			switch (me_id) {
 			case 0:
 				/* This results in a full GPU reset, but all we need to do is soft
@@ -7982,8 +7969,6 @@ restart_ih:
 			DRM_ERROR("Illegal instruction in command stream\n");
 			/* XXX check the bitfield order! */
 			me_id = (ring_id & 0x60) >> 5;
-			pipe_id = (ring_id & 0x18) >> 3;
-			queue_id = (ring_id & 0x7) >> 0;
 			switch (me_id) {
 			case 0:
 				/* This results in a full GPU reset, but all we need to do is soft
@@ -8137,7 +8122,7 @@ static void cik_uvd_init(struct radeon_device *rdev)
 		 * there. So it is pointless to try to go through that code
 		 * hence why we disable uvd here.
 		 */
-		rdev->has_uvd = 0;
+		rdev->has_uvd = false;
 		return;
 	}
 	rdev->ring[R600_RING_TYPE_UVD_INDEX].ring_obj = NULL;
@@ -8209,7 +8194,7 @@ static void cik_vce_init(struct radeon_device *rdev)
 		 * there. So it is pointless to try to go through that code
 		 * hence why we disable vce here.
 		 */
-		rdev->has_vce = 0;
+		rdev->has_vce = false;
 		return;
 	}
 	rdev->ring[TN_RING_TYPE_VCE1_INDEX].ring_obj = NULL;
@@ -8532,8 +8517,8 @@ int cik_suspend(struct radeon_device *rdev)
 	cik_cp_enable(rdev, false);
 	cik_sdma_enable(rdev, false);
 	if (rdev->has_uvd) {
-		uvd_v1_0_fini(rdev);
 		radeon_uvd_suspend(rdev);
+		uvd_v1_0_fini(rdev);
 	}
 	if (rdev->has_vce)
 		radeon_vce_suspend(rdev);
@@ -8563,7 +8548,7 @@ int cik_suspend(struct radeon_device *rdev)
  */
 int cik_init(struct radeon_device *rdev)
 {
-	struct radeon_ring *ring;
+	struct radeon_ring *ring, *ring_cp1, *ring_cp2;
 	int r;
 
 	/* Read BIOS */
@@ -8596,12 +8581,10 @@ int cik_init(struct radeon_device *rdev)
 	/* Initialize surface registers */
 	radeon_surface_init(rdev);
 	/* Initialize clocks */
-	radeon_get_clock_info(rdev->ddev);
+	radeon_get_clock_info(rdev_to_drm(rdev));
 
 	/* Fence driver */
-	r = radeon_fence_driver_init(rdev);
-	if (r)
-		return r;
+	radeon_fence_driver_init(rdev);
 
 	/* initialize memory controller */
 	r = cik_mc_init(rdev);
@@ -8640,19 +8623,22 @@ int cik_init(struct radeon_device *rdev)
 	ring->ring_obj = NULL;
 	r600_ring_init(rdev, ring, 1024 * 1024);
 
-	ring = &rdev->ring[CAYMAN_RING_TYPE_CP1_INDEX];
-	ring->ring_obj = NULL;
-	r600_ring_init(rdev, ring, 1024 * 1024);
-	r = radeon_doorbell_get(rdev, &ring->doorbell_index);
+	ring_cp1 = &rdev->ring[CAYMAN_RING_TYPE_CP1_INDEX];
+	ring_cp2 = &rdev->ring[CAYMAN_RING_TYPE_CP2_INDEX];
+	ring_cp1->ring_obj = NULL;
+	ring_cp2->ring_obj = NULL;
+	ring_cp1->doorbell_index = RADEON_MAX_DOORBELLS;
+	ring_cp2->doorbell_index = RADEON_MAX_DOORBELLS;
+
+	r600_ring_init(rdev, ring_cp1, 1024 * 1024);
+	r = radeon_doorbell_get(rdev, &ring_cp1->doorbell_index);
 	if (r)
 		return r;
 
-	ring = &rdev->ring[CAYMAN_RING_TYPE_CP2_INDEX];
-	ring->ring_obj = NULL;
-	r600_ring_init(rdev, ring, 1024 * 1024);
-	r = radeon_doorbell_get(rdev, &ring->doorbell_index);
+	r600_ring_init(rdev, ring_cp2, 1024 * 1024);
+	r = radeon_doorbell_get(rdev, &ring_cp2->doorbell_index);
 	if (r)
-		return r;
+		goto out;
 
 	ring = &rdev->ring[R600_RING_TYPE_DMA_INDEX];
 	ring->ring_obj = NULL;
@@ -8670,12 +8656,16 @@ int cik_init(struct radeon_device *rdev)
 
 	r = r600_pcie_gart_init(rdev);
 	if (r)
-		return r;
+		goto out;
 
 	rdev->accel_working = true;
 	r = cik_startup(rdev);
 	if (r) {
 		dev_err(rdev->dev, "disabling GPU acceleration\n");
+		radeon_doorbell_free(rdev, ring_cp1->doorbell_index);
+		radeon_doorbell_free(rdev, ring_cp2->doorbell_index);
+		ring_cp1->doorbell_index = RADEON_MAX_DOORBELLS;
+		ring_cp2->doorbell_index = RADEON_MAX_DOORBELLS;
 		cik_cp_fini(rdev);
 		cik_sdma_fini(rdev);
 		cik_irq_fini(rdev);
@@ -8695,10 +8685,16 @@ int cik_init(struct radeon_device *rdev)
 	 */
 	if (!rdev->mc_fw && !(rdev->flags & RADEON_IS_IGP)) {
 		DRM_ERROR("radeon: MC ucode required for NI+.\n");
-		return -EINVAL;
+		r = -EINVAL;
+		goto out;
 	}
 
 	return 0;
+
+out:
+	radeon_doorbell_free(rdev, ring_cp1->doorbell_index);
+	radeon_doorbell_free(rdev, ring_cp2->doorbell_index);
+	return r;
 }
 
 /**
@@ -8712,6 +8708,7 @@ int cik_init(struct radeon_device *rdev)
  */
 void cik_fini(struct radeon_device *rdev)
 {
+	struct radeon_ring *ring;
 	radeon_pm_fini(rdev);
 	cik_cp_fini(rdev);
 	cik_sdma_fini(rdev);
@@ -8725,6 +8722,10 @@ void cik_fini(struct radeon_device *rdev)
 	radeon_ib_pool_fini(rdev);
 	radeon_irq_kms_fini(rdev);
 	uvd_v1_0_fini(rdev);
+	ring = &rdev->ring[CAYMAN_RING_TYPE_CP1_INDEX];
+	radeon_doorbell_free(rdev, ring->doorbell_index);
+	ring = &rdev->ring[CAYMAN_RING_TYPE_CP2_INDEX];
+	radeon_doorbell_free(rdev, ring->doorbell_index);
 	radeon_uvd_fini(rdev);
 	radeon_vce_fini(rdev);
 	cik_pcie_gart_fini(rdev);
@@ -9596,7 +9597,7 @@ static void cik_pcie_gen3_enable(struct radeon_device *rdev)
 				tmp |= LC_REDO_EQ;
 				WREG32_PCIE_PORT(PCIE_LC_CNTL4, tmp);
 
-				mdelay(100);
+				msleep(100);
 
 				/* linkctl */
 				pcie_capability_clear_and_set_word(root, PCI_EXP_LNKCTL,
@@ -9609,28 +9610,18 @@ static void cik_pcie_gen3_enable(struct radeon_device *rdev)
 								   PCI_EXP_LNKCTL_HAWD);
 
 				/* linkctl2 */
-				pcie_capability_read_word(root, PCI_EXP_LNKCTL2,
-							  &tmp16);
-				tmp16 &= ~(PCI_EXP_LNKCTL2_ENTER_COMP |
-					   PCI_EXP_LNKCTL2_TX_MARGIN);
-				tmp16 |= (bridge_cfg2 &
-					  (PCI_EXP_LNKCTL2_ENTER_COMP |
-					   PCI_EXP_LNKCTL2_TX_MARGIN));
-				pcie_capability_write_word(root,
-							   PCI_EXP_LNKCTL2,
-							   tmp16);
-
-				pcie_capability_read_word(rdev->pdev,
-							  PCI_EXP_LNKCTL2,
-							  &tmp16);
-				tmp16 &= ~(PCI_EXP_LNKCTL2_ENTER_COMP |
-					   PCI_EXP_LNKCTL2_TX_MARGIN);
-				tmp16 |= (gpu_cfg2 &
-					  (PCI_EXP_LNKCTL2_ENTER_COMP |
-					   PCI_EXP_LNKCTL2_TX_MARGIN));
-				pcie_capability_write_word(rdev->pdev,
-							   PCI_EXP_LNKCTL2,
-							   tmp16);
+				pcie_capability_clear_and_set_word(root, PCI_EXP_LNKCTL2,
+								   PCI_EXP_LNKCTL2_ENTER_COMP |
+								   PCI_EXP_LNKCTL2_TX_MARGIN,
+								   bridge_cfg2 |
+								   (PCI_EXP_LNKCTL2_ENTER_COMP |
+								    PCI_EXP_LNKCTL2_TX_MARGIN));
+				pcie_capability_clear_and_set_word(rdev->pdev, PCI_EXP_LNKCTL2,
+								   PCI_EXP_LNKCTL2_ENTER_COMP |
+								   PCI_EXP_LNKCTL2_TX_MARGIN,
+								   gpu_cfg2 |
+								   (PCI_EXP_LNKCTL2_ENTER_COMP |
+								    PCI_EXP_LNKCTL2_TX_MARGIN));
 
 				tmp = RREG32_PCIE_PORT(PCIE_LC_CNTL4);
 				tmp &= ~LC_SET_QUIESCE;
@@ -9644,15 +9635,15 @@ static void cik_pcie_gen3_enable(struct radeon_device *rdev)
 	speed_cntl &= ~LC_FORCE_DIS_SW_SPEED_CHANGE;
 	WREG32_PCIE_PORT(PCIE_LC_SPEED_CNTL, speed_cntl);
 
-	pcie_capability_read_word(rdev->pdev, PCI_EXP_LNKCTL2, &tmp16);
-	tmp16 &= ~PCI_EXP_LNKCTL2_TLS;
+	tmp16 = 0;
 	if (speed_cap == PCIE_SPEED_8_0GT)
 		tmp16 |= PCI_EXP_LNKCTL2_TLS_8_0GT; /* gen3 */
 	else if (speed_cap == PCIE_SPEED_5_0GT)
 		tmp16 |= PCI_EXP_LNKCTL2_TLS_5_0GT; /* gen2 */
 	else
 		tmp16 |= PCI_EXP_LNKCTL2_TLS_2_5GT; /* gen1 */
-	pcie_capability_write_word(rdev->pdev, PCI_EXP_LNKCTL2, tmp16);
+	pcie_capability_clear_and_set_word(rdev->pdev, PCI_EXP_LNKCTL2,
+					   PCI_EXP_LNKCTL2_TLS, tmp16);
 
 	speed_cntl = RREG32_PCIE_PORT(PCIE_LC_SPEED_CNTL);
 	speed_cntl |= LC_INITIATE_LINK_SPEED_CHANGE;

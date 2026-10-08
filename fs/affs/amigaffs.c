@@ -60,7 +60,7 @@ affs_insert_hash(struct inode *dir, struct buffer_head *bh)
 	mark_buffer_dirty_inode(dir_bh, dir);
 	affs_brelse(dir_bh);
 
-	dir->i_mtime = dir->i_ctime = current_time(dir);
+	inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
 	inode_inc_iversion(dir);
 	mark_inode_dirty(dir);
 
@@ -114,7 +114,7 @@ affs_remove_hash(struct inode *dir, struct buffer_head *rem_bh)
 
 	affs_brelse(bh);
 
-	dir->i_mtime = dir->i_ctime = current_time(dir);
+	inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
 	inode_inc_iversion(dir);
 	mark_inode_dirty(dir);
 
@@ -315,7 +315,7 @@ affs_remove_header(struct dentry *dentry)
 	else
 		clear_nlink(inode);
 	affs_unlock_link(inode);
-	inode->i_ctime = current_time(inode);
+	inode_set_ctime_current(inode);
 	mark_inode_dirty(inode);
 
 done:
@@ -375,7 +375,7 @@ affs_secs_to_datestamp(time64_t secs, struct affs_date *ds)
 	u32	 minute;
 	s32	 rem;
 
-	secs -= sys_tz.tz_minuteswest * 60 + ((8 * 365 + 2) * 24 * 60 * 60);
+	secs -= sys_tz.tz_minuteswest * 60 + AFFS_EPOCH_DELTA;
 	if (secs < 0)
 		secs = 0;
 	days    = div_s64_rem(secs, 86400, &rem);

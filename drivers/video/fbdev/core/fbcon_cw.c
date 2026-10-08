@@ -50,7 +50,7 @@ static void cw_bmove(struct vc_data *vc, struct fb_info *info, int sy,
 {
 	struct fbcon_ops *ops = info->fbcon_par;
 	struct fb_copyarea area;
-	u32 vxres = GETVXRES(ops->p->scrollmode, info);
+	u32 vxres = GETVXRES(ops->p, info);
 
 	area.sx = vxres - ((sy + height) * vc->vc_font.height);
 	area.sy = sx * vc->vc_font.width;
@@ -63,14 +63,13 @@ static void cw_bmove(struct vc_data *vc, struct fb_info *info, int sy,
 }
 
 static void cw_clear(struct vc_data *vc, struct fb_info *info, int sy,
-		     int sx, int height, int width)
+		     int sx, int height, int width, int fg, int bg)
 {
 	struct fbcon_ops *ops = info->fbcon_par;
 	struct fb_fillrect region;
-	int bgshift = (vc->vc_hi_font_mask) ? 13 : 12;
-	u32 vxres = GETVXRES(ops->p->scrollmode, info);
+	u32 vxres = GETVXRES(ops->p, info);
 
-	region.color = attr_bgcol_ec(bgshift,vc,info);
+	region.color = bg;
 	region.dx = vxres - ((sy + height) * vc->vc_font.height);
 	region.dy = sx *  vc->vc_font.width;
 	region.height = width * vc->vc_font.width;
@@ -125,7 +124,7 @@ static void cw_putcs(struct vc_data *vc, struct fb_info *info,
 	u32 cnt, pitch, size;
 	u32 attribute = get_attribute(info, scr_readw(s));
 	u8 *dst, *buf = NULL;
-	u32 vxres = GETVXRES(ops->p->scrollmode, info);
+	u32 vxres = GETVXRES(ops->p, info);
 
 	if (!ops->fontbuffer)
 		return;
@@ -201,18 +200,18 @@ static void cw_clear_margins(struct vc_data *vc, struct fb_info *info,
 	}
 }
 
-static void cw_cursor(struct vc_data *vc, struct fb_info *info, int mode,
+static void cw_cursor(struct vc_data *vc, struct fb_info *info, bool enable,
 		      int fg, int bg)
 {
 	struct fb_cursor cursor;
 	struct fbcon_ops *ops = info->fbcon_par;
 	unsigned short charmask = vc->vc_hi_font_mask ? 0x1ff : 0xff;
 	int w = (vc->vc_font.height + 7) >> 3, c;
-	int y = real_y(ops->p, vc->vc_y);
-	int attribute, use_sw = (vc->vc_cursor_type & 0x10);
+	int y = real_y(ops->p, vc->state.y);
+	int attribute, use_sw = vc->vc_cursor_type & CUR_SW;
 	int err = 1, dx, dy;
 	char *src;
-	u32 vxres = GETVXRES(ops->p->scrollmode, info);
+	u32 vxres = GETVXRES(ops->p, info);
 
 	if (!ops->fontbuffer)
 		return;
@@ -258,7 +257,7 @@ static void cw_cursor(struct vc_data *vc, struct fb_info *info, int mode,
 	}
 
 	dx = vxres - ((y * vc->vc_font.height) + vc->vc_font.height);
-	dy = vc->vc_x * vc->vc_font.width;
+	dy = vc->state.x * vc->vc_font.width;
 
 	if (ops->cursor_state.image.dx != dx ||
 	    ops->cursor_state.image.dy != dy ||
@@ -299,7 +298,7 @@ static void cw_cursor(struct vc_data *vc, struct fb_info *info, int mode,
 		ops->p->cursor_shape = vc->vc_cursor_type;
 		cursor.set |= FB_CUR_SETSHAPE;
 
-		switch (ops->p->cursor_shape & CUR_HWMASK) {
+		switch (CUR_SIZE(ops->p->cursor_shape)) {
 		case CUR_NONE:
 			cur_height = 0;
 			break;
@@ -332,16 +331,7 @@ static void cw_cursor(struct vc_data *vc, struct fb_info *info, int mode,
 		kfree(tmp);
 	}
 
-	switch (mode) {
-	case CM_ERASE:
-		ops->cursor_state.enable = 0;
-		break;
-	case CM_DRAW:
-	case CM_MOVE:
-	default:
-		ops->cursor_state.enable = (use_sw) ? 0 : 1;
-		break;
-	}
+	ops->cursor_state.enable = enable && !use_sw;
 
 	cursor.image.data = src;
 	cursor.image.fg_color = ops->cursor_state.image.fg_color;
@@ -369,7 +359,7 @@ static void cw_cursor(struct vc_data *vc, struct fb_info *info, int mode,
 static int cw_update_start(struct fb_info *info)
 {
 	struct fbcon_ops *ops = info->fbcon_par;
-	u32 vxres = GETVXRES(ops->p->scrollmode, info);
+	u32 vxres = GETVXRES(ops->p, info);
 	u32 xoffset;
 	int err;
 
@@ -392,4 +382,3 @@ void fbcon_rotate_cw(struct fbcon_ops *ops)
 	ops->cursor = cw_cursor;
 	ops->update_start = cw_update_start;
 }
-EXPORT_SYMBOL(fbcon_rotate_cw);

@@ -1,15 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2005-2008 Freescale Semiconductor, Inc. All Rights Reserved.
  * Copyright 2008 Luotao Fu, kernel@pengutronix.de
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/clk.h>
@@ -100,7 +92,6 @@ static int mxc_w1_probe(struct platform_device *pdev)
 {
 	struct mxc_w1_device *mdev;
 	unsigned long clkrate;
-	struct resource *res;
 	unsigned int clkdiv;
 	int err;
 
@@ -128,8 +119,7 @@ static int mxc_w1_probe(struct platform_device *pdev)
 		dev_warn(&pdev->dev,
 			 "Incorrect time base frequency %lu Hz\n", clkrate);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	mdev->regs = devm_ioremap_resource(&pdev->dev, res);
+	mdev->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(mdev->regs)) {
 		err = PTR_ERR(mdev->regs);
 		goto out_disable_clk;
@@ -161,15 +151,13 @@ out_disable_clk:
 /*
  * disassociate the w1 device from the driver
  */
-static int mxc_w1_remove(struct platform_device *pdev)
+static void mxc_w1_remove(struct platform_device *pdev)
 {
 	struct mxc_w1_device *mdev = platform_get_drvdata(pdev);
 
 	w1_remove_master_device(&mdev->bus_master);
 
 	clk_disable_unprepare(mdev->clk);
-
-	return 0;
 }
 
 static const struct of_device_id mxc_w1_dt_ids[] = {

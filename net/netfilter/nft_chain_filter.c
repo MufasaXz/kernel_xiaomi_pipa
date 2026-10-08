@@ -2,7 +2,6 @@
 #include <linux/kernel.h>
 #include <linux/netdevice.h>
 #include <net/net_namespace.h>
-#include <net/netns/generic.h>
 #include <net/netfilter/nf_tables.h>
 #include <linux/netfilter_ipv4.h>
 #include <linux/netfilter_ipv6.h>
@@ -10,8 +9,6 @@
 #include <linux/netfilter_arp.h>
 #include <net/netfilter/nf_tables_ipv4.h>
 #include <net/netfilter/nf_tables_ipv6.h>
-
-extern unsigned int nf_tables_net_id;
 
 #ifdef CONFIG_NF_TABLES_IPV4
 static unsigned int nft_do_chain_ipv4(void *priv,
@@ -21,7 +18,7 @@ static unsigned int nft_do_chain_ipv4(void *priv,
 	struct nft_pktinfo pkt;
 
 	nft_set_pktinfo(&pkt, skb, state);
-	nft_set_pktinfo_ipv4(&pkt, skb);
+	nft_set_pktinfo_ipv4(&pkt);
 
 	return nft_do_chain(&pkt, priv);
 }
@@ -65,7 +62,7 @@ static unsigned int nft_do_chain_arp(void *priv, struct sk_buff *skb,
 	struct nft_pktinfo pkt;
 
 	nft_set_pktinfo(&pkt, skb, state);
-	nft_set_pktinfo_unspec(&pkt, skb);
+	nft_set_pktinfo_unspec(&pkt);
 
 	return nft_do_chain(&pkt, priv);
 }
@@ -105,7 +102,7 @@ static unsigned int nft_do_chain_ipv6(void *priv,
 	struct nft_pktinfo pkt;
 
 	nft_set_pktinfo(&pkt, skb, state);
-	nft_set_pktinfo_ipv6(&pkt, skb);
+	nft_set_pktinfo_ipv6(&pkt);
 
 	return nft_do_chain(&pkt, priv);
 }
@@ -152,13 +149,44 @@ static unsigned int nft_do_chain_inet(void *priv, struct sk_buff *skb,
 
 	switch (state->pf) {
 	case NFPROTO_IPV4:
-		nft_set_pktinfo_ipv4(&pkt, skb);
+		nft_set_pktinfo_ipv4(&pkt);
 		break;
 	case NFPROTO_IPV6:
-		nft_set_pktinfo_ipv6(&pkt, skb);
+		nft_set_pktinfo_ipv6(&pkt);
 		break;
 	default:
 		break;
+	}
+
+	return nft_do_chain(&pkt, priv);
+}
+
+static unsigned int nft_do_chain_inet_ingress(void *priv, struct sk_buff *skb,
+					      const struct nf_hook_state *state)
+{
+	struct nf_hook_state ingress_state = *state;
+	struct nft_pktinfo pkt;
+
+	switch (skb->protocol) {
+	case htons(ETH_P_IP):
+		/* Original hook is NFPROTO_NETDEV and NF_NETDEV_INGRESS. */
+		ingress_state.pf = NFPROTO_IPV4;
+		ingress_state.hook = NF_INET_INGRESS;
+		nft_set_pktinfo(&pkt, skb, &ingress_state);
+
+		if (nft_set_pktinfo_ipv4_ingress(&pkt) < 0)
+			return NF_DROP;
+		break;
+	case htons(ETH_P_IPV6):
+		ingress_state.pf = NFPROTO_IPV6;
+		ingress_state.hook = NF_INET_INGRESS;
+		nft_set_pktinfo(&pkt, skb, &ingress_state);
+
+		if (nft_set_pktinfo_ipv6_ingress(&pkt) < 0)
+			return NF_DROP;
+		break;
+	default:
+		return NF_ACCEPT;
 	}
 
 	return nft_do_chain(&pkt, priv);
@@ -168,12 +196,14 @@ static const struct nft_chain_type nft_chain_filter_inet = {
 	.name		= "filter",
 	.type		= NFT_CHAIN_T_DEFAULT,
 	.family		= NFPROTO_INET,
-	.hook_mask	= (1 << NF_INET_LOCAL_IN) |
+	.hook_mask	= (1 << NF_INET_INGRESS) |
+			  (1 << NF_INET_LOCAL_IN) |
 			  (1 << NF_INET_LOCAL_OUT) |
 			  (1 << NF_INET_FORWARD) |
 			  (1 << NF_INET_PRE_ROUTING) |
 			  (1 << NF_INET_POST_ROUTING),
 	.hooks		= {
+		[NF_INET_INGRESS]	= nft_do_chain_inet_ingress,
 		[NF_INET_LOCAL_IN]	= nft_do_chain_inet,
 		[NF_INET_LOCAL_OUT]	= nft_do_chain_inet,
 		[NF_INET_FORWARD]	= nft_do_chain_inet,
@@ -196,7 +226,7 @@ static inline void nft_chain_filter_inet_init(void) {}
 static inline void nft_chain_filter_inet_fini(void) {}
 #endif /* CONFIG_NF_TABLES_IPV6 */
 
-#ifdef CONFIG_NF_TABLES_BRIDGE
+#if IS_ENABLED(CONFIG_NF_TABLES_BRIDGE)
 static unsigned int
 nft_do_chain_bridge(void *priv,
 		    struct sk_buff *skb,
@@ -208,13 +238,13 @@ nft_do_chain_bridge(void *priv,
 
 	switch (eth_hdr(skb)->h_proto) {
 	case htons(ETH_P_IP):
-		nft_set_pktinfo_ipv4_validate(&pkt, skb);
+		nft_set_pktinfo_ipv4_validate(&pkt);
 		break;
 	case htons(ETH_P_IPV6):
-		nft_set_pktinfo_ipv6_validate(&pkt, skb);
+		nft_set_pktinfo_ipv6_validate(&pkt);
 		break;
 	default:
-		nft_set_pktinfo_unspec(&pkt, skb);
+		nft_set_pktinfo_unspec(&pkt);
 		break;
 	}
 
@@ -263,13 +293,13 @@ static unsigned int nft_do_chain_netdev(void *priv, struct sk_buff *skb,
 
 	switch (skb->protocol) {
 	case htons(ETH_P_IP):
-		nft_set_pktinfo_ipv4_validate(&pkt, skb);
+		nft_set_pktinfo_ipv4_validate(&pkt);
 		break;
 	case htons(ETH_P_IPV6):
-		nft_set_pktinfo_ipv6_validate(&pkt, skb);
+		nft_set_pktinfo_ipv6_validate(&pkt);
 		break;
 	default:
-		nft_set_pktinfo_unspec(&pkt, skb);
+		nft_set_pktinfo_unspec(&pkt);
 		break;
 	}
 
@@ -280,41 +310,93 @@ static const struct nft_chain_type nft_chain_filter_netdev = {
 	.name		= "filter",
 	.type		= NFT_CHAIN_T_DEFAULT,
 	.family		= NFPROTO_NETDEV,
-	.hook_mask	= (1 << NF_NETDEV_INGRESS),
+	.hook_mask	= (1 << NF_NETDEV_INGRESS) |
+			  (1 << NF_NETDEV_EGRESS),
 	.hooks		= {
 		[NF_NETDEV_INGRESS]	= nft_do_chain_netdev,
+		[NF_NETDEV_EGRESS]	= nft_do_chain_netdev,
 	},
 };
 
-static void nft_netdev_event(unsigned long event, struct net_device *dev,
-			     struct nft_ctx *ctx)
+static int nft_netdev_event(unsigned long event, struct net_device *dev,
+			    struct nft_base_chain *basechain, bool changename)
 {
-	struct nft_base_chain *basechain = nft_base_chain(ctx->chain);
+	struct nft_table *table = basechain->chain.table;
+	struct nf_hook_ops *ops;
+	struct nft_hook *hook;
+	bool match;
 
-	switch (event) {
-	case NETDEV_UNREGISTER:
-		if (strcmp(basechain->dev_name, dev->name) != 0)
-			return;
+	list_for_each_entry(hook, &basechain->hook_list, list) {
+		ops = nft_hook_find_ops(hook, dev);
+		match = !strncmp(hook->ifname, dev->name, hook->ifnamelen);
 
-		if (!basechain->ops.dev)
-			return;
+		switch (event) {
+		case NETDEV_UNREGISTER:
+			/* NOP if not found or new name still matching */
+			if (!ops || (changename && match))
+				continue;
 
-		/* UNREGISTER events are also happpening on netns exit.
-		 *
-		 * Altough nf_tables core releases all tables/chains, only
-		 * this event handler provides guarantee that
-		 * basechain.ops->dev is still accessible, so we cannot
-		 * skip exiting net namespaces.
-		 */
-		__nft_release_basechain(ctx);
-		break;
-	case NETDEV_CHANGENAME:
-		if (dev->ifindex != basechain->ops.dev->ifindex)
-			return;
+			if (!(table->flags & NFT_TABLE_F_DORMANT))
+				nf_unregister_net_hook(dev_net(dev), ops);
 
-		strncpy(basechain->dev_name, dev->name, IFNAMSIZ);
+			list_del_rcu(&ops->list);
+			kfree_rcu(ops, rcu);
+			break;
+		case NETDEV_REGISTER:
+			/* NOP if not matching or already registered */
+			if (!match || ops)
+				continue;
+
+			ops = kmemdup(&basechain->ops,
+				      sizeof(struct nf_hook_ops),
+				      GFP_KERNEL_ACCOUNT);
+			if (!ops)
+				return 1;
+
+			ops->dev = dev;
+
+			if (!(table->flags & NFT_TABLE_F_DORMANT) &&
+			    nf_register_net_hook(dev_net(dev), ops)) {
+				kfree(ops);
+				return 1;
+			}
+			list_add_tail_rcu(&ops->list, &hook->ops_list);
+			break;
+		}
 		break;
 	}
+	return 0;
+}
+
+static int __nf_tables_netdev_event(unsigned long event,
+				    struct net_device *dev,
+				    bool changename)
+{
+	struct nft_base_chain *basechain;
+	struct nftables_pernet *nft_net;
+	struct nft_chain *chain;
+	struct nft_table *table;
+
+	nft_net = nft_pernet(dev_net(dev));
+	list_for_each_entry(table, &nft_net->tables, list) {
+		if (table->family != NFPROTO_NETDEV &&
+		    table->family != NFPROTO_INET)
+			continue;
+
+		list_for_each_entry(chain, &table->chains, list) {
+			if (!nft_is_base_chain(chain))
+				continue;
+
+			basechain = nft_base_chain(chain);
+			if (table->family == NFPROTO_INET &&
+			    basechain->ops.hooknum != NF_INET_INGRESS)
+				continue;
+
+			if (nft_netdev_event(event, dev, basechain, changename))
+				return 1;
+		}
+	}
+	return 0;
 }
 
 static int nf_tables_netdev_event(struct notifier_block *this,
@@ -322,35 +404,28 @@ static int nf_tables_netdev_event(struct notifier_block *this,
 {
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
 	struct nftables_pernet *nft_net;
-	struct nft_table *table;
-	struct nft_chain *chain, *nr;
-	struct nft_ctx ctx = {
-		.net	= dev_net(dev),
-	};
+	int ret = NOTIFY_DONE;
 
-	if (event != NETDEV_UNREGISTER &&
+	if (event != NETDEV_REGISTER &&
+	    event != NETDEV_UNREGISTER &&
 	    event != NETDEV_CHANGENAME)
 		return NOTIFY_DONE;
 
-	nft_net = net_generic(ctx.net, nf_tables_net_id);
+	nft_net = nft_pernet(dev_net(dev));
 	mutex_lock(&nft_net->commit_mutex);
-	list_for_each_entry(table, &nft_net->tables, list) {
-		if (table->family != NFPROTO_NETDEV)
-			continue;
 
-		ctx.family = table->family;
-		ctx.table = table;
-		list_for_each_entry_safe(chain, nr, &table->chains, list) {
-			if (!nft_is_base_chain(chain))
-				continue;
-
-			ctx.chain = chain;
-			nft_netdev_event(event, dev, &ctx);
+	if (event == NETDEV_CHANGENAME) {
+		if (__nf_tables_netdev_event(NETDEV_REGISTER, dev, true)) {
+			ret = NOTIFY_BAD;
+			goto out_unlock;
 		}
+		__nf_tables_netdev_event(NETDEV_UNREGISTER, dev, true);
+	} else if (__nf_tables_netdev_event(event, dev, false)) {
+		ret = NOTIFY_BAD;
 	}
+out_unlock:
 	mutex_unlock(&nft_net->commit_mutex);
-
-	return NOTIFY_DONE;
+	return ret;
 }
 
 static struct notifier_block nf_tables_netdev_notifier = {

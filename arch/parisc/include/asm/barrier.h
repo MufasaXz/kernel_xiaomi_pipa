@@ -2,11 +2,15 @@
 #ifndef __ASM_BARRIER_H
 #define __ASM_BARRIER_H
 
-#ifndef __ASSEMBLY__
+#include <asm/alternative.h>
+
+#ifndef __ASSEMBLER__
 
 /* The synchronize caches instruction executes as a nop on systems in
    which all memory references are performed in order. */
-#define synchronize_caches() __asm__ __volatile__ ("sync" : : : "memory")
+#define synchronize_caches() asm volatile("sync" \
+	ALTERNATIVE(ALT_COND_NO_SMP, INSN_NOP) \
+	: : : "memory")
 
 #if defined(CONFIG_SMP)
 #define mb()		do { synchronize_caches(); } while (0)
@@ -89,5 +93,5 @@ do {									\
 })
 #include <asm-generic/barrier.h>
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 #endif /* __ASM_BARRIER_H */

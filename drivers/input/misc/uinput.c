@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  User level driver support for input subsystem
  *
  * Heavily based on evdev.c by Vojtech Pavlik
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  *
  * Author: Aristeu Sergio Rozanski Filho <aris@cathedrallabs.org>
  *
@@ -38,14 +25,17 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/fs.h>
+#include <linux/lockdep.h>
 #include <linux/miscdevice.h>
 #include <linux/overflow.h>
+#include <linux/spinlock.h>
 #include <linux/input/mt.h>
 #include "../input-compat.h"
 
 #define UINPUT_NAME		"uinput"
 #define UINPUT_BUFFER_SIZE	16
 #define UINPUT_NUM_REQUESTS	16
+#define UINPUT_TIMESTAMP_ALLOWED_OFFSET_SECS 10
 
 enum uinput_state { UIST_NEW_DEVICE, UIST_SETUP_COMPLETE, UIST_CREATED };
 
@@ -69,6 +59,7 @@ struct uinput_device {
 	struct input_dev	*dev;
 	struct mutex		mutex;
 	enum uinput_state	state;
+	spinlock_t		state_lock;
 	wait_queue_head_t	waitq;
 	unsigned char		ready;
 	unsigned char		head;
@@ -86,6 +77,8 @@ static int uinput_dev_event(struct input_dev *dev,
 {
 	struct uinput_device	*udev = input_get_drvdata(dev);
 	struct timespec64	ts;
+
+	lockdep_assert_held(&dev->event_lock);
 
 	ktime_get_ts64(&ts);
 
@@ -158,27 +151,26 @@ static void uinput_request_release_slot(struct uinput_device *udev,
 static int uinput_request_send(struct uinput_device *udev,
 			       struct uinput_request *request)
 {
-	int retval;
+	unsigned long flags;
+	int retval = 0;
 
-	retval = mutex_lock_interruptible(&udev->mutex);
-	if (retval)
-		return retval;
+	spin_lock(&udev->state_lock);
 
 	if (udev->state != UIST_CREATED) {
 		retval = -ENODEV;
 		goto out;
 	}
 
-	init_completion(&request->done);
-
 	/*
 	 * Tell our userspace application about this new request
 	 * by queueing an input event.
 	 */
+	spin_lock_irqsave(&udev->dev->event_lock, flags);
 	uinput_dev_event(udev->dev, EV_UINPUT, request->code, request->id);
+	spin_unlock_irqrestore(&udev->dev->event_lock, flags);
 
  out:
-	mutex_unlock(&udev->mutex);
+	spin_unlock(&udev->state_lock);
 	return retval;
 }
 
@@ -186,6 +178,13 @@ static int uinput_request_submit(struct uinput_device *udev,
 				 struct uinput_request *request)
 {
 	int retval;
+
+	/*
+	 * Initialize completion before allocating the request slot.
+	 * Once the slot is allocated, uinput_flush_requests() may
+	 * complete it at any time, so it must be initialized first.
+	 */
+	init_completion(&request->done);
 
 	retval = uinput_request_reserve_slot(udev, request);
 	if (retval)
@@ -301,7 +300,14 @@ static void uinput_destroy_device(struct uinput_device *udev)
 	struct input_dev *dev = udev->dev;
 	enum uinput_state old_state = udev->state;
 
+	/*
+	 * Update state under state_lock so that concurrent
+	 * uinput_request_send() sees the state change before we
+	 * flush pending requests and tear down the device.
+	 */
+	spin_lock(&udev->state_lock);
 	udev->state = UIST_NEW_DEVICE;
+	spin_unlock(&udev->state_lock);
 
 	if (dev) {
 		name = dev->name;
@@ -378,7 +384,9 @@ static int uinput_create_device(struct uinput_device *udev)
 	if (error)
 		goto fail2;
 
+	spin_lock(&udev->state_lock);
 	udev->state = UIST_CREATED;
+	spin_unlock(&udev->state_lock);
 
 	return 0;
 
@@ -391,18 +399,19 @@ static int uinput_open(struct inode *inode, struct file *file)
 {
 	struct uinput_device *newdev;
 
-	newdev = kzalloc(sizeof(struct uinput_device), GFP_KERNEL);
+	newdev = kzalloc(sizeof(*newdev), GFP_KERNEL);
 	if (!newdev)
 		return -ENOMEM;
 
 	mutex_init(&newdev->mutex);
+	spin_lock_init(&newdev->state_lock);
 	spin_lock_init(&newdev->requests_lock);
 	init_waitqueue_head(&newdev->requests_waitq);
 	init_waitqueue_head(&newdev->waitq);
 	newdev->state = UIST_NEW_DEVICE;
 
 	file->private_data = newdev;
-	nonseekable_open(inode, file);
+	stream_open(inode, file);
 
 	return 0;
 }
@@ -596,11 +605,40 @@ static int uinput_setup_device_legacy(struct uinput_device *udev,
 	return retval;
 }
 
+/*
+ * Returns true if the given timestamp is valid (i.e., if all the following
+ * conditions are satisfied), false otherwise.
+ * 1) given timestamp is positive
+ * 2) it's within the allowed offset before the current time
+ * 3) it's not in the future
+ */
+static bool is_valid_timestamp(const ktime_t timestamp)
+{
+	ktime_t zero_time;
+	ktime_t current_time;
+	ktime_t min_time;
+	ktime_t offset;
+
+	zero_time = ktime_set(0, 0);
+	if (ktime_compare(zero_time, timestamp) >= 0)
+		return false;
+
+	current_time = ktime_get();
+	offset = ktime_set(UINPUT_TIMESTAMP_ALLOWED_OFFSET_SECS, 0);
+	min_time = ktime_sub(current_time, offset);
+
+	if (ktime_after(min_time, timestamp) || ktime_after(timestamp, current_time))
+		return false;
+
+	return true;
+}
+
 static ssize_t uinput_inject_events(struct uinput_device *udev,
 				    const char __user *buffer, size_t count)
 {
 	struct input_event ev;
 	size_t bytes = 0;
+	ktime_t timestamp;
 
 	if (count != 0 && count < input_event_size())
 		return -EINVAL;
@@ -614,6 +652,10 @@ static ssize_t uinput_inject_events(struct uinput_device *udev,
 		 */
 		if (input_event_from_user(buffer + bytes, &ev))
 			return -EFAULT;
+
+		timestamp = ktime_set(ev.input_event_sec, ev.input_event_usec * NSEC_PER_USEC);
+		if (is_valid_timestamp(timestamp))
+			input_set_timestamp(udev->dev, timestamp);
 
 		input_event(udev->dev, ev.type, ev.code, ev.value);
 		bytes += input_event_size();
@@ -720,13 +762,14 @@ static ssize_t uinput_read(struct file *file, char __user *buffer,
 static __poll_t uinput_poll(struct file *file, poll_table *wait)
 {
 	struct uinput_device *udev = file->private_data;
+	__poll_t mask = EPOLLOUT | EPOLLWRNORM; /* uinput is always writable */
 
 	poll_wait(file, &udev->waitq, wait);
 
 	if (udev->head != udev->tail)
-		return EPOLLIN | EPOLLRDNORM;
+		mask |= EPOLLIN | EPOLLRDNORM;
 
-	return 0;
+	return mask;
 }
 
 static int uinput_release(struct inode *inode, struct file *file)
@@ -1111,7 +1154,6 @@ static const struct file_operations uinput_fops = {
 #ifdef CONFIG_COMPAT
 	.compat_ioctl	= uinput_compat_ioctl,
 #endif
-	.llseek		= no_llseek,
 };
 
 static struct miscdevice uinput_misc = {

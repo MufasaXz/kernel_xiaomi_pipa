@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* -*- linux-c -*- --------------------------------------------------------
  *
  *   Copyright (C) 2016 Intel Corporation
@@ -8,12 +9,6 @@
  *   Based on avx2.c: Copyright 2012 Yuanhan Liu All Rights Reserved
  *   Based on sse2.c: Copyright 2002 H. Peter Anvin - All Rights Reserved
  *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation, Inc., 53 Temple Place Ste 330,
- *   Boston MA 02111-1307, USA; either version 2 of the License, or
- *   (at your option) any later version; incorporated herein by reference.
- *
  * -----------------------------------------------------------------------
  */
 
@@ -21,8 +16,6 @@
  * AVX512 implementation of RAID-6 syndrome functions
  *
  */
-
-#ifdef CONFIG_AS_AVX512
 
 #include <linux/raid/pq.h>
 #include "x86.h"
@@ -167,7 +160,7 @@ const struct raid6_calls raid6_avx512x1 = {
 	raid6_avx5121_xor_syndrome,
 	raid6_have_avx512,
 	"avx512x1",
-	1                       /* Has cache hints */
+	.priority = 2		/* Prefer AVX512 over priority 1 (SSE2 and others) */
 };
 
 /*
@@ -324,7 +317,7 @@ const struct raid6_calls raid6_avx512x2 = {
 	raid6_avx5122_xor_syndrome,
 	raid6_have_avx512,
 	"avx512x2",
-	1                       /* Has cache hints */
+	.priority = 2		/* Prefer AVX512 over priority 1 (SSE2 and others) */
 };
 
 #ifdef CONFIG_X86_64
@@ -562,8 +555,6 @@ const struct raid6_calls raid6_avx512x4 = {
 	raid6_avx5124_xor_syndrome,
 	raid6_have_avx512,
 	"avx512x4",
-	1                       /* Has cache hints */
+	.priority = 2		/* Prefer AVX512 over priority 1 (SSE2 and others) */
 };
 #endif
-
-#endif /* CONFIG_AS_AVX512 */

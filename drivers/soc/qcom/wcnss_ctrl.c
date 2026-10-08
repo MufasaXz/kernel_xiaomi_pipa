@@ -1,20 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2016, Linaro Ltd.
  * Copyright (c) 2015, Sony Mobile Communications Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
+#include <linux/cleanup.h>
 #include <linux/firmware.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/io.h>
+#include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/rpmsg.h>
@@ -76,9 +70,8 @@ struct wcnss_msg_hdr {
 	u32 len;
 } __packed;
 
-/**
+/*
  * struct wcnss_version_resp - version request response
- * @hdr:	common packet wcnss_msg_hdr header
  */
 struct wcnss_version_resp {
 	struct wcnss_msg_hdr hdr;
@@ -116,9 +109,11 @@ struct wcnss_download_nv_resp {
 
 /**
  * wcnss_ctrl_smd_callback() - handler from SMD responses
- * @channel:	smd channel handle
+ * @rpdev:	remote processor message device pointer
  * @data:	pointer to the incoming data packet
  * @count:	size of the incoming data packet
+ * @priv:	unused
+ * @addr:	unused
  *
  * Handles any incoming packets from the remote WCNSS_CTRL service.
  */
@@ -204,21 +199,26 @@ static int wcnss_request_version(struct wcnss_ctrl *wcnss)
  */
 static int wcnss_download_nv(struct wcnss_ctrl *wcnss, bool *expect_cbc)
 {
-	struct wcnss_download_nv_req *req;
 	const struct firmware *fw;
+	struct device *dev = wcnss->dev;
+	const char *nvbin = NVBIN_FILE;
 	const void *data;
 	ssize_t left;
 	int ret;
 
-	req = kzalloc(sizeof(*req) + NV_FRAGMENT_SIZE, GFP_KERNEL);
+	struct wcnss_download_nv_req *req __free(kfree) = kzalloc(sizeof(*req) + NV_FRAGMENT_SIZE,
+								  GFP_KERNEL);
 	if (!req)
 		return -ENOMEM;
 
-	ret = request_firmware(&fw, NVBIN_FILE, wcnss->dev);
+	ret = of_property_read_string(dev->of_node, "firmware-name", &nvbin);
+	if (ret < 0 && ret != -EINVAL)
+		return ret;
+
+	ret = request_firmware(&fw, nvbin, dev);
 	if (ret < 0) {
-		dev_err(wcnss->dev, "Failed to load nv file %s: %d\n",
-			NVBIN_FILE, ret);
-		goto free_req;
+		dev_err(dev, "Failed to load nv file %s: %d\n", nvbin, ret);
+		return ret;
 	}
 
 	data = fw->data;
@@ -242,7 +242,7 @@ static int wcnss_download_nv(struct wcnss_ctrl *wcnss, bool *expect_cbc)
 
 		ret = rpmsg_send(wcnss->channel, req, req->hdr.len);
 		if (ret < 0) {
-			dev_err(wcnss->dev, "failed to send smd packet\n");
+			dev_err(dev, "failed to send smd packet\n");
 			goto release_fw;
 		}
 
@@ -255,7 +255,7 @@ static int wcnss_download_nv(struct wcnss_ctrl *wcnss, bool *expect_cbc)
 
 	ret = wait_for_completion_timeout(&wcnss->ack, WCNSS_REQUEST_TIMEOUT);
 	if (!ret) {
-		dev_err(wcnss->dev, "timeout waiting for nv upload ack\n");
+		dev_err(dev, "timeout waiting for nv upload ack\n");
 		ret = -ETIMEDOUT;
 	} else {
 		*expect_cbc = wcnss->ack_status == WCNSS_ACK_COLD_BOOTING;
@@ -264,8 +264,6 @@ static int wcnss_download_nv(struct wcnss_ctrl *wcnss, bool *expect_cbc)
 
 release_fw:
 	release_firmware(fw);
-free_req:
-	kfree(req);
 
 	return ret;
 }
@@ -275,6 +273,7 @@ free_req:
  * @wcnss:	wcnss handle, retrieved from drvdata
  * @name:	SMD channel name
  * @cb:		callback to handle incoming data on the channel
+ * @priv:	private data for use in the call-back
  */
 struct rpmsg_endpoint *qcom_wcnss_open_channel(void *wcnss, const char *name, rpmsg_rx_cb_t cb, void *priv)
 {
@@ -287,7 +286,7 @@ struct rpmsg_endpoint *qcom_wcnss_open_channel(void *wcnss, const char *name, rp
 
 	return rpmsg_create_ept(_wcnss->channel->rpdev, cb, priv, chinfo);
 }
-EXPORT_SYMBOL(qcom_wcnss_open_channel);
+EXPORT_SYMBOL_GPL(qcom_wcnss_open_channel);
 
 static void wcnss_async_probe(struct work_struct *work)
 {
@@ -355,7 +354,6 @@ static struct rpmsg_driver wcnss_ctrl_driver = {
 	.callback = wcnss_ctrl_smd_callback,
 	.drv  = {
 		.name  = "qcom_wcnss_ctrl",
-		.owner = THIS_MODULE,
 		.of_match_table = wcnss_ctrl_of_match,
 	},
 };

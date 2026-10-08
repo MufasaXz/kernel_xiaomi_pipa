@@ -51,13 +51,6 @@ wil_can_suspend_vif(struct wil6210_priv *wil, struct wil6210_vif *vif,
 
 	/* for STA-like interface, don't runtime suspend */
 	case NL80211_IFTYPE_STATION:
-		if (test_bit(wil_vif_fwconnected, vif->status) &&
-		    wil->vr_profile != WMI_VR_PROFILE_DISABLED) {
-			wil_dbg_pm(wil,
-				   "Reject suspend in VR mode when connected\n");
-			return false;
-		}
-		/* fallthrough */
 	case NL80211_IFTYPE_P2P_CLIENT:
 		if (test_bit(wil_vif_fwconnecting, vif->status)) {
 			wil_dbg_pm(wil, "Delay suspend when connecting\n");
@@ -93,12 +86,6 @@ int wil_can_suspend(struct wil6210_priv *wil, bool is_runtime)
 		goto out;
 	}
 	if (is_runtime && !wil->platform_ops.suspend) {
-		rc = -EBUSY;
-		goto out;
-	}
-
-	if (test_bit(wil_status_pci_linkdown, wil->status)) {
-		wil_dbg_pm(wil, "Delay suspend during pci linkdown\n");
 		rc = -EBUSY;
 		goto out;
 	}
@@ -192,7 +179,7 @@ out:
 static int wil_suspend_keep_radio_on(struct wil6210_priv *wil)
 {
 	int rc = 0;
-	unsigned long start, data_comp_to;
+	unsigned long data_comp_to;
 
 	wil_dbg_pm(wil, "suspend keep radio on\n");
 
@@ -238,7 +225,6 @@ static int wil_suspend_keep_radio_on(struct wil6210_priv *wil)
 	}
 
 	/* Wait for completion of the pending RX packets */
-	start = jiffies;
 	data_comp_to = jiffies + msecs_to_jiffies(WIL_DATA_COMPLETION_TO_MS);
 	if (test_bit(wil_status_napi_en, wil->status)) {
 		while (!wil->txrx_ops.is_rx_idle(wil)) {
@@ -459,10 +445,9 @@ int wil_pm_runtime_get(struct wil6210_priv *wil)
 	int rc;
 	struct device *dev = wil_to_dev(wil);
 
-	rc = pm_runtime_get_sync(dev);
+	rc = pm_runtime_resume_and_get(dev);
 	if (rc < 0) {
-		wil_err(wil, "pm_runtime_get_sync() failed, rc = %d\n", rc);
-		pm_runtime_put_noidle(dev);
+		wil_err(wil, "pm_runtime_resume_and_get() failed, rc = %d\n", rc);
 		return rc;
 	}
 

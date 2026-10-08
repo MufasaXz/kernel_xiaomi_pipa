@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * nicstar.c
  *
@@ -90,7 +91,7 @@
 #ifdef GENERAL_DEBUG
 #define PRINTK(args...) printk(args)
 #else
-#define PRINTK(args...)
+#define PRINTK(args...) do {} while (0)
 #endif /* GENERAL_DEBUG */
 
 #ifdef EXTRA_DEBUG
@@ -129,8 +130,9 @@ static int ns_open(struct atm_vcc *vcc);
 static void ns_close(struct atm_vcc *vcc);
 static void fill_tst(ns_dev * card, int n, vc_map * vc);
 static int ns_send(struct atm_vcc *vcc, struct sk_buff *skb);
+static int ns_send_bh(struct atm_vcc *vcc, struct sk_buff *skb);
 static int push_scqe(ns_dev * card, vc_map * vc, scq_info * scq, ns_scqe * tbd,
-		     struct sk_buff *skb);
+		     struct sk_buff *skb, bool may_sleep);
 static void process_tsq(ns_dev * card);
 static void drain_scq(ns_dev * card, scq_info * scq, int pos);
 static void process_rsq(ns_dev * card);
@@ -159,6 +161,7 @@ static const struct atmdev_ops atm_ops = {
 	.close = ns_close,
 	.ioctl = ns_ioctl,
 	.send = ns_send,
+	.send_bh = ns_send_bh,
 	.phy_put = ns_phy_put,
 	.phy_get = ns_phy_get,
 	.proc_read = ns_proc_read,
@@ -168,6 +171,7 @@ static const struct atmdev_ops atm_ops = {
 static struct timer_list ns_timer;
 static char *mac[NS_MAX_CARDS];
 module_param_array(mac, charp, NULL, 0);
+MODULE_DESCRIPTION("ATM NIC driver for IDT 77201/77211 \"NICStAR\" and Fore ForeRunnerLE.");
 MODULE_LICENSE("GPL");
 
 /* Functions */
@@ -296,7 +300,7 @@ static void __exit nicstar_cleanup(void)
 {
 	XPRINTK("nicstar: nicstar_cleanup() called.\n");
 
-	del_timer_sync(&ns_timer);
+	timer_delete_sync(&ns_timer);
 
 	pci_unregister_driver(&nicstar_driver);
 
@@ -858,7 +862,6 @@ static void ns_init_card_error(ns_dev *card, int error)
 static scq_info *get_scq(ns_dev *card, int size, u32 scd)
 {
 	scq_info *scq;
-	int i;
 
 	if (size != VBR_SCQSIZE && size != CBR_SCQSIZE)
 		return NULL;
@@ -872,9 +875,8 @@ static scq_info *get_scq(ns_dev *card, int size, u32 scd)
 		kfree(scq);
 		return NULL;
 	}
-	scq->skb = kmalloc_array(size / NS_SCQE_SIZE,
-				 sizeof(*scq->skb),
-				 GFP_KERNEL);
+	scq->skb = kcalloc(size / NS_SCQE_SIZE, sizeof(*scq->skb),
+			   GFP_KERNEL);
 	if (!scq->skb) {
 		dma_free_coherent(&card->pcidev->dev,
 				  2 * size, scq->org, scq->dma);
@@ -887,14 +889,10 @@ static scq_info *get_scq(ns_dev *card, int size, u32 scd)
 	scq->last = scq->base + (scq->num_entries - 1);
 	scq->tail = scq->last;
 	scq->scd = scd;
-	scq->num_entries = size / NS_SCQE_SIZE;
 	scq->tbd_count = 0;
 	init_waitqueue_head(&scq->scqfull_waitq);
 	scq->full = 0;
 	spin_lock_init(&scq->lock);
-
-	for (i = 0; i < scq->num_entries; i++)
-		scq->skb[i] = NULL;
 
 	return scq;
 }
@@ -1621,7 +1619,7 @@ static void fill_tst(ns_dev * card, int n, vc_map * vc)
 	card->tst_addr = new_tst;
 }
 
-static int ns_send(struct atm_vcc *vcc, struct sk_buff *skb)
+static int _ns_send(struct atm_vcc *vcc, struct sk_buff *skb, bool may_sleep)
 {
 	ns_dev *card;
 	vc_map *vc;
@@ -1705,7 +1703,7 @@ static int ns_send(struct atm_vcc *vcc, struct sk_buff *skb)
 		scq = card->scq0;
 	}
 
-	if (push_scqe(card, vc, scq, &scqe, skb) != 0) {
+	if (push_scqe(card, vc, scq, &scqe, skb, may_sleep) != 0) {
 		atomic_inc(&vcc->stats->tx_err);
 		dma_unmap_single(&card->pcidev->dev, NS_PRV_DMA(skb), skb->len,
 				 DMA_TO_DEVICE);
@@ -1717,8 +1715,18 @@ static int ns_send(struct atm_vcc *vcc, struct sk_buff *skb)
 	return 0;
 }
 
+static int ns_send(struct atm_vcc *vcc, struct sk_buff *skb)
+{
+	return _ns_send(vcc, skb, true);
+}
+
+static int ns_send_bh(struct atm_vcc *vcc, struct sk_buff *skb)
+{
+	return _ns_send(vcc, skb, false);
+}
+
 static int push_scqe(ns_dev * card, vc_map * vc, scq_info * scq, ns_scqe * tbd,
-		     struct sk_buff *skb)
+		     struct sk_buff *skb, bool may_sleep)
 {
 	unsigned long flags;
 	ns_scqe tsr;
@@ -1729,7 +1737,7 @@ static int push_scqe(ns_dev * card, vc_map * vc, scq_info * scq, ns_scqe * tbd,
 
 	spin_lock_irqsave(&scq->lock, flags);
 	while (scq->tail == scq->next) {
-		if (in_interrupt()) {
+		if (!may_sleep) {
 			spin_unlock_irqrestore(&scq->lock, flags);
 			printk("nicstar%d: Error pushing TBD.\n", card->index);
 			return 1;
@@ -1774,7 +1782,7 @@ static int push_scqe(ns_dev * card, vc_map * vc, scq_info * scq, ns_scqe * tbd,
 		int has_run = 0;
 
 		while (scq->tail == scq->next) {
-			if (in_interrupt()) {
+			if (!may_sleep) {
 				data = scq_virt_to_bus(scq, scq->next);
 				ns_write_sram(card, scq->scd, &data, 1);
 				spin_unlock_irqrestore(&scq->lock, flags);
@@ -2693,11 +2701,10 @@ static void ns_poll(struct timer_list *unused)
 	PRINTK("nicstar: Entering ns_poll().\n");
 	for (i = 0; i < num_cards; i++) {
 		card = cards[i];
-		if (spin_is_locked(&card->int_lock)) {
+		if (!spin_trylock_irqsave(&card->int_lock, flags)) {
 			/* Probably it isn't worth spinning */
 			continue;
 		}
-		spin_lock_irqsave(&card->int_lock, flags);
 
 		stat_w = 0;
 		stat_r = readl(card->membase + STAT);

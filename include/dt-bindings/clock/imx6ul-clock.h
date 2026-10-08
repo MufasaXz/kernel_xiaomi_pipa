@@ -1,10 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2015 Freescale Semiconductor, Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 
 #ifndef __DT_BINDINGS_CLOCK_IMX6UL_H
@@ -259,7 +255,13 @@
 #define IMX6UL_CLK_GPIO3		246
 #define IMX6UL_CLK_GPIO4		247
 #define IMX6UL_CLK_GPIO5		248
+#define IMX6UL_CLK_MMDC_P1_IPG		249
+#define IMX6UL_CLK_ENET1_REF_125M	250
+#define IMX6UL_CLK_ENET1_REF_SEL	251
+#define IMX6UL_CLK_ENET1_REF_PAD	252
+#define IMX6UL_CLK_ENET2_REF_SEL	253
+#define IMX6UL_CLK_ENET2_REF_PAD	254
 
-#define IMX6UL_CLK_END			249
+#define IMX6UL_CLK_END			255
 
 #endif /* __DT_BINDINGS_CLOCK_IMX6UL_H */

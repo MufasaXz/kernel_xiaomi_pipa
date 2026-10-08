@@ -20,6 +20,7 @@
 /* Dummy declarations */
 struct svc_rqst;
 struct rpc_task;
+struct rpc_clnt;
 
 /*
  * This is the set of functions for lockd->nfsd communication
@@ -27,7 +28,8 @@ struct rpc_task;
 struct nlmsvc_binding {
 	__be32			(*fopen)(struct svc_rqst *,
 						struct nfs_fh *,
-						struct file **);
+						struct file **,
+						int mode);
 	void			(*fclose)(struct file *);
 };
 
@@ -46,6 +48,7 @@ struct nlmclnt_initdata {
 	int			noresvport;
 	struct net		*net;
 	const struct nlmclnt_operations	*nlmclnt_ops;
+	const struct cred	*cred;
 };
 
 /*
@@ -54,6 +57,7 @@ struct nlmclnt_initdata {
 
 extern struct nlm_host *nlmclnt_init(const struct nlmclnt_initdata *nlm_init);
 extern void	nlmclnt_done(struct nlm_host *host);
+extern struct rpc_clnt *nlmclnt_rpc_clnt(struct nlm_host *host);
 
 /*
  * NLM client operations provide a means to modify RPC processing of NLM
@@ -75,7 +79,7 @@ struct nlmclnt_operations {
 };
 
 extern int	nlmclnt_proc(struct nlm_host *host, int cmd, struct file_lock *fl, void *data);
-extern int	lockd_up(struct net *net);
+extern int	lockd_up(struct net *net, const struct cred *cred);
 extern void	lockd_down(struct net *net);
 
 #endif /* LINUX_LOCKD_BIND_H */

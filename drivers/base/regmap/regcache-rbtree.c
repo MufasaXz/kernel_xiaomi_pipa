@@ -1,14 +1,10 @@
-/*
- * Register cache access API - rbtree caching support
- *
- * Copyright 2011 Wolfson Microelectronics plc
- *
- * Author: Dimitris Papastamos <dp@opensource.wolfsonmicro.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- */
+// SPDX-License-Identifier: GPL-2.0
+//
+// Register cache access API - rbtree caching support
+//
+// Copyright 2011 Wolfson Microelectronics plc
+//
+// Author: Dimitris Papastamos <dp@opensource.wolfsonmicro.com>
 
 #include <linux/debugfs.h>
 #include <linux/device.h>
@@ -26,14 +22,14 @@ struct regcache_rbtree_node {
 	/* block of adjacent registers */
 	void *block;
 	/* Which registers are present */
-	long *cache_present;
+	unsigned long *cache_present;
 	/* base register handled by this block */
 	unsigned int base_reg;
 	/* number of registers available in the block */
 	unsigned int blklen;
 	/* the actual rbtree node holding this block */
 	struct rb_node node;
-} __attribute__ ((packed));
+};
 
 struct regcache_rbtree_ctx {
 	struct rb_root root;
@@ -177,17 +173,7 @@ static int rbtree_show(struct seq_file *s, void *ignored)
 	return 0;
 }
 
-static int rbtree_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, rbtree_show, inode->i_private);
-}
-
-static const struct file_operations rbtree_fops = {
-	.open		= rbtree_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
+DEFINE_SHOW_ATTRIBUTE(rbtree);
 
 static void rbtree_debugfs_init(struct regmap *map)
 {
@@ -201,7 +187,7 @@ static int regcache_rbtree_init(struct regmap *map)
 	int i;
 	int ret;
 
-	map->cache = kmalloc(sizeof *rbtree_ctx, GFP_KERNEL);
+	map->cache = kmalloc(sizeof *rbtree_ctx, map->alloc_flags);
 	if (!map->cache)
 		return -ENOMEM;
 
@@ -289,18 +275,16 @@ static int regcache_rbtree_insert_to_block(struct regmap *map,
 	pos = (reg - base_reg) / map->reg_stride;
 	offset = (rbnode->base_reg - base_reg) / map->reg_stride;
 
-	blk = krealloc(rbnode->block,
-		       blklen * map->cache_word_size,
-		       map->alloc_flags);
+	blk = krealloc_array(rbnode->block, blklen, map->cache_word_size, map->alloc_flags);
 	if (!blk)
 		return -ENOMEM;
 
 	rbnode->block = blk;
 
 	if (BITS_TO_LONGS(blklen) > BITS_TO_LONGS(rbnode->blklen)) {
-		present = krealloc(rbnode->cache_present,
-				   BITS_TO_LONGS(blklen) * sizeof(*present),
-				   map->alloc_flags);
+		present = krealloc_array(rbnode->cache_present,
+					 BITS_TO_LONGS(blklen), sizeof(*present),
+					 map->alloc_flags);
 		if (!present)
 			return -ENOMEM;
 
@@ -486,6 +470,8 @@ static int regcache_rbtree_sync(struct regmap *map, unsigned int min,
 	unsigned int start, end;
 	int ret;
 
+	map->async = true;
+
 	rbtree_ctx = map->cache;
 	for (node = rb_first(&rbtree_ctx->root); node; node = rb_next(node)) {
 		rbnode = rb_entry(node, struct regcache_rbtree_node, node);
@@ -513,6 +499,8 @@ static int regcache_rbtree_sync(struct regmap *map, unsigned int min,
 		if (ret != 0)
 			return ret;
 	}
+
+	map->async = false;
 
 	return regmap_async_complete(map);
 }

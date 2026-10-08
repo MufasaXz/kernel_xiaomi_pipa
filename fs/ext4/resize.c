@@ -10,10 +10,9 @@
  */
 
 
-#define EXT4FS_DEBUG
-
 #include <linux/errno.h>
 #include <linux/slab.h>
+#include <linux/jiffies.h>
 
 #include "ext4_jbd2.h"
 
@@ -56,7 +55,7 @@ int ext4_resize_begin(struct super_block *sb)
 	 * If the reserved GDT blocks is non-zero, the resize_inode feature
 	 * should always be set.
 	 */
-	if (EXT4_SB(sb)->s_es->s_reserved_gdt_blocks &&
+	if (sbi->s_es->s_reserved_gdt_blocks &&
 	    !ext4_has_feature_resize_inode(sb)) {
 		ext4_error(sb, "resize_inode disabled but reserved GDT blocks non-zero");
 		return -EFSCORRUPTED;
@@ -68,9 +67,9 @@ int ext4_resize_begin(struct super_block *sb)
          * bad time to do it anyways.
          */
 	if (EXT4_B2C(sbi, sbi->s_sbh->b_blocknr) !=
-	    le32_to_cpu(EXT4_SB(sb)->s_es->s_first_data_block)) {
+	    le32_to_cpu(sbi->s_es->s_first_data_block)) {
 		ext4_warning(sb, "won't resize using backup superblock at %llu",
-			(unsigned long long)EXT4_SB(sb)->s_sbh->b_blocknr);
+			(unsigned long long)sbi->s_sbh->b_blocknr);
 		return -EPERM;
 	}
 
@@ -78,7 +77,7 @@ int ext4_resize_begin(struct super_block *sb)
 	 * We are not allowed to do online-resizing on a filesystem mounted
 	 * with error, because it can destroy the filesystem easily.
 	 */
-	if (EXT4_SB(sb)->s_mount_state & EXT4_ERROR_FS) {
+	if (sbi->s_mount_state & EXT4_ERROR_FS) {
 		ext4_warning(sb, "There are errors in the filesystem, "
 			     "so online resizing is not allowed");
 		return -EPERM;
@@ -90,28 +89,19 @@ int ext4_resize_begin(struct super_block *sb)
 	}
 
 	if (test_and_set_bit_lock(EXT4_FLAGS_RESIZING,
-				  &EXT4_SB(sb)->s_ext4_flags))
+				  &sbi->s_ext4_flags))
 		ret = -EBUSY;
 
 	return ret;
 }
 
-void ext4_resize_end(struct super_block *sb)
+int ext4_resize_end(struct super_block *sb, bool update_backups)
 {
 	clear_bit_unlock(EXT4_FLAGS_RESIZING, &EXT4_SB(sb)->s_ext4_flags);
 	smp_mb__after_atomic();
-}
-
-static ext4_group_t ext4_meta_bg_first_group(struct super_block *sb,
-					     ext4_group_t group) {
-	return (group >> EXT4_DESC_PER_BLOCK_BITS(sb)) <<
-	       EXT4_DESC_PER_BLOCK_BITS(sb);
-}
-
-static ext4_fsblk_t ext4_meta_bg_first_block_no(struct super_block *sb,
-					     ext4_group_t group) {
-	group = ext4_meta_bg_first_group(sb, group);
-	return ext4_group_first_block_no(sb, group);
+	if (update_backups)
+		return ext4_update_overhead(sb, true);
+	return 0;
 }
 
 static ext4_grpblk_t ext4_group_overhead_blocks(struct super_block *sb,
@@ -150,8 +140,9 @@ static int verify_group_input(struct super_block *sb,
 
 	overhead = ext4_group_overhead_blocks(sb, group);
 	metaend = start + overhead;
-	input->free_clusters_count = free_blocks_count =
-		input->blocks_count - 2 - overhead - sbi->s_itb_per_group;
+	free_blocks_count = input->blocks_count - 2 - overhead -
+			    sbi->s_itb_per_group;
+	input->free_clusters_count = EXT4_B2C(sbi, free_blocks_count);
 
 	if (test_opt(sb, DEBUG))
 		printk(KERN_DEBUG "EXT4-fs: adding %s group %u: %u blocks "
@@ -239,23 +230,35 @@ struct ext4_new_flex_group_data {
 #define MAX_RESIZE_BG				16384
 
 /*
- * alloc_flex_gd() allocates a ext4_new_flex_group_data with size of
- * @flexbg_size.
+ * alloc_flex_gd() allocates an ext4_new_flex_group_data that satisfies the
+ * resizing from @o_group to @n_group, its size is typically @flexbg_size.
  *
  * Returns NULL on failure otherwise address of the allocated structure.
  */
-static struct ext4_new_flex_group_data *alloc_flex_gd(unsigned int flexbg_size)
+static struct ext4_new_flex_group_data *alloc_flex_gd(unsigned int flexbg_size,
+				ext4_group_t o_group, ext4_group_t n_group)
 {
+	ext4_group_t last_group;
+	unsigned int max_resize_bg;
 	struct ext4_new_flex_group_data *flex_gd;
 
 	flex_gd = kmalloc(sizeof(*flex_gd), GFP_NOFS);
 	if (flex_gd == NULL)
 		goto out3;
 
-	if (unlikely(flexbg_size > MAX_RESIZE_BG))
-		flex_gd->resize_bg = MAX_RESIZE_BG;
-	else
-		flex_gd->resize_bg = flexbg_size;
+	max_resize_bg = umin(flexbg_size, MAX_RESIZE_BG);
+	flex_gd->resize_bg = max_resize_bg;
+
+	/* Avoid allocating large 'groups' array if not needed */
+	last_group = o_group | (flex_gd->resize_bg - 1);
+	if (n_group <= last_group)
+		flex_gd->resize_bg = 1 << fls(n_group - o_group);
+	else if (n_group - last_group < flex_gd->resize_bg)
+		flex_gd->resize_bg = 1 << max(fls(last_group - o_group),
+					      fls(n_group - last_group));
+
+	if (WARN_ON_ONCE(flex_gd->resize_bg > max_resize_bg))
+		flex_gd->resize_bg = max_resize_bg;
 
 	flex_gd->groups = kmalloc_array(flex_gd->resize_bg,
 					sizeof(struct ext4_new_group_data),
@@ -427,7 +430,8 @@ static struct buffer_head *bclean(handle_t *handle, struct super_block *sb,
 	if (unlikely(!bh))
 		return ERR_PTR(-ENOMEM);
 	BUFFER_TRACE(bh, "get_write_access");
-	if ((err = ext4_journal_get_write_access(handle, bh))) {
+	err = ext4_journal_get_write_access(handle, sb, bh, EXT4_JTR_NONE);
+	if (err) {
 		brelse(bh);
 		bh = ERR_PTR(err);
 	} else {
@@ -438,28 +442,10 @@ static struct buffer_head *bclean(handle_t *handle, struct super_block *sb,
 	return bh;
 }
 
-/*
- * If we have fewer than thresh credits, extend by EXT4_MAX_TRANS_DATA.
- * If that fails, restart the transaction & regain write access for the
- * buffer head which is used for block_bitmap modifications.
- */
-static int extend_or_restart_transaction(handle_t *handle, int thresh)
+static int ext4_resize_ensure_credits_batch(handle_t *handle, int credits)
 {
-	int err;
-
-	if (ext4_handle_has_enough_credits(handle, thresh))
-		return 0;
-
-	err = ext4_journal_extend(handle, EXT4_MAX_TRANS_DATA);
-	if (err < 0)
-		return err;
-	if (err) {
-		err = ext4_journal_restart(handle, EXT4_MAX_TRANS_DATA);
-		if (err)
-			return err;
-	}
-
-	return 0;
+	return ext4_journal_ensure_credits_fn(handle, credits,
+		EXT4_MAX_TRANS_DATA, 0, 0);
 }
 
 /*
@@ -481,8 +467,7 @@ static int set_flexbg_block_bitmap(struct super_block *sb, handle_t *handle,
 
 	ext4_debug("mark clusters [%llu-%llu] used\n", first_cluster,
 		   last_cluster);
-	for (count2 = count; count > 0;
-	     count -= count2, first_cluster += count2) {
+	for (; count > 0; count -= count2, first_cluster += count2) {
 		ext4_fsblk_t start;
 		struct buffer_head *bh;
 		ext4_group_t group;
@@ -501,8 +486,8 @@ static int set_flexbg_block_bitmap(struct super_block *sb, handle_t *handle,
 			continue;
 		}
 
-		err = extend_or_restart_transaction(handle, 1);
-		if (err)
+		err = ext4_resize_ensure_credits_batch(handle, 1);
+		if (err < 0)
 			return err;
 
 		bh = sb_getblk(sb, flex_gd->groups[group].block_bitmap);
@@ -510,14 +495,15 @@ static int set_flexbg_block_bitmap(struct super_block *sb, handle_t *handle,
 			return -ENOMEM;
 
 		BUFFER_TRACE(bh, "get_write_access");
-		err = ext4_journal_get_write_access(handle, bh);
+		err = ext4_journal_get_write_access(handle, sb, bh,
+						    EXT4_JTR_NONE);
 		if (err) {
 			brelse(bh);
 			return err;
 		}
 		ext4_debug("mark block bitmap %#04llx (+%llu/%u)\n",
 			   first_cluster, first_cluster - start, count2);
-		ext4_set_bits(bh->b_data, first_cluster - start, count2);
+		mb_set_bits(bh->b_data, first_cluster - start, count2);
 
 		err = ext4_handle_dirty_metadata(handle, NULL, bh);
 		brelse(bh);
@@ -589,8 +575,8 @@ static int setup_new_flex_group_blocks(struct super_block *sb,
 			struct buffer_head *gdb;
 
 			ext4_debug("update backup group %#04llx\n", block);
-			err = extend_or_restart_transaction(handle, 1);
-			if (err)
+			err = ext4_resize_ensure_credits_batch(handle, 1);
+			if (err < 0)
 				goto out;
 
 			gdb = sb_getblk(sb, block);
@@ -600,7 +586,8 @@ static int setup_new_flex_group_blocks(struct super_block *sb,
 			}
 
 			BUFFER_TRACE(gdb, "get_write_access");
-			err = ext4_journal_get_write_access(handle, gdb);
+			err = ext4_journal_get_write_access(handle, sb, gdb,
+							    EXT4_JTR_NONE);
 			if (err) {
 				brelse(gdb);
 				goto out;
@@ -628,7 +615,7 @@ static int setup_new_flex_group_blocks(struct super_block *sb,
 		}
 
 handle_itb:
-		/* Initialize group tables of the grop @group */
+		/* Initialize group tables of the group @group */
 		if (!(bg_flags[i] & EXT4_BG_INODE_ZEROED))
 			goto handle_bb;
 
@@ -647,8 +634,8 @@ handle_bb:
 
 		/* Initialize block bitmap of the @group */
 		block = group_data[i].block_bitmap;
-		err = extend_or_restart_transaction(handle, 1);
-		if (err)
+		err = ext4_resize_ensure_credits_batch(handle, 1);
+		if (err < 0)
 			goto out;
 
 		bh = bclean(handle, sb, block);
@@ -660,7 +647,7 @@ handle_bb:
 		if (overhead != 0) {
 			ext4_debug("mark backup superblock %#04llx (+0)\n",
 				   start);
-			ext4_set_bits(bh->b_data, 0,
+			mb_set_bits(bh->b_data, 0,
 				      EXT4_NUM_B2C(sbi, overhead));
 		}
 		ext4_mark_bitmap_end(EXT4_B2C(sbi, group_data[i].blocks_count),
@@ -676,8 +663,8 @@ handle_ib:
 
 		/* Initialize inode bitmap of the @group */
 		block = group_data[i].inode_bitmap;
-		err = extend_or_restart_transaction(handle, 1);
-		if (err)
+		err = ext4_resize_ensure_credits_batch(handle, 1);
+		if (err < 0)
 			goto out;
 		/* Mark unused entries in inode bitmap used */
 		bh = bclean(handle, sb, block);
@@ -718,16 +705,14 @@ handle_ib:
 			block = start;
 		}
 
-		if (count) {
-			err = set_flexbg_block_bitmap(sb, handle,
-						      flex_gd,
-						      EXT4_B2C(sbi, start),
-						      EXT4_B2C(sbi,
-							       start + count
-							       - 1));
-			if (err)
-				goto out;
-		}
+		err = set_flexbg_block_bitmap(sb, handle,
+				flex_gd,
+				EXT4_B2C(sbi, start),
+				EXT4_B2C(sbi,
+					start + count
+					- 1));
+		if (err)
+			goto out;
 	}
 
 out:
@@ -745,12 +730,23 @@ out:
  * sequence of powers of 3, 5, and 7: 1, 3, 5, 7, 9, 25, 27, 49, 81, ...
  * For a non-sparse filesystem it will be every group: 1, 2, 3, 4, ...
  */
-static unsigned ext4_list_backups(struct super_block *sb, unsigned *three,
-				  unsigned *five, unsigned *seven)
+unsigned int ext4_list_backups(struct super_block *sb, unsigned int *three,
+			       unsigned int *five, unsigned int *seven)
 {
-	unsigned *min = three;
+	struct ext4_super_block *es = EXT4_SB(sb)->s_es;
+	unsigned int *min = three;
 	int mult = 3;
-	unsigned ret;
+	unsigned int ret;
+
+	if (ext4_has_feature_sparse_super2(sb)) {
+		do {
+			if (*min > 2)
+				return UINT_MAX;
+			ret = le32_to_cpu(es->s_backup_bgs[*min - 1]);
+			*min += 1;
+		} while (!ret);
+		return ret;
+	}
 
 	if (!ext4_has_feature_sparse_super(sb)) {
 		ret = *min;
@@ -868,17 +864,18 @@ static int add_new_gdb(handle_t *handle, struct inode *inode,
 	}
 
 	BUFFER_TRACE(EXT4_SB(sb)->s_sbh, "get_write_access");
-	err = ext4_journal_get_write_access(handle, EXT4_SB(sb)->s_sbh);
+	err = ext4_journal_get_write_access(handle, sb, EXT4_SB(sb)->s_sbh,
+					    EXT4_JTR_NONE);
 	if (unlikely(err))
 		goto errout;
 
 	BUFFER_TRACE(gdb_bh, "get_write_access");
-	err = ext4_journal_get_write_access(handle, gdb_bh);
+	err = ext4_journal_get_write_access(handle, sb, gdb_bh, EXT4_JTR_NONE);
 	if (unlikely(err))
 		goto errout;
 
 	BUFFER_TRACE(dind, "get_write_access");
-	err = ext4_journal_get_write_access(handle, dind);
+	err = ext4_journal_get_write_access(handle, sb, dind, EXT4_JTR_NONE);
 	if (unlikely(err)) {
 		ext4_std_error(sb, err);
 		goto errout;
@@ -889,9 +886,8 @@ static int add_new_gdb(handle_t *handle, struct inode *inode,
 	if (unlikely(err))
 		goto errout;
 
-	n_group_desc = ext4_kvmalloc((gdb_num + 1) *
-				     sizeof(struct buffer_head *),
-				     GFP_NOFS);
+	n_group_desc = kvmalloc((gdb_num + 1) * sizeof(struct buffer_head *),
+				GFP_KERNEL);
 	if (!n_group_desc) {
 		err = -ENOMEM;
 		ext4_warning(sb, "not enough memory for %lu groups",
@@ -936,8 +932,11 @@ static int add_new_gdb(handle_t *handle, struct inode *inode,
 	EXT4_SB(sb)->s_gdb_count++;
 	ext4_kvfree_array_rcu(o_group_desc);
 
+	lock_buffer(EXT4_SB(sb)->s_sbh);
 	le16_add_cpu(&es->s_reserved_gdt_blocks, -1);
-	err = ext4_handle_dirty_super(handle, sb);
+	ext4_superblock_csum_set(sb);
+	unlock_buffer(EXT4_SB(sb)->s_sbh);
+	err = ext4_handle_dirty_metadata(handle, NULL, EXT4_SB(sb)->s_sbh);
 	if (err)
 		ext4_std_error(sb, err);
 	return err;
@@ -952,7 +951,13 @@ errout:
 }
 
 /*
- * add_new_gdb_meta_bg is the sister of add_new_gdb.
+ * If there is no available space in the existing block group descriptors for
+ * the new block group and there are no reserved block group descriptors, then
+ * the meta_bg feature will get enabled, and es->s_first_meta_bg will get set
+ * to the first block group that is managed using meta_bg and s_first_meta_bg
+ * must be a multiple of EXT4_DESC_PER_BLOCK(sb).
+ * This function will be called when first group of meta_bg is added to bring
+ * new group descriptors block of new added meta_bg.
  */
 static int add_new_gdb_meta_bg(struct super_block *sb,
 			       handle_t *handle, ext4_group_t group) {
@@ -962,14 +967,13 @@ static int add_new_gdb_meta_bg(struct super_block *sb,
 	unsigned long gdb_num = group / EXT4_DESC_PER_BLOCK(sb);
 	int err;
 
-	gdblock = ext4_meta_bg_first_block_no(sb, group) +
-		   ext4_bg_has_super(sb, group);
+	gdblock = ext4_group_first_block_no(sb, group) +
+		  ext4_bg_has_super(sb, group);
 	gdb_bh = ext4_sb_bread(sb, gdblock, 0);
 	if (IS_ERR(gdb_bh))
 		return PTR_ERR(gdb_bh);
-	n_group_desc = ext4_kvmalloc((gdb_num + 1) *
-				     sizeof(struct buffer_head *),
-				     GFP_NOFS);
+	n_group_desc = kvmalloc((gdb_num + 1) * sizeof(struct buffer_head *),
+				GFP_KERNEL);
 	if (!n_group_desc) {
 		brelse(gdb_bh);
 		err = -ENOMEM;
@@ -986,7 +990,7 @@ static int add_new_gdb_meta_bg(struct super_block *sb,
 	n_group_desc[gdb_num] = gdb_bh;
 
 	BUFFER_TRACE(gdb_bh, "get_write_access");
-	err = ext4_journal_get_write_access(handle, gdb_bh);
+	err = ext4_journal_get_write_access(handle, sb, gdb_bh, EXT4_JTR_NONE);
 	if (err) {
 		kvfree(n_group_desc);
 		brelse(gdb_bh);
@@ -1072,7 +1076,8 @@ static int reserve_backup_gdb(handle_t *handle, struct inode *inode,
 
 	for (i = 0; i < reserved_gdb; i++) {
 		BUFFER_TRACE(primary[i], "get_write_access");
-		if ((err = ext4_journal_get_write_access(handle, primary[i])))
+		if ((err = ext4_journal_get_write_access(handle, sb, primary[i],
+							 EXT4_JTR_NONE)))
 			goto exit_bh;
 	}
 
@@ -1087,9 +1092,6 @@ static int reserve_backup_gdb(handle_t *handle, struct inode *inode,
 	for (i = 0; i < reserved_gdb; i++) {
 		int err2;
 		data = (__le32 *)primary[i]->b_data;
-		/* printk("reserving backup %lu[%u] = %lu\n",
-		       primary[i]->b_blocknr, gdbackups,
-		       blk + primary[i]->b_blocknr); */
 		data[gdbackups] = cpu_to_le32(blk + primary[i]->b_blocknr);
 		err2 = ext4_handle_dirty_metadata(handle, NULL, primary[i]);
 		if (!err)
@@ -1108,6 +1110,16 @@ exit_free:
 	kfree(primary);
 
 	return err;
+}
+
+static inline void ext4_set_block_group_nr(struct super_block *sb, char *data,
+					   ext4_group_t group)
+{
+	struct ext4_super_block *es = (struct ext4_super_block *) data;
+
+	es->s_block_group_nr = cpu_to_le16(group);
+	if (ext4_has_feature_metadata_csum(sb))
+		es->s_checksum = ext4_superblock_csum(es);
 }
 
 /*
@@ -1158,19 +1170,18 @@ static void update_backups(struct super_block *sb, sector_t blk_off, char *data,
 	while (group < sbi->s_groups_count) {
 		struct buffer_head *bh;
 		ext4_fsblk_t backup_block;
+		int has_super = ext4_bg_has_super(sb, group);
+		ext4_fsblk_t first_block = ext4_group_first_block_no(sb, group);
 
 		/* Out of journal space, and can't get more - abort - so sad */
-		if (ext4_handle_valid(handle) &&
-		    handle->h_buffer_credits == 0 &&
-		    ext4_journal_extend(handle, EXT4_MAX_TRANS_DATA) &&
-		    (err = ext4_journal_restart(handle, EXT4_MAX_TRANS_DATA)))
+		err = ext4_resize_ensure_credits_batch(handle, 1);
+		if (err < 0)
 			break;
 
 		if (meta_bg == 0)
 			backup_block = ((ext4_fsblk_t)group) * bpg + blk_off;
 		else
-			backup_block = (ext4_group_first_block_no(sb, group) +
-					ext4_bg_has_super(sb, group));
+			backup_block = first_block + has_super;
 
 		bh = sb_getblk(sb, backup_block);
 		if (unlikely(!bh)) {
@@ -1181,7 +1192,8 @@ static void update_backups(struct super_block *sb, sector_t blk_off, char *data,
 			   backup_block, backup_block -
 			   ext4_group_first_block_no(sb, group));
 		BUFFER_TRACE(bh, "get_write_access");
-		if ((err = ext4_journal_get_write_access(handle, bh))) {
+		if ((err = ext4_journal_get_write_access(handle, sb, bh,
+							 EXT4_JTR_NONE))) {
 			brelse(bh);
 			break;
 		}
@@ -1189,6 +1201,8 @@ static void update_backups(struct super_block *sb, sector_t blk_off, char *data,
 		memcpy(bh->b_data, data, size);
 		if (rest)
 			memset(bh->b_data + size, 0, rest);
+		if (has_super && (backup_block == first_block))
+			ext4_set_block_group_nr(sb, bh->b_data, group);
 		set_buffer_uptodate(bh);
 		unlock_buffer(bh);
 		err = ext4_handle_dirty_metadata(handle, NULL, bh);
@@ -1264,7 +1278,8 @@ static int ext4_add_new_descs(handle_t *handle, struct super_block *sb,
 			gdb_bh = sbi_array_rcu_deref(sbi, s_group_desc,
 						     gdb_num);
 			BUFFER_TRACE(gdb_bh, "get_write_access");
-			err = ext4_journal_get_write_access(handle, gdb_bh);
+			err = ext4_journal_get_write_access(handle, sb, gdb_bh,
+							    EXT4_JTR_NONE);
 
 			if (!err && reserved_gdb && ext4_bg_num_gdb(sb, group))
 				err = reserve_backup_gdb(handle, resize_inode, group);
@@ -1285,7 +1300,7 @@ static struct buffer_head *ext4_get_bitmap(struct super_block *sb, __u64 block)
 	if (unlikely(!bh))
 		return NULL;
 	if (!bh_uptodate_or_lock(bh)) {
-		if (bh_submit_read(bh) < 0) {
+		if (ext4_read_bh(bh, 0, NULL, false) < 0) {
 			brelse(bh);
 			return NULL;
 		}
@@ -1295,26 +1310,24 @@ static struct buffer_head *ext4_get_bitmap(struct super_block *sb, __u64 block)
 }
 
 static int ext4_set_bitmap_checksums(struct super_block *sb,
-				     ext4_group_t group,
 				     struct ext4_group_desc *gdp,
 				     struct ext4_new_group_data *group_data)
 {
 	struct buffer_head *bh;
 
-	if (!ext4_has_metadata_csum(sb))
+	if (!ext4_has_feature_metadata_csum(sb))
 		return 0;
 
 	bh = ext4_get_bitmap(sb, group_data->inode_bitmap);
 	if (!bh)
 		return -EIO;
-	ext4_inode_bitmap_csum_set(sb, group, gdp, bh,
-				   EXT4_INODES_PER_GROUP(sb) / 8);
+	ext4_inode_bitmap_csum_set(sb, gdp, bh);
 	brelse(bh);
 
 	bh = ext4_get_bitmap(sb, group_data->block_bitmap);
 	if (!bh)
 		return -EIO;
-	ext4_block_bitmap_csum_set(sb, group, gdp, bh);
+	ext4_block_bitmap_csum_set(sb, gdp, bh);
 	brelse(bh);
 
 	return 0;
@@ -1352,7 +1365,7 @@ static int ext4_setup_new_descs(handle_t *handle, struct super_block *sb,
 		memset(gdp, 0, EXT4_DESC_SIZE(sb));
 		ext4_block_bitmap_set(sb, gdp, group_data->block_bitmap);
 		ext4_inode_bitmap_set(sb, gdp, group_data->inode_bitmap);
-		err = ext4_set_bitmap_checksums(sb, group, gdp, group_data);
+		err = ext4_set_bitmap_checksums(sb, gdp, group_data);
 		if (err) {
 			ext4_std_error(sb, err);
 			break;
@@ -1383,6 +1396,17 @@ static int ext4_setup_new_descs(handle_t *handle, struct super_block *sb,
 			break;
 	}
 	return err;
+}
+
+static void ext4_add_overhead(struct super_block *sb,
+                              const ext4_fsblk_t overhead)
+{
+       struct ext4_sb_info *sbi = EXT4_SB(sb);
+       struct ext4_super_block *es = sbi->s_es;
+
+       sbi->s_overhead += overhead;
+       es->s_overhead_clusters = cpu_to_le32(sbi->s_overhead);
+       smp_wmb();
 }
 
 /*
@@ -1424,6 +1448,7 @@ static void ext4_update_super(struct super_block *sb,
 	reserved_blocks *= blocks_count;
 	do_div(reserved_blocks, 100);
 
+	lock_buffer(sbi->s_sbh);
 	ext4_blocks_count_set(es, ext4_blocks_count(es) + blocks_count);
 	ext4_free_blocks_count_set(es, ext4_free_blocks_count(es) + free_blocks);
 	le32_add_cpu(&es->s_inodes_count, EXT4_INODES_PER_GROUP(sb) *
@@ -1483,11 +1508,21 @@ static void ext4_update_super(struct super_block *sb,
 	}
 
 	/*
-	 * Update the fs overhead information
+	 * Update the fs overhead information.
+	 *
+	 * For bigalloc, if the superblock already has a properly calculated
+	 * overhead, update it with a value based on numbers already computed
+	 * above for the newly allocated capacity.
 	 */
-	ext4_calculate_overhead(sb);
+	if (ext4_has_feature_bigalloc(sb) && (sbi->s_overhead != 0))
+		ext4_add_overhead(sb,
+			EXT4_NUM_B2C(sbi, blocks_count - free_blocks));
+	else
+		ext4_calculate_overhead(sb);
 	es->s_overhead_clusters = cpu_to_le32(sbi->s_overhead);
 
+	ext4_superblock_csum_set(sb);
+	unlock_buffer(sbi->s_sbh);
 	if (test_opt(sb, DEBUG))
 		printk(KERN_DEBUG "EXT4-fs: added group %u:"
 		       "%llu blocks(%llu free %llu reserved)\n", flex_gd->count,
@@ -1539,7 +1574,8 @@ static int ext4_flex_group_add(struct super_block *sb,
 	}
 
 	BUFFER_TRACE(sbi->s_sbh, "get_write_access");
-	err = ext4_journal_get_write_access(handle, sbi->s_sbh);
+	err = ext4_journal_get_write_access(handle, sb, sbi->s_sbh,
+					    EXT4_JTR_NONE);
 	if (err)
 		goto exit_journal;
 
@@ -1556,7 +1592,7 @@ static int ext4_flex_group_add(struct super_block *sb,
 
 	ext4_update_super(sb, flex_gd);
 
-	err = ext4_handle_dirty_super(handle, sb);
+	err = ext4_handle_dirty_metadata(handle, NULL, sbi->s_sbh);
 
 exit_journal:
 	err2 = ext4_journal_stop(handle);
@@ -1571,7 +1607,6 @@ exit_journal:
 			      gdb_num >= le32_to_cpu(es->s_first_meta_bg);
 		sector_t padding_blocks = meta_bg ? 0 : sbi->s_sbh->b_blocknr -
 					 ext4_group_first_block_no(sb, 0);
-		sector_t old_gdb = 0;
 
 		update_backups(sb, ext4_group_first_block_no(sb, 0),
 			       (char *)es, sizeof(struct ext4_super_block), 0);
@@ -1580,11 +1615,8 @@ exit_journal:
 
 			gdb_bh = sbi_array_rcu_deref(sbi, s_group_desc,
 						     gdb_num);
-			if (old_gdb == gdb_bh->b_blocknr)
-				continue;
 			update_backups(sb, gdb_bh->b_blocknr - padding_blocks,
 				       gdb_bh->b_data, gdb_bh->b_size, meta_bg);
-			old_gdb = gdb_bh->b_blocknr;
 		}
 	}
 exit:
@@ -1754,21 +1786,25 @@ static int ext4_group_extend_no_check(struct super_block *sb,
 	}
 
 	BUFFER_TRACE(EXT4_SB(sb)->s_sbh, "get_write_access");
-	err = ext4_journal_get_write_access(handle, EXT4_SB(sb)->s_sbh);
+	err = ext4_journal_get_write_access(handle, sb, EXT4_SB(sb)->s_sbh,
+					    EXT4_JTR_NONE);
 	if (err) {
 		ext4_warning(sb, "error %d on journal write access", err);
 		goto errout;
 	}
 
+	lock_buffer(EXT4_SB(sb)->s_sbh);
 	ext4_blocks_count_set(es, o_blocks_count + add);
 	ext4_free_blocks_count_set(es, ext4_free_blocks_count(es) + add);
+	ext4_superblock_csum_set(sb);
+	unlock_buffer(EXT4_SB(sb)->s_sbh);
 	ext4_debug("freeing blocks %llu through %llu\n", o_blocks_count,
 		   o_blocks_count + add);
 	/* We add the blocks to the bitmap and set the group need init bit */
 	err = ext4_group_add_blocks(handle, sb, o_blocks_count, add);
 	if (err)
 		goto errout;
-	ext4_handle_dirty_super(handle, sb);
+	ext4_handle_dirty_metadata(handle, NULL, EXT4_SB(sb)->s_sbh);
 	ext4_debug("freed blocks %llu through %llu\n", o_blocks_count,
 		   o_blocks_count + add);
 errout:
@@ -1803,7 +1839,6 @@ int ext4_group_extend(struct super_block *sb, struct ext4_super_block *es,
 	ext4_grpblk_t last;
 	ext4_grpblk_t add;
 	struct buffer_head *bh;
-	int err;
 	ext4_group_t group;
 
 	o_blocks_count = ext4_blocks_count(es);
@@ -1820,8 +1855,6 @@ int ext4_group_extend(struct super_block *sb, struct ext4_super_block *es,
 		ext4_msg(sb, KERN_ERR,
 			 "filesystem too large to resize to %llu blocks safely",
 			 n_blocks_count);
-		if (sizeof(sector_t) < 8)
-			ext4_warning(sb, "CONFIG_LBDAF not enabled");
 		return -EINVAL;
 	}
 
@@ -1853,15 +1886,14 @@ int ext4_group_extend(struct super_block *sb, struct ext4_super_block *es,
 			     o_blocks_count + add, add);
 
 	/* See if the device is actually as big as what was requested */
-	bh = sb_bread(sb, o_blocks_count + add - 1);
-	if (!bh) {
+	bh = ext4_sb_bread(sb, o_blocks_count + add - 1, 0);
+	if (IS_ERR(bh)) {
 		ext4_warning(sb, "can't read last block, resize aborted");
 		return -ENOSPC;
 	}
 	brelse(bh);
 
-	err = ext4_group_extend_no_check(sb, o_blocks_count, add);
-	return err;
+	return ext4_group_extend_no_check(sb, o_blocks_count, add);
 } /* ext4_group_extend */
 
 
@@ -1915,16 +1947,20 @@ static int ext4_convert_meta_bg(struct super_block *sb, struct inode *inode)
 		return PTR_ERR(handle);
 
 	BUFFER_TRACE(sbi->s_sbh, "get_write_access");
-	err = ext4_journal_get_write_access(handle, sbi->s_sbh);
+	err = ext4_journal_get_write_access(handle, sb, sbi->s_sbh,
+					    EXT4_JTR_NONE);
 	if (err)
 		goto errout;
 
+	lock_buffer(sbi->s_sbh);
 	ext4_clear_feature_resize_inode(sb);
 	ext4_set_feature_meta_bg(sb);
 	sbi->s_es->s_first_meta_bg =
 		cpu_to_le32(num_desc_blocks(sb, sbi->s_groups_count));
+	ext4_superblock_csum_set(sb);
+	unlock_buffer(sbi->s_sbh);
 
-	err = ext4_handle_dirty_super(handle, sb);
+	err = ext4_handle_dirty_metadata(handle, NULL, sbi->s_sbh);
 	if (err) {
 		ext4_std_error(sb, err);
 		goto errout;
@@ -1978,8 +2014,8 @@ int ext4_resize_fs(struct super_block *sb, ext4_fsblk_t n_blocks_count)
 	unsigned int flexbg_size = ext4_flex_bg_size(sbi);
 
 	/* See if the device is actually as big as what was requested */
-	bh = sb_bread(sb, n_blocks_count - 1);
-	if (!bh) {
+	bh = ext4_sb_bread(sb, n_blocks_count - 1, 0);
+	if (IS_ERR(bh)) {
 		ext4_warning(sb, "can't read last block, resize aborted");
 		return -ENOSPC;
 	}
@@ -2050,7 +2086,7 @@ retry:
 		}
 	}
 
-	if ((!resize_inode && !meta_bg) || n_blocks_count == o_blocks_count) {
+	if ((!resize_inode && !meta_bg && n_desc_blocks > o_desc_blocks) || n_blocks_count == o_blocks_count) {
 		err = ext4_convert_meta_bg(sb, resize_inode);
 		if (err)
 			goto out;
@@ -2107,7 +2143,7 @@ retry:
 	if (err)
 		goto out;
 
-	flex_gd = alloc_flex_gd(flexbg_size);
+	flex_gd = alloc_flex_gd(flexbg_size, o_group, n_group);
 	if (flex_gd == NULL) {
 		err = -ENOMEM;
 		goto out;
@@ -2117,7 +2153,7 @@ retry:
 	 * flex group with 1 group.
 	 */
 	while (ext4_setup_next_flex_gd(sb, flex_gd, n_blocks_count)) {
-		if (jiffies - last_update_time > HZ * 10) {
+		if (time_is_before_jiffies(last_update_time + HZ * 10)) {
 			if (last_update_time)
 				ext4_msg(sb, KERN_INFO,
 					 "resized to %llu blocks",

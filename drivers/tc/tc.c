@@ -47,7 +47,7 @@ static void __init tc_bus_add_devices(struct tc_bus *tbus)
 	for (slot = 0; slot < tbus->num_tcslots; slot++) {
 		slotaddr = tbus->slot_base + slot * slotsize;
 		extslotaddr = tbus->ext_slot_base + slot * extslotsize;
-		module = ioremap_nocache(slotaddr, slotsize);
+		module = ioremap(slotaddr, slotsize);
 		BUG_ON(!module);
 
 		offset = TC_OLDCARD;
@@ -162,7 +162,7 @@ static int __init tc_init(void)
 	if (tc_bus.info.slot_size) {
 		unsigned int tc_clock = tc_get_speed(&tc_bus) / 100000;
 
-		pr_info("tc: TURBOchannel rev. %d at %d.%d MHz "
+		pr_info("tc: TURBOchannel rev. %d at %u.%u MHz "
 			"(with%s parity)\n", tc_bus.info.revision,
 			tc_clock / 10, tc_clock % 10,
 			tc_bus.info.parity ? "" : "out");

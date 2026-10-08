@@ -8,12 +8,16 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "debug.h"
+#include "env.h"
+#include "event.h"
 #include "tests.h"
 #include "machine.h"
 #include "thread_map.h"
+#include "map.h"
 #include "symbol.h"
+#include "util/synthetic-events.h"
 #include "thread.h"
-#include "util.h"
+#include <internal/lib.h> // page_size
 
 #define THREADS 4
 
@@ -132,26 +136,27 @@ static int synth_all(struct machine *machine)
 {
 	return perf_event__synthesize_threads(NULL,
 					      perf_event__process,
-					      machine, 0, 500, 1);
+					      machine, 1, 0, 1);
 }
 
 static int synth_process(struct machine *machine)
 {
-	struct thread_map *map;
+	struct perf_thread_map *map;
 	int err;
 
 	map = thread_map__new_by_pid(getpid());
 
 	err = perf_event__synthesize_thread_map(NULL, map,
 						perf_event__process,
-						machine, 0, 500);
+						machine, 1, 0);
 
-	thread_map__put(map);
+	perf_thread_map__put(map);
 	return err;
 }
 
 static int mmap_events(synth_cb synth)
 {
+	struct perf_env host_env;
 	struct machine *machine;
 	int err, i;
 
@@ -164,7 +169,8 @@ static int mmap_events(synth_cb synth)
 	 */
 	TEST_ASSERT_VAL("failed to create threads", !threads_create());
 
-	machine = machine__new_host();
+	perf_env__init(&host_env);
+	machine = machine__new_host(&host_env);
 
 	dump_trace = verbose > 1 ? 1 : 0;
 
@@ -184,6 +190,7 @@ static int mmap_events(synth_cb synth)
 		struct addr_location al;
 		struct thread *thread;
 
+		addr_location__init(&al);
 		thread = machine__findnew_thread(machine, getpid(), td->tid);
 
 		pr_debug("looking for map %p\n", td->map);
@@ -196,14 +203,16 @@ static int mmap_events(synth_cb synth)
 		if (!al.map) {
 			pr_debug("failed, couldn't find map\n");
 			err = -1;
+			addr_location__exit(&al);
 			break;
 		}
 
-		pr_debug("map %p, addr %" PRIx64 "\n", al.map, al.map->start);
+		pr_debug("map %p, addr %" PRIx64 "\n", al.map, map__start(al.map));
+		addr_location__exit(&al);
 	}
 
-	machine__delete_threads(machine);
 	machine__delete(machine);
+	perf_env__exit(&host_env);
 	return err;
 }
 
@@ -221,15 +230,17 @@ static int mmap_events(synth_cb synth)
  *
  * by using all thread objects.
  */
-int test__mmap_thread_lookup(struct test *test __maybe_unused, int subtest __maybe_unused)
+static int test__mmap_thread_lookup(struct test_suite *test __maybe_unused, int subtest __maybe_unused)
 {
 	/* perf_event__synthesize_threads synthesize */
-	TEST_ASSERT_VAL("failed with sythesizing all",
+	TEST_ASSERT_VAL("failed with synthesizing all",
 			!mmap_events(synth_all));
 
 	/* perf_event__synthesize_thread_map synthesize */
-	TEST_ASSERT_VAL("failed with sythesizing process",
+	TEST_ASSERT_VAL("failed with synthesizing process",
 			!mmap_events(synth_process));
 
 	return 0;
 }
+
+DEFINE_SUITE("Lookup mmap thread", mmap_thread_lookup);

@@ -1,25 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* SCTP kernel implementation
  * (C) Copyright Red Hat Inc. 2017
  *
  * This file is part of the SCTP kernel implementation
  *
  * These functions manipulate sctp stream queue/scheduling.
- *
- * This SCTP implementation is free software;
- * you can redistribute it and/or modify it under the terms of
- * the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This SCTP implementation is distributed in the hope that it
- * will be useful, but WITHOUT ANY WARRANTY; without even the implied
- *                 ************************
- * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
  *
  * Please send any bug reports or fixes you make to the
  * email addresched(es):
@@ -105,9 +90,8 @@ static int sctp_sched_rr_init_sid(struct sctp_stream *stream, __u16 sid,
 	return 0;
 }
 
-static void sctp_sched_rr_free(struct sctp_stream *stream)
+static void sctp_sched_rr_free_sid(struct sctp_stream *stream, __u16 sid)
 {
-	sctp_sched_rr_unsched_all(stream);
 }
 
 static void sctp_sched_rr_enqueue(struct sctp_outq *q,
@@ -192,7 +176,7 @@ static struct sctp_sched_ops sctp_sched_rr = {
 	.get = sctp_sched_rr_get,
 	.init = sctp_sched_rr_init,
 	.init_sid = sctp_sched_rr_init_sid,
-	.free = sctp_sched_rr_free,
+	.free_sid = sctp_sched_rr_free_sid,
 	.enqueue = sctp_sched_rr_enqueue,
 	.dequeue = sctp_sched_rr_dequeue,
 	.dequeue_done = sctp_sched_rr_dequeue_done,

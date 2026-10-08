@@ -1,39 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Intel Atom platform clocks driver for BayTrail and CherryTrail SoCs
  *
  * Copyright (C) 2016, Intel Corporation
  * Author: Irina Tirdea <irina.tirdea@intel.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #include <linux/clk-provider.h>
 #include <linux/clkdev.h>
 #include <linux/err.h>
+#include <linux/io.h>
 #include <linux/platform_data/x86/clk-pmc-atom.h>
+#include <linux/platform_data/x86/pmc_atom.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
 #define PLT_CLK_NAME_BASE	"pmc_plt_clk"
-
-#define PMC_CLK_CTL_OFFSET		0x60
-#define PMC_CLK_CTL_SIZE		4
-#define PMC_CLK_NUM			6
-#define PMC_CLK_CTL_GATED_ON_D3		0x0
-#define PMC_CLK_CTL_FORCE_ON		0x1
-#define PMC_CLK_CTL_FORCE_OFF		0x2
-#define PMC_CLK_CTL_RESERVED		0x3
-#define PMC_MASK_CLK_CTL		GENMASK(1, 0)
-#define PMC_MASK_CLK_FREQ		BIT(2)
-#define PMC_CLK_FREQ_XTAL		(0 << 2)	/* 25 MHz */
-#define PMC_CLK_FREQ_PLL		(1 << 2)	/* 19.2 MHz */
 
 struct clk_plt_fixed {
 	struct clk_hw *clk;
@@ -170,7 +152,7 @@ static struct clk_plt *plt_clk_register(struct platform_device *pdev, int id,
 					int num_parents)
 {
 	struct clk_plt *pclk;
-	struct clk_init_data init = {};
+	struct clk_init_data init;
 	int ret;
 
 	pclk = devm_kzalloc(&pdev->dev, sizeof(*pclk), GFP_KERNEL);
@@ -374,7 +356,7 @@ err_unreg_clk_plt:
 	return err;
 }
 
-static int plt_clk_remove(struct platform_device *pdev)
+static void plt_clk_remove(struct platform_device *pdev)
 {
 	struct clk_plt_data *data;
 
@@ -384,7 +366,6 @@ static int plt_clk_remove(struct platform_device *pdev)
 	clkdev_drop(data->mclk_lookup);
 	plt_clk_unregister_loop(data, PMC_CLK_NUM);
 	plt_clk_unregister_parents(data);
-	return 0;
 }
 
 static struct platform_driver plt_clk_driver = {

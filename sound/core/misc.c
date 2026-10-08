@@ -1,22 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Misc and compatibility things
  *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
- *
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
 #include <linux/init.h>
@@ -28,20 +13,6 @@
 #include <linux/fs.h>
 #include <sound/core.h>
 
-#ifdef CONFIG_SND_DEBUG
-
-#ifdef CONFIG_SND_DEBUG_VERBOSE
-#define DEFAULT_DEBUG_LEVEL	2
-#else
-#define DEFAULT_DEBUG_LEVEL	1
-#endif
-
-static int debug = DEFAULT_DEBUG_LEVEL;
-module_param(debug, int, 0644);
-MODULE_PARM_DESC(debug, "Debug level (0 = disable)");
-
-#endif /* CONFIG_SND_DEBUG */
-
 void release_and_free_resource(struct resource *res)
 {
 	if (res) {
@@ -50,63 +21,6 @@ void release_and_free_resource(struct resource *res)
 	}
 }
 EXPORT_SYMBOL(release_and_free_resource);
-
-#ifdef CONFIG_SND_VERBOSE_PRINTK
-/* strip the leading path if the given path is absolute */
-static const char *sanity_file_name(const char *path)
-{
-	if (*path == '/')
-		return strrchr(path, '/') + 1;
-	else
-		return path;
-}
-#endif
-
-#if defined(CONFIG_SND_DEBUG) || defined(CONFIG_SND_VERBOSE_PRINTK)
-void __snd_printk(unsigned int level, const char *path, int line,
-		  const char *format, ...)
-{
-	va_list args;
-#ifdef CONFIG_SND_VERBOSE_PRINTK
-	int kern_level;
-	struct va_format vaf;
-	char verbose_fmt[] = KERN_DEFAULT "ALSA %s:%d %pV";
-	bool level_found = false;
-#endif
-
-#ifdef CONFIG_SND_DEBUG
-	if (debug < level)
-		return;
-#endif
-
-	va_start(args, format);
-#ifdef CONFIG_SND_VERBOSE_PRINTK
-	vaf.fmt = format;
-	vaf.va = &args;
-
-	while ((kern_level = printk_get_level(vaf.fmt)) != 0) {
-		const char *end_of_header = printk_skip_level(vaf.fmt);
-
-		/* Ignore KERN_CONT. We print filename:line for each piece. */
-		if (kern_level >= '0' && kern_level <= '7') {
-			memcpy(verbose_fmt, vaf.fmt, end_of_header - vaf.fmt);
-			level_found = true;
-		}
-
-		vaf.fmt = end_of_header;
-	}
-
-	if (!level_found && level)
-		memcpy(verbose_fmt, KERN_DEBUG, sizeof(KERN_DEBUG) - 1);
-
-	printk(verbose_fmt, sanity_file_name(path), line, &vaf);
-#else
-	vprintk(format, args);
-#endif
-	va_end(args);
-}
-EXPORT_SYMBOL_GPL(__snd_printk);
-#endif
 
 #ifdef CONFIG_PCI
 #include <linux/pci.h>
@@ -128,7 +42,7 @@ snd_pci_quirk_lookup_id(u16 vendor, u16 device,
 {
 	const struct snd_pci_quirk *q;
 
-	for (q = list; q->subvendor; q++) {
+	for (q = list; q->subvendor || q->subdevice; q++) {
 		if (q->subvendor != vendor)
 			continue;
 		if (!q->subdevice ||
@@ -186,14 +100,18 @@ static LIST_HEAD(snd_fasync_list);
 static void snd_fasync_work_fn(struct work_struct *work)
 {
 	struct snd_fasync *fasync;
+	int signal, poll;
 
 	spin_lock_irq(&snd_fasync_lock);
 	while (!list_empty(&snd_fasync_list)) {
 		fasync = list_first_entry(&snd_fasync_list, struct snd_fasync, list);
 		list_del_init(&fasync->list);
+		if (!fasync->on)
+			continue;
+		signal = fasync->signal;
+		poll = fasync->poll;
 		spin_unlock_irq(&snd_fasync_lock);
-		if (fasync->on)
-			kill_fasync(&fasync->fasync, fasync->signal, fasync->poll);
+		kill_fasync(&fasync->fasync, signal, poll);
 		spin_lock_irq(&snd_fasync_lock);
 	}
 	spin_unlock_irq(&snd_fasync_lock);
@@ -213,35 +131,30 @@ int snd_fasync_helper(int fd, struct file *file, int on,
 		INIT_LIST_HEAD(&fasync->list);
 	}
 
-	spin_lock_irq(&snd_fasync_lock);
-	if (*fasyncp) {
-		kfree(fasync);
-		fasync = *fasyncp;
-	} else {
-		if (!fasync) {
-			spin_unlock_irq(&snd_fasync_lock);
-			return 0;
+	scoped_guard(spinlock_irq, &snd_fasync_lock) {
+		if (*fasyncp) {
+			kfree(fasync);
+			fasync = *fasyncp;
+		} else {
+			if (!fasync)
+				return 0;
+			*fasyncp = fasync;
 		}
-		*fasyncp = fasync;
+		fasync->on = on;
 	}
-	fasync->on = on;
-	spin_unlock_irq(&snd_fasync_lock);
 	return fasync_helper(fd, file, on, &fasync->fasync);
 }
 EXPORT_SYMBOL_GPL(snd_fasync_helper);
 
 void snd_kill_fasync(struct snd_fasync *fasync, int signal, int poll)
 {
-	unsigned long flags;
-
 	if (!fasync || !fasync->on)
 		return;
-	spin_lock_irqsave(&snd_fasync_lock, flags);
+	guard(spinlock_irqsave)(&snd_fasync_lock);
 	fasync->signal = signal;
 	fasync->poll = poll;
 	list_move(&fasync->list, &snd_fasync_list);
 	schedule_work(&snd_fasync_work);
-	spin_unlock_irqrestore(&snd_fasync_lock, flags);
 }
 EXPORT_SYMBOL_GPL(snd_kill_fasync);
 
@@ -249,7 +162,10 @@ void snd_fasync_free(struct snd_fasync *fasync)
 {
 	if (!fasync)
 		return;
-	fasync->on = 0;
+
+	scoped_guard(spinlock_irq, &snd_fasync_lock)
+		list_del_init(&fasync->list);
+
 	flush_work(&snd_fasync_work);
 	kfree(fasync);
 }

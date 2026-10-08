@@ -1,18 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Bt8xx based DVB adapter driver
  *
  * Copyright (C) 2002,2003 Florian Schirmer <jolt@tuxbox.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -49,9 +39,10 @@ DVB_DEFINE_MOD_OPT_ADAPTER_NR(adapter_nr);
 
 #define IF_FREQUENCYx6 217    /* 6 * 36.16666666667MHz */
 
-static void dvb_bt8xx_task(unsigned long data)
+static void dvb_bt8xx_work(struct work_struct *t)
 {
-	struct dvb_bt8xx_card *card = (struct dvb_bt8xx_card *)data;
+	struct bt878 *bt = from_work(bt, t, bh_work);
+	struct dvb_bt8xx_card *card = dev_get_drvdata(&bt->adapter->dev);
 
 	dprintk("%d\n", card->bt->finished_block);
 
@@ -199,11 +190,15 @@ static int cx24108_tuner_set_params(struct dvb_frontend *fe)
 	u32 freq = c->frequency;
 	int i, a, n, pump;
 	u32 band, pll;
-	u32 osci[]={950000,1019000,1075000,1178000,1296000,1432000,
-		1576000,1718000,1856000,2036000,2150000};
-	u32 bandsel[]={0,0x00020000,0x00040000,0x00100800,0x00101000,
-		0x00102000,0x00104000,0x00108000,0x00110000,
-		0x00120000,0x00140000};
+	static const u32 osci[] = {
+		950000, 1019000, 1075000, 1178000, 1296000, 1432000,
+		1576000, 1718000, 1856000, 2036000, 2150000
+	};
+	static const u32 bandsel[] = {
+		0, 0x00020000, 0x00040000, 0x00100800, 0x00101000,
+		0x00102000, 0x00104000, 0x00108000, 0x00110000,
+		0x00120000, 0x00140000
+	};
 
 	#define XTAL 1011100 /* Hz, really 1.0111 MHz and a /10 prescaler */
 	dprintk("cx24108 debug: entering SetTunerFreq, freq=%d\n", freq);
@@ -403,7 +398,7 @@ static struct mt352_config advbt771_samsung_tdtc9251dh0_config = {
 	.demod_init = advbt771_samsung_tdtc9251dh0_demod_init,
 };
 
-static struct dst_config dst_config = {
+static const struct dst_config dst_config = {
 	.demod_address = 0x55,
 };
 
@@ -787,7 +782,7 @@ static int dvb_bt8xx_load_card(struct dvb_bt8xx_card *card, u32 type)
 		goto err_disconnect_frontend;
 	}
 
-	tasklet_init(&card->bt->tasklet, dvb_bt8xx_task, (unsigned long) card);
+	INIT_WORK(&card->bt->bh_work, dvb_bt8xx_work);
 
 	frontend_init(card, type);
 
@@ -819,7 +814,8 @@ static int dvb_bt8xx_probe(struct bttv_sub_device *sub)
 
 	mutex_init(&card->lock);
 	card->bttv_nr = sub->core->nr;
-	strlcpy(card->card_name, sub->core->v4l2_dev.name, sizeof(card->card_name));
+	strscpy(card->card_name, sub->core->v4l2_dev.name,
+		sizeof(card->card_name));
 	card->i2c_adapter = &sub->core->i2c_adap;
 
 	switch(sub->core->type) {
@@ -926,7 +922,7 @@ static void dvb_bt8xx_remove(struct bttv_sub_device *sub)
 	dprintk("dvb_bt8xx: unloading card%d\n", card->bttv_nr);
 
 	bt878_stop(card->bt);
-	tasklet_kill(&card->bt->tasklet);
+	cancel_work_sync(&card->bt->bh_work);
 	dvb_net_release(&card->dvbnet);
 	card->demux.dmx.remove_frontend(&card->demux.dmx, &card->fe_mem);
 	card->demux.dmx.remove_frontend(&card->demux.dmx, &card->fe_hw);

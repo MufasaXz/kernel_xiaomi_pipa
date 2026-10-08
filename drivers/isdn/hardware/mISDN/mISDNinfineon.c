@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * mISDNinfineon.c
  *		Support for cards based on following Infineon ISDN chipsets
@@ -17,25 +18,9 @@
  *		- Berkom Scitel BRIX Quadro
  *		- Dr.Neuhaus (Sagem) Niccy
  *
- *
- *
  * Author       Karsten Keil <keil@isdn4linux.de>
  *
  * Copyright 2009  by Karsten Keil <keil@isdn4linux.de>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  */
 
 #include <linux/interrupt.h>
@@ -260,6 +245,7 @@ set_debug(const char *val, const struct kernel_param *kp)
 }
 
 MODULE_AUTHOR("Karsten Keil");
+MODULE_DESCRIPTION("mISDN driver for cards based on Infineon ISDN chipsets");
 MODULE_LICENSE("GPL v2");
 MODULE_VERSION(INFINEON_REV);
 module_param_call(debug, set_debug, param_get_uint, &debug, S_IRUGO | S_IWUSR);
@@ -895,7 +881,7 @@ release_card(struct inf_hw *card) {
 				release_card(card->sc[i]);
 			card->sc[i] = NULL;
 		}
-		/* fall through */
+		fallthrough;
 	default:
 		pci_disable_device(card->pdev);
 		pci_set_drvdata(card->pdev, NULL);

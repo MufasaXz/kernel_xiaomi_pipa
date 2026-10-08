@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  eeepc-laptop.c - Asus Eee PC extras
  *
  *  Based on asus_acpi.c as patched for the Eee PC by Asus:
  *  ftp://ftp.asus.com/pub/ASUS/EeePC/701/ASUS_ACPI_071126.rar
  *  Based on eee.c from eeepc-linux
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -24,7 +15,6 @@
 #include <linux/types.h>
 #include <linux/platform_device.h>
 #include <linux/backlight.h>
-#include <linux/fb.h>
 #include <linux/hwmon.h>
 #include <linux/hwmon-sysfs.h>
 #include <linux/slab.h>
@@ -35,6 +25,7 @@
 #include <linux/rfkill.h>
 #include <linux/pci.h>
 #include <linux/pci_hotplug.h>
+#include <linux/sysfs.h>
 #include <linux/leds.h>
 #include <linux/dmi.h>
 #include <acpi/video.h>
@@ -177,7 +168,7 @@ struct eeepc_laptop {
 	struct rfkill *wwan3g_rfkill;
 	struct rfkill *wimax_rfkill;
 
-	struct hotplug_slot *hotplug_slot;
+	struct hotplug_slot hotplug_slot;
 	struct mutex hotplug_lock;
 
 	struct led_classdev tpd_led;
@@ -295,7 +286,7 @@ static ssize_t show_sys_acpi(struct device *dev, int cm, char *buf)
 
 	if (value < 0)
 		return -EIO;
-	return sprintf(buf, "%d\n", value);
+	return sysfs_emit(buf, "%d\n", value);
 }
 
 #define EEEPC_ACPI_SHOW_FUNC(_name, _cm)				\
@@ -371,7 +362,7 @@ static ssize_t cpufv_show(struct device *dev,
 
 	if (get_cpufv(eeepc, &c))
 		return -ENODEV;
-	return sprintf(buf, "%#x\n", (c.num << 8) | c.cur);
+	return sysfs_emit(buf, "%#x\n", (c.num << 8) | c.cur);
 }
 
 static ssize_t cpufv_store(struct device *dev,
@@ -403,7 +394,7 @@ static ssize_t cpufv_disabled_show(struct device *dev,
 {
 	struct eeepc_laptop *eeepc = dev_get_drvdata(dev);
 
-	return sprintf(buf, "%d\n", eeepc->cpufv_disabled);
+	return sysfs_emit(buf, "%d\n", eeepc->cpufv_disabled);
 }
 
 static ssize_t cpufv_disabled_store(struct device *dev,
@@ -453,7 +444,7 @@ static int eeepc_platform_init(struct eeepc_laptop *eeepc)
 {
 	int result;
 
-	eeepc->platform_device = platform_device_alloc(EEEPC_LAPTOP_FILE, -1);
+	eeepc->platform_device = platform_device_alloc(EEEPC_LAPTOP_FILE, PLATFORM_DEVID_NONE);
 	if (!eeepc->platform_device)
 		return -ENOMEM;
 	platform_set_drvdata(eeepc->platform_device, eeepc);
@@ -550,12 +541,10 @@ static int eeepc_led_init(struct eeepc_laptop *eeepc)
 
 static void eeepc_led_exit(struct eeepc_laptop *eeepc)
 {
-	if (!IS_ERR_OR_NULL(eeepc->tpd_led.dev))
-		led_classdev_unregister(&eeepc->tpd_led);
+	led_classdev_unregister(&eeepc->tpd_led);
 	if (eeepc->led_workqueue)
 		destroy_workqueue(eeepc->led_workqueue);
 }
-
 
 /*
  * PCI hotplug (for wlan rfkill)
@@ -582,12 +571,12 @@ static void eeepc_rfkill_hotplug(struct eeepc_laptop *eeepc, acpi_handle handle)
 	mutex_lock(&eeepc->hotplug_lock);
 	pci_lock_rescan_remove();
 
-	if (!eeepc->hotplug_slot)
+	if (!eeepc->hotplug_slot.ops)
 		goto out_unlock;
 
 	port = acpi_get_pci_dev(handle);
 	if (!port) {
-		pr_warning("Unable to find port\n");
+		pr_warn("Unable to find port\n");
 		goto out_unlock;
 	}
 
@@ -715,8 +704,11 @@ static void eeepc_unregister_rfkill_notifier(struct eeepc_laptop *eeepc,
 static int eeepc_get_adapter_status(struct hotplug_slot *hotplug_slot,
 				    u8 *value)
 {
-	struct eeepc_laptop *eeepc = hotplug_slot->private;
-	int val = get_acpi(eeepc, CM_ASL_WLAN);
+	struct eeepc_laptop *eeepc;
+	int val;
+
+	eeepc = container_of(hotplug_slot, struct eeepc_laptop, hotplug_slot);
+	val = get_acpi(eeepc, CM_ASL_WLAN);
 
 	if (val == 1 || val == 0)
 		*value = val;
@@ -726,8 +718,7 @@ static int eeepc_get_adapter_status(struct hotplug_slot *hotplug_slot,
 	return 0;
 }
 
-static struct hotplug_slot_ops eeepc_hotplug_slot_ops = {
-	.owner = THIS_MODULE,
+static const struct hotplug_slot_ops eeepc_hotplug_slot_ops = {
 	.get_adapter_status = eeepc_get_adapter_status,
 	.get_power_status = eeepc_get_adapter_status,
 };
@@ -742,21 +733,9 @@ static int eeepc_setup_pci_hotplug(struct eeepc_laptop *eeepc)
 		return -ENODEV;
 	}
 
-	eeepc->hotplug_slot = kzalloc(sizeof(struct hotplug_slot), GFP_KERNEL);
-	if (!eeepc->hotplug_slot)
-		goto error_slot;
+	eeepc->hotplug_slot.ops = &eeepc_hotplug_slot_ops;
 
-	eeepc->hotplug_slot->info = kzalloc(sizeof(struct hotplug_slot_info),
-					    GFP_KERNEL);
-	if (!eeepc->hotplug_slot->info)
-		goto error_info;
-
-	eeepc->hotplug_slot->private = eeepc;
-	eeepc->hotplug_slot->ops = &eeepc_hotplug_slot_ops;
-	eeepc_get_adapter_status(eeepc->hotplug_slot,
-				 &eeepc->hotplug_slot->info->adapter_status);
-
-	ret = pci_hp_register(eeepc->hotplug_slot, bus, 0, "eeepc-wifi");
+	ret = pci_hp_register(&eeepc->hotplug_slot, bus, 0, "eeepc-wifi");
 	if (ret) {
 		pr_err("Unable to register hotplug slot - %d\n", ret);
 		goto error_register;
@@ -765,11 +744,7 @@ static int eeepc_setup_pci_hotplug(struct eeepc_laptop *eeepc)
 	return 0;
 
 error_register:
-	kfree(eeepc->hotplug_slot->info);
-error_info:
-	kfree(eeepc->hotplug_slot);
-	eeepc->hotplug_slot = NULL;
-error_slot:
+	eeepc->hotplug_slot.ops = NULL;
 	return ret;
 }
 
@@ -830,11 +805,8 @@ static void eeepc_rfkill_exit(struct eeepc_laptop *eeepc)
 		eeepc->wlan_rfkill = NULL;
 	}
 
-	if (eeepc->hotplug_slot) {
-		pci_hp_deregister(eeepc->hotplug_slot);
-		kfree(eeepc->hotplug_slot->info);
-		kfree(eeepc->hotplug_slot);
-	}
+	if (eeepc->hotplug_slot.ops)
+		pci_hp_deregister(&eeepc->hotplug_slot);
 
 	if (eeepc->bluetooth_rfkill) {
 		rfkill_unregister(eeepc->bluetooth_rfkill);
@@ -1054,7 +1026,7 @@ static ssize_t store_sys_hwmon(void (*set)(int), const char *buf, size_t count)
 
 static ssize_t show_sys_hwmon(int (*get)(void), char *buf)
 {
-	return sprintf(buf, "%d\n", get());
+	return sysfs_emit(buf, "%d\n", get());
 }
 
 #define EEEPC_SENSOR_SHOW_FUNC(_name, _get)				\
@@ -1165,7 +1137,7 @@ static int eeepc_backlight_init(struct eeepc_laptop *eeepc)
 	}
 	eeepc->backlight_device = bd;
 	bd->props.brightness = read_brightness(bd);
-	bd->props.power = FB_BLANK_UNBLANK;
+	bd->props.power = BACKLIGHT_POWER_ON;
 	backlight_update_status(bd);
 	return 0;
 }
@@ -1398,8 +1370,8 @@ static int eeepc_acpi_add(struct acpi_device *device)
 	if (!eeepc)
 		return -ENOMEM;
 	eeepc->handle = device->handle;
-	strcpy(acpi_device_name(device), EEEPC_ACPI_DEVICE_NAME);
-	strcpy(acpi_device_class(device), EEEPC_ACPI_CLASS);
+	strscpy(acpi_device_name(device), EEEPC_ACPI_DEVICE_NAME);
+	strscpy(acpi_device_class(device), EEEPC_ACPI_CLASS);
 	device->driver_data = eeepc;
 	eeepc->device = device;
 
@@ -1422,7 +1394,7 @@ static int eeepc_acpi_add(struct acpi_device *device)
 	 * and machine-specific scripts find the fixed name convenient.  But
 	 * It's also good for us to exclude multiple instances because both
 	 * our hwmon and our wlan rfkill subdevice use global ACPI objects
-	 * (the EC and the wlan PCI slot respectively).
+	 * (the EC and the PCI wlan slot respectively).
 	 */
 	result = eeepc_platform_init(eeepc);
 	if (result)
@@ -1468,7 +1440,7 @@ fail_platform:
 	return result;
 }
 
-static int eeepc_acpi_remove(struct acpi_device *device)
+static void eeepc_acpi_remove(struct acpi_device *device)
 {
 	struct eeepc_laptop *eeepc = acpi_driver_data(device);
 
@@ -1479,7 +1451,6 @@ static int eeepc_acpi_remove(struct acpi_device *device)
 	eeepc_platform_exit(eeepc);
 
 	kfree(eeepc);
-	return 0;
 }
 
 
@@ -1492,7 +1463,6 @@ MODULE_DEVICE_TABLE(acpi, eeepc_device_ids);
 static struct acpi_driver eeepc_acpi_driver = {
 	.name = EEEPC_LAPTOP_NAME,
 	.class = EEEPC_ACPI_CLASS,
-	.owner = THIS_MODULE,
 	.ids = eeepc_device_ids,
 	.flags = ACPI_DRIVER_ALL_NOTIFY_EVENTS,
 	.ops = {

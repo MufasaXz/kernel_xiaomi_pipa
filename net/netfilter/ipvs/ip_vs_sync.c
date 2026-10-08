@@ -51,7 +51,7 @@
 #include <linux/kernel.h>
 #include <linux/sched/signal.h>
 
-#include <asm/unaligned.h>		/* Used for ntoh_seq and hton_seq */
+#include <linux/unaligned.h>		/* Used for ntoh_seq and hton_seq */
 
 #include <net/ip.h>
 #include <net/sock.h>
@@ -241,9 +241,6 @@ struct ip_vs_sync_thread_data {
       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
       |                    IPVS Sync Connection (1)                   |
 */
-
-#define SYNC_MESG_HEADER_LEN	4
-#define MAX_CONNS_PER_SYNCBUFF	255 /* nr_conns in ip_vs_sync_mesg is 8 bit */
 
 /* Version 0 header */
 struct ip_vs_sync_mesg_v0 {
@@ -606,7 +603,7 @@ static void ip_vs_sync_conn_v0(struct netns_ipvs *ipvs, struct ip_vs_conn *cp,
 	if (cp->flags & IP_VS_CONN_F_SEQ_MASK) {
 		struct ip_vs_sync_conn_options *opt =
 			(struct ip_vs_sync_conn_options *)&s[1];
-		memcpy(opt, &cp->in_seq, sizeof(*opt));
+		memcpy(opt, &cp->sync_conn_opt, sizeof(*opt));
 	}
 
 	m->nr_conns++;
@@ -618,7 +615,7 @@ static void ip_vs_sync_conn_v0(struct netns_ipvs *ipvs, struct ip_vs_conn *cp,
 	cp = cp->control;
 	if (cp) {
 		if (cp->flags & IP_VS_CONN_F_TEMPLATE)
-			pkts = atomic_add_return(1, &cp->in_pkts);
+			pkts = atomic_inc_return(&cp->in_pkts);
 		else
 			pkts = sysctl_sync_threshold(ipvs);
 		ip_vs_sync_conn(ipvs, cp, pkts);
@@ -779,7 +776,7 @@ control:
 	if (!cp)
 		return;
 	if (cp->flags & IP_VS_CONN_F_TEMPLATE)
-		pkts = atomic_add_return(1, &cp->in_pkts);
+		pkts = atomic_inc_return(&cp->in_pkts);
 	else
 		pkts = sysctl_sync_threshold(ipvs);
 	goto sloop;
@@ -1239,7 +1236,7 @@ static void ip_vs_process_message(struct netns_ipvs *ipvs, __u8 *buffer,
 
 			p = msg_end;
 			if (p + sizeof(s->v4) > buffer+buflen) {
-				IP_VS_ERR_RL("BACKUP, Dropping buffer, to small\n");
+				IP_VS_ERR_RL("BACKUP, Dropping buffer, too small\n");
 				return;
 			}
 			s = (union ip_vs_sync_conn *)p;
@@ -1283,12 +1280,12 @@ static void set_sock_size(struct sock *sk, int mode, int val)
 	lock_sock(sk);
 	if (mode) {
 		val = clamp_t(int, val, (SOCK_MIN_SNDBUF + 1) / 2,
-			      sysctl_wmem_max);
+			      READ_ONCE(sysctl_wmem_max));
 		sk->sk_sndbuf = val * 2;
 		sk->sk_userlocks |= SOCK_SNDBUF_LOCK;
 	} else {
 		val = clamp_t(int, val, (SOCK_MIN_RCVBUF + 1) / 2,
-			      sysctl_rmem_max);
+			      READ_ONCE(sysctl_rmem_max));
 		sk->sk_rcvbuf = val * 2;
 		sk->sk_userlocks |= SOCK_RCVBUF_LOCK;
 	}
@@ -1300,20 +1297,14 @@ static void set_sock_size(struct sock *sk, int mode, int val)
  */
 static void set_mcast_loop(struct sock *sk, u_char loop)
 {
-	struct inet_sock *inet = inet_sk(sk);
-
 	/* setsockopt(sock, SOL_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop)); */
-	lock_sock(sk);
-	inet->mc_loop = loop ? 1 : 0;
+	inet_assign_bit(MC_LOOP, sk, loop);
 #ifdef CONFIG_IP_VS_IPV6
-	if (sk->sk_family == AF_INET6) {
-		struct ipv6_pinfo *np = inet6_sk(sk);
-
+	if (READ_ONCE(sk->sk_family) == AF_INET6) {
 		/* IPV6_MULTICAST_LOOP */
-		np->mc_loop = loop ? 1 : 0;
+		inet6_assign_bit(MC6_LOOP, sk, loop);
 	}
 #endif
-	release_sock(sk);
 }
 
 /*
@@ -1325,13 +1316,13 @@ static void set_mcast_ttl(struct sock *sk, u_char ttl)
 
 	/* setsockopt(sock, SOL_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl)); */
 	lock_sock(sk);
-	inet->mc_ttl = ttl;
+	WRITE_ONCE(inet->mc_ttl, ttl);
 #ifdef CONFIG_IP_VS_IPV6
 	if (sk->sk_family == AF_INET6) {
 		struct ipv6_pinfo *np = inet6_sk(sk);
 
 		/* IPV6_MULTICAST_HOPS */
-		np->mcast_hops = ttl;
+		WRITE_ONCE(np->mcast_hops, ttl);
 	}
 #endif
 	release_sock(sk);
@@ -1344,13 +1335,13 @@ static void set_mcast_pmtudisc(struct sock *sk, int val)
 
 	/* setsockopt(sock, SOL_IP, IP_MTU_DISCOVER, &val, sizeof(val)); */
 	lock_sock(sk);
-	inet->pmtudisc = val;
+	WRITE_ONCE(inet->pmtudisc, val);
 #ifdef CONFIG_IP_VS_IPV6
 	if (sk->sk_family == AF_INET6) {
 		struct ipv6_pinfo *np = inet6_sk(sk);
 
 		/* IPV6_MTU_DISCOVER */
-		np->pmtudisc = val;
+		WRITE_ONCE(np->pmtudisc, val);
 	}
 #endif
 	release_sock(sk);
@@ -1374,7 +1365,7 @@ static int set_mcast_if(struct sock *sk, struct net_device *dev)
 		struct ipv6_pinfo *np = inet6_sk(sk);
 
 		/* IPV6_MULTICAST_IF */
-		np->mcast_oif = dev->ifindex;
+		WRITE_ONCE(np->mcast_oif, dev->ifindex);
 	}
 #endif
 	release_sock(sk);
@@ -1585,13 +1576,11 @@ ip_vs_send_async(struct socket *sock, const char *buffer, const size_t length)
 	struct kvec	iov;
 	int		len;
 
-	EnterFunction(7);
 	iov.iov_base     = (void *)buffer;
 	iov.iov_len      = length;
 
 	len = kernel_sendmsg(sock, &msg, &iov, 1, (size_t)(length));
 
-	LeaveFunction(7);
 	return len;
 }
 
@@ -1617,15 +1606,12 @@ ip_vs_receive(struct socket *sock, char *buffer, const size_t buflen)
 	struct kvec		iov = {buffer, buflen};
 	int			len;
 
-	EnterFunction(7);
-
 	/* Receive a packet */
-	iov_iter_kvec(&msg.msg_iter, READ | ITER_KVEC, &iov, 1, buflen);
+	iov_iter_kvec(&msg.msg_iter, ITER_DEST, &iov, 1, buflen);
 	len = sock_recvmsg(sock, &msg, MSG_DONTWAIT);
 	if (len < 0)
 		return len;
 
-	LeaveFunction(7);
 	return len;
 }
 

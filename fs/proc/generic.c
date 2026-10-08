@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * proc/fs/generic.c --- generic routines for the proc-fs
  *
@@ -114,25 +115,26 @@ static bool pde_subdir_insert(struct proc_dir_entry *dir,
 	return true;
 }
 
-static int proc_notify_change(struct dentry *dentry, struct iattr *iattr)
+static int proc_notify_change(struct mnt_idmap *idmap,
+			      struct dentry *dentry, struct iattr *iattr)
 {
 	struct inode *inode = d_inode(dentry);
 	struct proc_dir_entry *de = PDE(inode);
 	int error;
 
-	error = setattr_prepare(dentry, iattr);
+	error = setattr_prepare(&nop_mnt_idmap, dentry, iattr);
 	if (error)
 		return error;
 
-	setattr_copy(inode, iattr);
-	mark_inode_dirty(inode);
+	setattr_copy(&nop_mnt_idmap, inode, iattr);
 
 	proc_set_user(de, inode->i_uid, inode->i_gid);
 	de->mode = inode->i_mode;
 	return 0;
 }
 
-static int proc_getattr(const struct path *path, struct kstat *stat,
+static int proc_getattr(struct mnt_idmap *idmap,
+			const struct path *path, struct kstat *stat,
 			u32 request_mask, unsigned int query_flags)
 {
 	struct inode *inode = d_inode(path->dentry);
@@ -144,7 +146,7 @@ static int proc_getattr(const struct path *path, struct kstat *stat,
 		}
 	}
 
-	generic_fillattr(inode, stat);
+	generic_fillattr(&nop_mnt_idmap, request_mask, inode, stat);
 	return 0;
 }
 
@@ -162,24 +164,15 @@ static int __xlate_proc_name(const char *name, struct proc_dir_entry **ret,
 {
 	const char     		*cp = name, *next;
 	struct proc_dir_entry	*de;
-	unsigned int		len;
 
-	de = *ret;
-	if (!de)
-		de = &proc_root;
-
-	while (1) {
-		next = strchr(cp, '/');
-		if (!next)
-			break;
-
-		len = next - cp;
-		de = pde_subdir_find(de, cp, len);
+	de = *ret ?: &proc_root;
+	while ((next = strchr(cp, '/')) != NULL) {
+		de = pde_subdir_find(de, cp, next - cp);
 		if (!de) {
 			WARN(1, "name '%s'\n", name);
 			return -ENOENT;
 		}
-		cp += len + 1;
+		cp = next + 1;
 	}
 	*residual = cp;
 	*ret = de;
@@ -209,8 +202,8 @@ int proc_alloc_inum(unsigned int *inum)
 {
 	int i;
 
-	i = ida_simple_get(&proc_inum_ida, 0, UINT_MAX - PROC_DYNAMIC_FIRST + 1,
-			   GFP_KERNEL);
+	i = ida_alloc_max(&proc_inum_ida, UINT_MAX - PROC_DYNAMIC_FIRST,
+			  GFP_KERNEL);
 	if (i < 0)
 		return i;
 
@@ -220,10 +213,11 @@ int proc_alloc_inum(unsigned int *inum)
 
 void proc_free_inum(unsigned int inum)
 {
-	ida_simple_remove(&proc_inum_ida, inum - PROC_DYNAMIC_FIRST);
+	ida_free(&proc_inum_ida, inum - PROC_DYNAMIC_FIRST);
 }
 
-static int proc_misc_d_revalidate(struct dentry *dentry, unsigned int flags)
+static int proc_misc_d_revalidate(struct inode *dir, const struct qstr *name,
+				  struct dentry *dentry, unsigned int flags)
 {
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
@@ -260,8 +254,11 @@ struct dentry *proc_lookup_de(struct inode *dir, struct dentry *dentry,
 		inode = proc_get_inode(dir->i_sb, de);
 		if (!inode)
 			return ERR_PTR(-ENOMEM);
-		d_set_d_op(dentry, de->proc_dops);
-		return d_splice_alias(inode, dentry);
+		if (de->flags & PROC_ENTRY_FORCE_LOOKUP)
+			return d_splice_alias_ops(inode, dentry,
+						  &proc_net_dentry_ops);
+		return d_splice_alias_ops(inode, dentry,
+					  &proc_misc_dentry_ops);
 	}
 	read_unlock(&proc_subdir_lock);
 	return ERR_PTR(-ENOENT);
@@ -270,6 +267,11 @@ struct dentry *proc_lookup_de(struct inode *dir, struct dentry *dentry,
 struct dentry *proc_lookup(struct inode *dir, struct dentry *dentry,
 		unsigned int flags)
 {
+	struct proc_fs_info *fs_info = proc_sb_info(dir->i_sb);
+
+	if (fs_info->pidonly == PROC_PIDONLY_ON)
+		return ERR_PTR(-ENOENT);
+
 	return proc_lookup_de(dir, dentry, PDE(dir));
 }
 
@@ -326,6 +328,10 @@ int proc_readdir_de(struct file *file, struct dir_context *ctx,
 int proc_readdir(struct file *file, struct dir_context *ctx)
 {
 	struct inode *inode = file_inode(file);
+	struct proc_fs_info *fs_info = proc_sb_info(inode->i_sb);
+
+	if (fs_info->pidonly == PROC_PIDONLY_ON)
+		return 1;
 
 	return proc_readdir_de(file, ctx, PDE(inode));
 }
@@ -341,7 +347,8 @@ static const struct file_operations proc_dir_operations = {
 	.iterate_shared		= proc_readdir,
 };
 
-static int proc_net_d_revalidate(struct dentry *dentry, unsigned int flags)
+static int proc_net_d_revalidate(struct inode *dir, const struct qstr *name,
+				 struct dentry *dentry, unsigned int flags)
 {
 	return 0;
 }
@@ -360,12 +367,34 @@ static const struct inode_operations proc_dir_inode_operations = {
 	.setattr	= proc_notify_change,
 };
 
+static void pde_set_flags(struct proc_dir_entry *pde)
+{
+	const struct proc_ops *proc_ops = pde->proc_ops;
+
+	if (!proc_ops)
+		return;
+
+	if (proc_ops->proc_flags & PROC_ENTRY_PERMANENT)
+		pde->flags |= PROC_ENTRY_PERMANENT;
+	if (proc_ops->proc_read_iter)
+		pde->flags |= PROC_ENTRY_proc_read_iter;
+#ifdef CONFIG_COMPAT
+	if (proc_ops->proc_compat_ioctl)
+		pde->flags |= PROC_ENTRY_proc_compat_ioctl;
+#endif
+	if (proc_ops->proc_lseek)
+		pde->flags |= PROC_ENTRY_proc_lseek;
+}
+
 /* returns the registered entry, or frees dp and returns NULL on failure */
 struct proc_dir_entry *proc_register(struct proc_dir_entry *dir,
 		struct proc_dir_entry *dp)
 {
 	if (proc_alloc_inum(&dp->low_ino))
 		goto out_free_entry;
+
+	if (!S_ISDIR(dp->mode))
+		pde_set_flags(dp);
 
 	write_lock(&proc_subdir_lock);
 	dp->parent = dir;
@@ -444,9 +473,8 @@ static struct proc_dir_entry *__proc_create(struct proc_dir_entry **parent,
 	INIT_LIST_HEAD(&ent->pde_openers);
 	proc_set_user(ent, (*parent)->uid, (*parent)->gid);
 
-	ent->proc_dops = &proc_misc_dentry_ops;
 	/* Revalidate everything under /proc/${pid}/net */
-	if ((*parent)->proc_dops == &proc_net_dentry_ops)
+	if ((*parent)->flags & PROC_ENTRY_FORCE_LOOKUP)
 		pde_force_lookup(ent);
 
 out:
@@ -462,9 +490,9 @@ struct proc_dir_entry *proc_symlink(const char *name,
 			  (S_IFLNK | S_IRUGO | S_IWUGO | S_IXUGO),1);
 
 	if (ent) {
-		ent->data = kmalloc((ent->size=strlen(dest))+1, GFP_KERNEL);
+		ent->size = strlen(dest);
+		ent->data = kmemdup(dest, ent->size + 1, GFP_KERNEL);
 		if (ent->data) {
-			strcpy((char*)ent->data,dest);
 			ent->proc_iops = &proc_link_inode_operations;
 			ent = proc_register(parent, ent);
 		} else {
@@ -487,7 +515,7 @@ struct proc_dir_entry *_proc_mkdir(const char *name, umode_t mode,
 	ent = __proc_create(&parent, name, S_IFDIR | mode, 2);
 	if (ent) {
 		ent->data = data;
-		ent->proc_fops = &proc_dir_operations;
+		ent->proc_dir_ops = &proc_dir_operations;
 		ent->proc_iops = &proc_dir_inode_operations;
 		if (force_lookup) {
 			pde_force_lookup(ent);
@@ -527,7 +555,7 @@ struct proc_dir_entry *proc_create_mount_point(const char *name)
 	ent = __proc_create(&parent, name, mode, 2);
 	if (ent) {
 		ent->data = NULL;
-		ent->proc_fops = NULL;
+		ent->proc_dir_ops = NULL;
 		ent->proc_iops = NULL;
 		ent = proc_register(parent, ent);
 	}
@@ -557,25 +585,23 @@ struct proc_dir_entry *proc_create_reg(const char *name, umode_t mode,
 
 struct proc_dir_entry *proc_create_data(const char *name, umode_t mode,
 		struct proc_dir_entry *parent,
-		const struct file_operations *proc_fops, void *data)
+		const struct proc_ops *proc_ops, void *data)
 {
 	struct proc_dir_entry *p;
-
-	BUG_ON(proc_fops == NULL);
 
 	p = proc_create_reg(name, mode, &parent, data);
 	if (!p)
 		return NULL;
-	p->proc_fops = proc_fops;
+	p->proc_ops = proc_ops;
 	return proc_register(parent, p);
 }
 EXPORT_SYMBOL(proc_create_data);
  
 struct proc_dir_entry *proc_create(const char *name, umode_t mode,
 				   struct proc_dir_entry *parent,
-				   const struct file_operations *proc_fops)
+				   const struct proc_ops *proc_ops)
 {
-	return proc_create_data(name, mode, parent, proc_fops, NULL);
+	return proc_create_data(name, mode, parent, proc_ops, NULL);
 }
 EXPORT_SYMBOL(proc_create);
 
@@ -597,11 +623,12 @@ static int proc_seq_release(struct inode *inode, struct file *file)
 	return seq_release(inode, file);
 }
 
-static const struct file_operations proc_seq_fops = {
-	.open		= proc_seq_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= proc_seq_release,
+static const struct proc_ops proc_seq_ops = {
+	/* not permanent -- can call into arbitrary seq_operations */
+	.proc_open	= proc_seq_open,
+	.proc_read_iter	= seq_read_iter,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= proc_seq_release,
 };
 
 struct proc_dir_entry *proc_create_seq_private(const char *name, umode_t mode,
@@ -613,7 +640,7 @@ struct proc_dir_entry *proc_create_seq_private(const char *name, umode_t mode,
 	p = proc_create_reg(name, mode, &parent, data);
 	if (!p)
 		return NULL;
-	p->proc_fops = &proc_seq_fops;
+	p->proc_ops = &proc_seq_ops;
 	p->seq_ops = ops;
 	p->state_size = state_size;
 	return proc_register(parent, p);
@@ -627,11 +654,12 @@ static int proc_single_open(struct inode *inode, struct file *file)
 	return single_open(file, de->single_show, de->data);
 }
 
-static const struct file_operations proc_single_fops = {
-	.open		= proc_single_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
+static const struct proc_ops proc_single_ops = {
+	/* not permanent -- can call into arbitrary ->single_show */
+	.proc_open	= proc_single_open,
+	.proc_read_iter = seq_read_iter,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= single_release,
 };
 
 struct proc_dir_entry *proc_create_single_data(const char *name, umode_t mode,
@@ -643,7 +671,7 @@ struct proc_dir_entry *proc_create_single_data(const char *name, umode_t mode,
 	p = proc_create_reg(name, mode, &parent, data);
 	if (!p)
 		return NULL;
-	p->proc_fops = &proc_single_fops;
+	p->proc_ops = &proc_single_ops;
 	p->single_show = show;
 	return proc_register(parent, p);
 }
@@ -670,6 +698,12 @@ void pde_put(struct proc_dir_entry *pde)
 	}
 }
 
+static void pde_erase(struct proc_dir_entry *pde, struct proc_dir_entry *parent)
+{
+	rb_erase(&pde->subdir_node, &parent->subdir);
+	RB_CLEAR_NODE(&pde->subdir_node);
+}
+
 /*
  * Remove a /proc entry and free it if it's not currently in use.
  */
@@ -688,9 +722,13 @@ void remove_proc_entry(const char *name, struct proc_dir_entry *parent)
 
 	de = pde_subdir_find(parent, fn, len);
 	if (de) {
-		rb_erase(&de->subdir_node, &parent->subdir);
-		if (S_ISDIR(de->mode)) {
-			parent->nlink--;
+		if (unlikely(pde_is_permanent(de))) {
+			WARN(1, "removing permanent /proc entry '%s'", de->name);
+			de = NULL;
+		} else {
+			pde_erase(de, parent);
+			if (S_ISDIR(de->mode))
+				parent->nlink--;
 		}
 	}
 	write_unlock(&proc_subdir_lock);
@@ -726,13 +764,25 @@ int remove_proc_subtree(const char *name, struct proc_dir_entry *parent)
 		write_unlock(&proc_subdir_lock);
 		return -ENOENT;
 	}
-	rb_erase(&root->subdir_node, &parent->subdir);
+	if (unlikely(pde_is_permanent(root))) {
+		write_unlock(&proc_subdir_lock);
+		WARN(1, "removing permanent /proc entry '%s/%s'",
+			root->parent->name, root->name);
+		return -EINVAL;
+	}
+	pde_erase(root, parent);
 
 	de = root;
 	while (1) {
 		next = pde_subdir_first(de);
 		if (next) {
-			rb_erase(&next->subdir_node, &de->subdir);
+			if (unlikely(pde_is_permanent(next))) {
+				write_unlock(&proc_subdir_lock);
+				WARN(1, "removing permanent /proc entry '%s/%s'",
+					next->parent->name, next->name);
+				return -EINVAL;
+			}
+			pde_erase(next, de);
 			de = next;
 			continue;
 		}
@@ -767,12 +817,6 @@ void proc_remove(struct proc_dir_entry *de)
 		remove_proc_subtree(de->name, de->parent);
 }
 EXPORT_SYMBOL(proc_remove);
-
-void *PDE_DATA(const struct inode *inode)
-{
-	return __PDE_DATA(inode);
-}
-EXPORT_SYMBOL(PDE_DATA);
 
 /*
  * Pull a user buffer into memory and pass it to the file's write handler if

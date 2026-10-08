@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * STK1160 driver
  *
@@ -7,17 +8,6 @@
  * Based on Easycap driver by R.M. Thomas
  *	Copyright (C) 2010 R.M. Thomas
  *	<rmthomas--a.t--sciolus.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #include <linux/module.h>
@@ -56,7 +46,6 @@ struct stk1160_decimate_ctrl {
 /* supported video standards */
 static struct stk1160_fmt format[] = {
 	{
-		.name     = "16 bpp YUY2, 4:2:2, packed",
 		.fourcc   = V4L2_PIX_FMT_UYVY,
 		.depth    = 16,
 	}
@@ -243,7 +232,7 @@ static int stk1160_start_streaming(struct stk1160 *dev)
 
 	/* submit urbs and enables IRQ */
 	for (i = 0; i < dev->isoc_ctl.num_bufs; i++) {
-		rc = usb_submit_urb(dev->isoc_ctl.urb[i], GFP_KERNEL);
+		rc = usb_submit_urb(dev->isoc_ctl.urb_ctl[i].urb, GFP_KERNEL);
 		if (rc) {
 			stk1160_err("cannot submit urb[%d] (%d)\n", i, rc);
 			goto out_uninit;
@@ -344,14 +333,9 @@ static int vidioc_querycap(struct file *file,
 {
 	struct stk1160 *dev = video_drvdata(file);
 
-	strcpy(cap->driver, "stk1160");
-	strcpy(cap->card, "stk1160");
+	strscpy(cap->driver, "stk1160", sizeof(cap->driver));
+	strscpy(cap->card, "stk1160", sizeof(cap->card));
 	usb_make_path(dev->udev, cap->bus_info, sizeof(cap->bus_info));
-	cap->device_caps =
-		V4L2_CAP_VIDEO_CAPTURE |
-		V4L2_CAP_STREAMING |
-		V4L2_CAP_READWRITE;
-	cap->capabilities = cap->device_caps | V4L2_CAP_DEVICE_CAPS;
 	return 0;
 }
 
@@ -361,7 +345,6 @@ static int vidioc_enum_fmt_vid_cap(struct file *file, void  *priv,
 	if (f->index != 0)
 		return -EINVAL;
 
-	strlcpy(f->description, format[f->index].name, sizeof(f->description));
 	f->pixelformat = format[f->index].fourcc;
 	return 0;
 }
@@ -747,8 +730,6 @@ static const struct vb2_ops stk1160_video_qops = {
 	.buf_queue		= buffer_queue,
 	.start_streaming	= start_streaming,
 	.stop_streaming		= stop_streaming,
-	.wait_prepare		= vb2_ops_wait_prepare,
-	.wait_finish		= vb2_ops_wait_finish,
 };
 
 static const struct video_device v4l_template = {
@@ -831,6 +812,8 @@ int stk1160_video_register(struct stk1160 *dev)
 
 	/* This will be used to set video_device parent */
 	dev->vdev.v4l2_dev = &dev->v4l2_dev;
+	dev->vdev.device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING |
+				V4L2_CAP_READWRITE;
 
 	/* NTSC is default */
 	dev->norm = V4L2_STD_NTSC_M;
@@ -845,7 +828,7 @@ int stk1160_video_register(struct stk1160 *dev)
 			dev->norm);
 
 	video_set_drvdata(&dev->vdev, dev);
-	rc = video_register_device(&dev->vdev, VFL_TYPE_GRABBER, -1);
+	rc = video_register_device(&dev->vdev, VFL_TYPE_VIDEO, -1);
 	if (rc < 0) {
 		stk1160_err("video_register_device failed (%d)\n", rc);
 		return rc;

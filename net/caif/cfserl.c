@@ -1,7 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) ST-Ericsson AB 2010
  * Author:	Sjur Brendeland
- * License terms: GNU General Public License (GPL) version 2
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ":%s(): " fmt, __func__
@@ -128,7 +128,6 @@ static int cfserl_receive(struct cflayer *l, struct cfpkt *newpkt)
 				if (pkt != NULL)
 					cfpkt_destroy(pkt);
 				layr->incomplete_frm = NULL;
-				expectlen = 0;
 				spin_unlock(&layr->sync);
 				return -EPROTO;
 			}

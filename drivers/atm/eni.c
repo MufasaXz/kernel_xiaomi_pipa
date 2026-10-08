@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* drivers/atm/eni.c - Efficient Networks ENI155P device driver */
  
 /* Written 1995-2000 by Werner Almesberger, EPFL LRC/ICA */
@@ -29,12 +30,6 @@
 #include "midway.h"
 #include "suni.h"
 #include "eni.h"
-
-#if !defined(__i386__) && !defined(__x86_64__)
-#ifndef ioremap_nocache
-#define ioremap_nocache(X,Y) ioremap(X,Y)
-#endif 
-#endif
 
 /*
  * TODO:
@@ -241,7 +236,8 @@ static void __iomem *eni_alloc_mem(struct eni_dev *eni_dev, unsigned long *size)
 	len = eni_dev->free_len;
 	if (*size < MID_MIN_BUF_SIZE) *size = MID_MIN_BUF_SIZE;
 	if (*size > MID_MAX_BUF_SIZE) return NULL;
-	for (order = 0; (1 << order) < *size; order++);
+	for (order = 0; (1 << order) < *size; order++)
+		;
 	DPRINTK("trying: %ld->%d\n",*size,order);
 	best_order = 65; /* we don't have more than 2^64 of anything ... */
 	index = 0; /* silence GCC */
@@ -1038,6 +1034,7 @@ static enum enq_res do_tx(struct sk_buff *skb)
 	u32 dma_rd,dma_wr;
 	u32 size; /* in words */
 	int aal5,dma_size,i,j;
+	unsigned char skb_data3;
 
 	DPRINTK(">do_tx\n");
 	NULLCHECK(skb);
@@ -1112,6 +1109,7 @@ DPRINTK("iovcnt = %d\n",skb_shinfo(skb)->nr_frags);
 		    vcc->dev->number);
 		return enq_jam;
 	}
+	skb_data3 = skb->data[3];
 	paddr = dma_map_single(&eni_dev->pci_dev->dev,skb->data,skb->len,
 			       DMA_TO_DEVICE);
 	if (dma_mapping_error(&eni_dev->pci_dev->dev, paddr))
@@ -1136,7 +1134,7 @@ DPRINTK("doing direct send\n"); /* @@@ well, this doesn't work anyway */
 			else
 				put_dma(tx->index,eni_dev->dma,&j,(unsigned long)
 				    skb_frag_page(&skb_shinfo(skb)->frags[i]) +
-					skb_shinfo(skb)->frags[i].page_offset,
+					skb_frag_off(&skb_shinfo(skb)->frags[i]),
 				    skb_frag_size(&skb_shinfo(skb)->frags[i]));
 	}
 	if (skb->len & 3) {
@@ -1156,7 +1154,7 @@ DPRINTK("doing direct send\n"); /* @@@ well, this doesn't work anyway */
 	    (size/(ATM_CELL_PAYLOAD/4)),tx->send+tx->tx_pos*4);
 /*printk("dsc = 0x%08lx\n",(unsigned long) readl(tx->send+tx->tx_pos*4));*/
 	writel((vcc->vci << MID_SEG_VCI_SHIFT) |
-            (aal5 ? 0 : (skb->data[3] & 0xf)) |
+            (aal5 ? 0 : (skb_data3 & 0xf)) |
 	    (ATM_SKB(skb)->atm_options & ATM_ATMOPT_CLP ? MID_SEG_CLP : 0),
 	    tx->send+((tx->tx_pos+1) & (tx->words-1))*4);
 	DPRINTK("size: %d, len:%d\n",size,skb->len);
@@ -1725,7 +1723,7 @@ static int eni_do_init(struct atm_dev *dev)
 	}
 	printk(KERN_NOTICE DEV_LABEL "(itf %d): rev.%d,base=0x%lx,irq=%d,",
 	    dev->number,pci_dev->revision,real_base,eni_dev->irq);
-	if (!(base = ioremap_nocache(real_base,MAP_MAX_SIZE))) {
+	if (!(base = ioremap(real_base,MAP_MAX_SIZE))) {
 		printk("\n");
 		printk(KERN_ERR DEV_LABEL "(itf %d): can't set up page "
 		    "mapping\n",dev->number);
@@ -2058,7 +2056,7 @@ static int eni_send(struct atm_vcc *vcc,struct sk_buff *skb)
 	}
 	submitted++;
 	ATM_SKB(skb)->vcc = vcc;
-	tasklet_disable(&ENI_DEV(vcc->dev)->task);
+	tasklet_disable_in_atomic(&ENI_DEV(vcc->dev)->task);
 	res = do_tx(skb);
 	tasklet_enable(&ENI_DEV(vcc->dev)->task);
 	if (res == enq_ok) return 0;
@@ -2320,4 +2318,5 @@ static int __init eni_init(void)
 module_init(eni_init);
 /* @@@ since exit routine not defined, this module can not be unloaded */
 
+MODULE_DESCRIPTION("Efficient Networks ENI155P ATM NIC driver");
 MODULE_LICENSE("GPL");

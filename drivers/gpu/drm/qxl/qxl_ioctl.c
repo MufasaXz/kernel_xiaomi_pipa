@@ -23,6 +23,9 @@
  *          Alon Levy
  */
 
+#include <linux/pci.h>
+#include <linux/uaccess.h>
+
 #include "qxl_drv.h"
 #include "qxl_object.h"
 
@@ -30,13 +33,11 @@
  * TODO: allocating a new gem(in qxl_bo) for each request.
  * This is wasteful since bo's are page aligned.
  */
-static int qxl_alloc_ioctl(struct drm_device *dev, void *data,
-			   struct drm_file *file_priv)
+int qxl_alloc_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
-	struct qxl_device *qdev = dev->dev_private;
+	struct qxl_device *qdev = to_qxl(dev);
 	struct drm_qxl_alloc *qxl_alloc = data;
 	int ret;
-	struct qxl_bo *qobj;
 	uint32_t handle;
 	u32 domain = QXL_GEM_DOMAIN_VRAM;
 
@@ -48,7 +49,7 @@ static int qxl_alloc_ioctl(struct drm_device *dev, void *data,
 						domain,
 						qxl_alloc->size,
 						NULL,
-						&qobj, &handle);
+						NULL, &handle);
 	if (ret) {
 		DRM_ERROR("%s: failed to create gem ret=%d\n",
 			  __func__, ret);
@@ -58,14 +59,13 @@ static int qxl_alloc_ioctl(struct drm_device *dev, void *data,
 	return 0;
 }
 
-static int qxl_map_ioctl(struct drm_device *dev, void *data,
-			 struct drm_file *file_priv)
+int qxl_map_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
-	struct qxl_device *qdev = dev->dev_private;
+	struct qxl_device *qdev = to_qxl(dev);
 	struct drm_qxl_map *qxl_map = data;
 
-	return qxl_mode_dumb_mmap(file_priv, &qdev->ddev, qxl_map->handle,
-				  &qxl_map->offset);
+	return drm_gem_ttm_dumb_map_offset(file_priv, &qdev->ddev, qxl_map->handle,
+					   &qxl_map->offset);
 }
 
 struct qxl_reloc_info {
@@ -85,6 +85,7 @@ static void
 apply_reloc(struct qxl_device *qdev, struct qxl_reloc_info *info)
 {
 	void *reloc_page;
+
 	reloc_page = qxl_bo_kmap_atomic_page(qdev, info->dst_bo, info->dst_offset & PAGE_MASK);
 	*(uint64_t *)(reloc_page + (info->dst_offset & ~PAGE_MASK)) = qxl_bo_physical_address(qdev,
 											      info->src_bo,
@@ -121,7 +122,7 @@ static int qxlhw_handle_to_bo(struct drm_file *file_priv, uint64_t handle,
 	qobj = gem_to_qxl_bo(gobj);
 
 	ret = qxl_release_list_add(release, qobj);
-	drm_gem_object_put_unlocked(gobj);
+	drm_gem_object_put(gobj);
 	if (ret)
 		return ret;
 
@@ -144,7 +145,7 @@ static int qxl_process_single_command(struct qxl_device *qdev,
 	struct qxl_release *release;
 	struct qxl_bo *cmd_bo;
 	void *fb_cmd;
-	int i, ret, num_relocs;
+	int i, ret;
 	int unwritten;
 
 	switch (cmd->type) {
@@ -156,14 +157,12 @@ static int qxl_process_single_command(struct qxl_device *qdev,
 	default:
 		DRM_DEBUG("Only draw commands in execbuffers\n");
 		return -EINVAL;
-		break;
 	}
 
 	if (cmd->command_size > PAGE_SIZE - sizeof(union qxl_release_info))
 		return -EINVAL;
 
-	if (!access_ok(VERIFY_READ,
-		       u64_to_user_ptr(cmd->command),
+	if (!access_ok(u64_to_user_ptr(cmd->command),
 		       cmd->command_size))
 		return -EFAULT;
 
@@ -183,12 +182,13 @@ static int qxl_process_single_command(struct qxl_device *qdev,
 
 	/* TODO copy slow path code from i915 */
 	fb_cmd = qxl_bo_kmap_atomic_page(qdev, cmd_bo, (release->release_offset & PAGE_MASK));
-	unwritten = __copy_from_user_inatomic_nocache
+	unwritten = copy_from_user_inatomic_nontemporal
 		(fb_cmd + sizeof(union qxl_release_info) + (release->release_offset & ~PAGE_MASK),
 		 u64_to_user_ptr(cmd->command), cmd->command_size);
 
 	{
 		struct qxl_drawable *draw = fb_cmd;
+
 		draw->mm_time = qdev->rom->mm_clock;
 	}
 
@@ -200,7 +200,6 @@ static int qxl_process_single_command(struct qxl_device *qdev,
 	}
 
 	/* fill out reloc info structs */
-	num_relocs = 0;
 	for (i = 0; i < cmd->relocs_num; ++i) {
 		struct drm_qxl_reloc reloc;
 		struct drm_qxl_reloc __user *u = u64_to_user_ptr(cmd->relocs);
@@ -230,7 +229,6 @@ static int qxl_process_single_command(struct qxl_device *qdev,
 			reloc_info[i].dst_bo = cmd_bo;
 			reloc_info[i].dst_offset = reloc.dst_offset + release->release_offset;
 		}
-		num_relocs++;
 
 		/* reserve and validate the reloc dst bo */
 		if (reloc.reloc_type == QXL_RELOC_TYPE_BO || reloc.src_handle) {
@@ -269,10 +267,9 @@ out_free_reloc:
 	return ret;
 }
 
-static int qxl_execbuffer_ioctl(struct drm_device *dev, void *data,
-				struct drm_file *file_priv)
+int qxl_execbuffer_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
-	struct qxl_device *qdev = dev->dev_private;
+	struct qxl_device *qdev = to_qxl(dev);
 	struct drm_qxl_execbuffer *execbuffer = data;
 	struct drm_qxl_command user_cmd;
 	int cmd_num;
@@ -294,10 +291,9 @@ static int qxl_execbuffer_ioctl(struct drm_device *dev, void *data,
 	return 0;
 }
 
-static int qxl_update_area_ioctl(struct drm_device *dev, void *data,
-				 struct drm_file *file)
+int qxl_update_area_ioctl(struct drm_device *dev, void *data, struct drm_file *file)
 {
-	struct qxl_device *qdev = dev->dev_private;
+	struct qxl_device *qdev = to_qxl(dev);
 	struct drm_qxl_update_area *update_area = data;
 	struct qxl_rect area = {.left = update_area->left,
 				.top = update_area->top,
@@ -318,12 +314,12 @@ static int qxl_update_area_ioctl(struct drm_device *dev, void *data,
 
 	qobj = gem_to_qxl_bo(gobj);
 
-	ret = qxl_bo_reserve(qobj, false);
+	ret = qxl_bo_reserve(qobj);
 	if (ret)
 		goto out;
 
-	if (!qobj->pin_count) {
-		qxl_ttm_placement_from_domain(qobj, qobj->type, false);
+	if (!qobj->tbo.pin_count) {
+		qxl_ttm_placement_from_domain(qobj, qobj->type);
 		ret = ttm_bo_validate(&qobj->tbo, &qobj->placement, &ctx);
 		if (unlikely(ret))
 			goto out;
@@ -340,14 +336,13 @@ out2:
 	qxl_bo_unreserve(qobj);
 
 out:
-	drm_gem_object_put_unlocked(gobj);
+	drm_gem_object_put(gobj);
 	return ret;
 }
 
-static int qxl_getparam_ioctl(struct drm_device *dev, void *data,
-		       struct drm_file *file_priv)
+int qxl_getparam_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
-	struct qxl_device *qdev = dev->dev_private;
+	struct qxl_device *qdev = to_qxl(dev);
 	struct drm_qxl_getparam *param = data;
 
 	switch (param->param) {
@@ -363,17 +358,17 @@ static int qxl_getparam_ioctl(struct drm_device *dev, void *data,
 	return 0;
 }
 
-static int qxl_clientcap_ioctl(struct drm_device *dev, void *data,
-				  struct drm_file *file_priv)
+int qxl_clientcap_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
-	struct qxl_device *qdev = dev->dev_private;
+	struct qxl_device *qdev = to_qxl(dev);
+	struct pci_dev *pdev = to_pci_dev(dev->dev);
 	struct drm_qxl_clientcap *param = data;
 	int byte, idx;
 
 	byte = param->index / 8;
 	idx = param->index % 8;
 
-	if (dev->pdev->revision < 4)
+	if (pdev->revision < 4)
 		return -ENOSYS;
 
 	if (byte >= 58)
@@ -384,12 +379,10 @@ static int qxl_clientcap_ioctl(struct drm_device *dev, void *data,
 	return -ENOSYS;
 }
 
-static int qxl_alloc_surf_ioctl(struct drm_device *dev, void *data,
-				struct drm_file *file)
+int qxl_alloc_surf_ioctl(struct drm_device *dev, void *data, struct drm_file *file)
 {
-	struct qxl_device *qdev = dev->dev_private;
+	struct qxl_device *qdev = to_qxl(dev);
 	struct drm_qxl_alloc_surf *param = data;
-	struct qxl_bo *qobj;
 	int handle;
 	int ret;
 	int size, actual_stride;
@@ -409,7 +402,7 @@ static int qxl_alloc_surf_ioctl(struct drm_device *dev, void *data,
 						QXL_GEM_DOMAIN_SURFACE,
 						size,
 						&surf,
-						&qobj, &handle);
+						NULL, &handle);
 	if (ret) {
 		DRM_ERROR("%s: failed to create gem ret=%d\n",
 			  __func__, ret);
@@ -418,23 +411,3 @@ static int qxl_alloc_surf_ioctl(struct drm_device *dev, void *data,
 		param->handle = handle;
 	return ret;
 }
-
-const struct drm_ioctl_desc qxl_ioctls[] = {
-	DRM_IOCTL_DEF_DRV(QXL_ALLOC, qxl_alloc_ioctl, DRM_AUTH),
-
-	DRM_IOCTL_DEF_DRV(QXL_MAP, qxl_map_ioctl, DRM_AUTH),
-
-	DRM_IOCTL_DEF_DRV(QXL_EXECBUFFER, qxl_execbuffer_ioctl,
-							DRM_AUTH),
-	DRM_IOCTL_DEF_DRV(QXL_UPDATE_AREA, qxl_update_area_ioctl,
-							DRM_AUTH),
-	DRM_IOCTL_DEF_DRV(QXL_GETPARAM, qxl_getparam_ioctl,
-							DRM_AUTH),
-	DRM_IOCTL_DEF_DRV(QXL_CLIENTCAP, qxl_clientcap_ioctl,
-							DRM_AUTH),
-
-	DRM_IOCTL_DEF_DRV(QXL_ALLOC_SURF, qxl_alloc_surf_ioctl,
-			  DRM_AUTH),
-};
-
-int qxl_max_ioctls = ARRAY_SIZE(qxl_ioctls);

@@ -7,7 +7,12 @@
 
 void *memdup(const void *src, size_t len);
 
+char **argv_split(const char *str, int *argcp);
+void argv_free(char **argv);
+
 int strtobool(const char *s, bool *res);
+
+#define strscpy strcpy
 
 /*
  * glibc based builds needs the extern while uClibc doesn't.
@@ -27,6 +32,8 @@ extern size_t strlcpy(char *dest, const char *src, size_t size);
 
 char *str_error_r(int errnum, char *buf, size_t buflen);
 
+char *strreplace(char *s, char old, char new);
+
 /**
  * strstarts - does @str start with @prefix?
  * @str: string to examine
@@ -37,4 +44,12 @@ static inline bool strstarts(const char *str, const char *prefix)
 	return strncmp(str, prefix, strlen(prefix)) == 0;
 }
 
-#endif /* _LINUX_STRING_H_ */
+extern char * __must_check skip_spaces(const char *);
+
+extern char *strim(char *);
+
+extern void remove_spaces(char *s);
+
+extern void *memchr_inv(const void *start, int c, size_t bytes);
+extern unsigned long long memparse(const char *ptr, char **retptr);
+#endif /* _TOOLS_LINUX_STRING_H_ */

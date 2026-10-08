@@ -1,24 +1,23 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright Gavin Shan, IBM Corporation 2016.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 
 #include <net/ncsi.h>
 #include <net/net_namespace.h>
 #include <net/sock.h>
+#include <net/genetlink.h>
 
 #include "internal.h"
 #include "ncsi-pkt.h"
+#include "ncsi-netlink.h"
 
 /* Nibbles within [0xA, 0xF] add zero "0" to the returned value.
  * Optional fields (encoded as 0xFF) will default to zero.
@@ -45,28 +44,44 @@ static int ncsi_validate_rsp_pkt(struct ncsi_request *nr,
 	 * before calling this function.
 	 */
 	h = (struct ncsi_rsp_pkt_hdr *)skb_network_header(nr->rsp);
-	if (h->common.revision != NCSI_PKT_REVISION)
+
+	if (h->common.revision != NCSI_PKT_REVISION) {
+		netdev_dbg(nr->ndp->ndev.dev,
+			   "NCSI: unsupported header revision\n");
 		return -EINVAL;
-	if (ntohs(h->common.length) != payload)
+	}
+	if (ntohs(h->common.length) != payload) {
+		netdev_dbg(nr->ndp->ndev.dev,
+			   "NCSI: payload length mismatched\n");
 		return -EINVAL;
+	}
 
 	/* Check on code and reason */
 	if (ntohs(h->code) != NCSI_PKT_RSP_C_COMPLETED ||
-	    ntohs(h->reason) != NCSI_PKT_RSP_R_NO_ERROR)
-		return -EINVAL;
+	    ntohs(h->reason) != NCSI_PKT_RSP_R_NO_ERROR) {
+		netdev_dbg(nr->ndp->ndev.dev,
+			   "NCSI: non zero response/reason code %04xh, %04xh\n",
+			    ntohs(h->code), ntohs(h->reason));
+		return -EPERM;
+	}
 
 	/* Validate checksum, which might be zeroes if the
 	 * sender doesn't support checksum according to NCSI
 	 * specification.
 	 */
-	pchecksum = (__be32 *)((void *)(h + 1) + payload - 4);
+	pchecksum = (__be32 *)((void *)(h + 1) + ALIGN(payload, 4) - 4);
 	if (ntohl(*pchecksum) == 0)
 		return 0;
 
 	checksum = ncsi_calculate_checksum((unsigned char *)h,
 					   sizeof(*h) + payload - 4);
-	if (*pchecksum != htonl(checksum))
+
+	if (*pchecksum != htonl(checksum)) {
+		netdev_dbg(nr->ndp->ndev.dev,
+			   "NCSI: checksum mismatched; recd: %08x calc: %08x\n",
+			   *pchecksum, htonl(checksum));
 		return -EINVAL;
+	}
 
 	return 0;
 }
@@ -254,7 +269,7 @@ static int ncsi_rsp_handler_dcnt(struct ncsi_request *nr)
 	if (!ncm->enable)
 		return 0;
 
-	ncm->enable = 1;
+	ncm->enable = 0;
 	return 0;
 }
 
@@ -401,7 +416,7 @@ static int ncsi_rsp_handler_ev(struct ncsi_request *nr)
 	/* Update to VLAN mode */
 	cmd = (struct ncsi_cmd_ev_pkt *)skb_network_header(nr->cmd);
 	ncm->enable = 1;
-	ncm->data[0] = ntohl(cmd->mode);
+	ncm->data[0] = ntohl((__force __be32)cmd->mode);
 
 	return 0;
 }
@@ -469,7 +484,7 @@ static int ncsi_rsp_handler_sma(struct ncsi_request *nr)
 		memcpy(&ncf->addrs[index], cmd->mac, ETH_ALEN);
 	} else {
 		clear_bit(cmd->index - 1, bitmap);
-		memset(&ncf->addrs[index], 0, ETH_ALEN);
+		eth_zero_addr(&ncf->addrs[index]);
 	}
 	spin_unlock_irqrestore(&nc->lock, flags);
 
@@ -609,6 +624,128 @@ static int ncsi_rsp_handler_snfc(struct ncsi_request *nr)
 	return 0;
 }
 
+/* Response handler for Get Mac Address command */
+static int ncsi_rsp_handler_oem_gma(struct ncsi_request *nr, int mfr_id)
+{
+	struct ncsi_dev_priv *ndp = nr->ndp;
+	struct sockaddr_storage *saddr = &ndp->pending_mac;
+	struct net_device *ndev = ndp->ndev.dev;
+	struct ncsi_rsp_oem_pkt *rsp;
+	u32 mac_addr_off = 0;
+
+	/* Get the response header */
+	rsp = (struct ncsi_rsp_oem_pkt *)skb_network_header(nr->rsp);
+
+	ndev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
+	if (mfr_id == NCSI_OEM_MFR_BCM_ID)
+		mac_addr_off = BCM_MAC_ADDR_OFFSET;
+	else if (mfr_id == NCSI_OEM_MFR_MLX_ID)
+		mac_addr_off = MLX_MAC_ADDR_OFFSET;
+	else if (mfr_id == NCSI_OEM_MFR_INTEL_ID)
+		mac_addr_off = INTEL_MAC_ADDR_OFFSET;
+
+	saddr->ss_family = ndev->type;
+	memcpy(saddr->__data, &rsp->data[mac_addr_off], ETH_ALEN);
+	if (mfr_id == NCSI_OEM_MFR_BCM_ID || mfr_id == NCSI_OEM_MFR_INTEL_ID)
+		eth_addr_inc(saddr->__data);
+	if (!is_valid_ether_addr(saddr->__data))
+		return -ENXIO;
+
+	/* Set the flag for GMA command which should only be called once */
+	ndp->gma_flag = 1;
+
+	return 0;
+}
+
+/* Response handler for Mellanox card */
+static int ncsi_rsp_handler_oem_mlx(struct ncsi_request *nr)
+{
+	struct ncsi_rsp_oem_mlx_pkt *mlx;
+	struct ncsi_rsp_oem_pkt *rsp;
+
+	/* Get the response header */
+	rsp = (struct ncsi_rsp_oem_pkt *)skb_network_header(nr->rsp);
+	mlx = (struct ncsi_rsp_oem_mlx_pkt *)(rsp->data);
+
+	if (mlx->cmd == NCSI_OEM_MLX_CMD_GMA &&
+	    mlx->param == NCSI_OEM_MLX_CMD_GMA_PARAM)
+		return ncsi_rsp_handler_oem_gma(nr, NCSI_OEM_MFR_MLX_ID);
+	return 0;
+}
+
+/* Response handler for Broadcom card */
+static int ncsi_rsp_handler_oem_bcm(struct ncsi_request *nr)
+{
+	struct ncsi_rsp_oem_bcm_pkt *bcm;
+	struct ncsi_rsp_oem_pkt *rsp;
+
+	/* Get the response header */
+	rsp = (struct ncsi_rsp_oem_pkt *)skb_network_header(nr->rsp);
+	bcm = (struct ncsi_rsp_oem_bcm_pkt *)(rsp->data);
+
+	if (bcm->type == NCSI_OEM_BCM_CMD_GMA)
+		return ncsi_rsp_handler_oem_gma(nr, NCSI_OEM_MFR_BCM_ID);
+	return 0;
+}
+
+/* Response handler for Intel card */
+static int ncsi_rsp_handler_oem_intel(struct ncsi_request *nr)
+{
+	struct ncsi_rsp_oem_intel_pkt *intel;
+	struct ncsi_rsp_oem_pkt *rsp;
+
+	/* Get the response header */
+	rsp = (struct ncsi_rsp_oem_pkt *)skb_network_header(nr->rsp);
+	intel = (struct ncsi_rsp_oem_intel_pkt *)(rsp->data);
+
+	if (intel->cmd == NCSI_OEM_INTEL_CMD_GMA)
+		return ncsi_rsp_handler_oem_gma(nr, NCSI_OEM_MFR_INTEL_ID);
+
+	return 0;
+}
+
+static struct ncsi_rsp_oem_handler {
+	unsigned int	mfr_id;
+	int		(*handler)(struct ncsi_request *nr);
+} ncsi_rsp_oem_handlers[] = {
+	{ NCSI_OEM_MFR_MLX_ID, ncsi_rsp_handler_oem_mlx },
+	{ NCSI_OEM_MFR_BCM_ID, ncsi_rsp_handler_oem_bcm },
+	{ NCSI_OEM_MFR_INTEL_ID, ncsi_rsp_handler_oem_intel }
+};
+
+/* Response handler for OEM command */
+static int ncsi_rsp_handler_oem(struct ncsi_request *nr)
+{
+	struct ncsi_rsp_oem_handler *nrh = NULL;
+	struct ncsi_rsp_oem_pkt *rsp;
+	unsigned int mfr_id, i;
+
+	/* Get the response header */
+	rsp = (struct ncsi_rsp_oem_pkt *)skb_network_header(nr->rsp);
+	mfr_id = ntohl(rsp->mfr_id);
+
+	/* Check for manufacturer id and Find the handler */
+	for (i = 0; i < ARRAY_SIZE(ncsi_rsp_oem_handlers); i++) {
+		if (ncsi_rsp_oem_handlers[i].mfr_id == mfr_id) {
+			if (ncsi_rsp_oem_handlers[i].handler)
+				nrh = &ncsi_rsp_oem_handlers[i];
+			else
+				nrh = NULL;
+
+			break;
+		}
+	}
+
+	if (!nrh) {
+		netdev_err(nr->ndp->ndev.dev, "Received unrecognized OEM packet with MFR-ID (0x%x)\n",
+			   mfr_id);
+		return -ENOENT;
+	}
+
+	/* Process the packet */
+	return nrh->handler(nr);
+}
+
 static int ncsi_rsp_handler_gvi(struct ncsi_request *nr)
 {
 	struct ncsi_rsp_gvi_pkt *rsp;
@@ -652,12 +789,13 @@ static int ncsi_rsp_handler_gc(struct ncsi_request *nr)
 	struct ncsi_rsp_gc_pkt *rsp;
 	struct ncsi_dev_priv *ndp = nr->ndp;
 	struct ncsi_channel *nc;
+	struct ncsi_package *np;
 	size_t size;
 
 	/* Find the channel */
 	rsp = (struct ncsi_rsp_gc_pkt *)skb_network_header(nr->rsp);
 	ncsi_find_package_and_channel(ndp, rsp->rsp.common.channel,
-				      NULL, &nc);
+				      &np, &nc);
 	if (!nc)
 		return -ENODEV;
 
@@ -692,6 +830,7 @@ static int ncsi_rsp_handler_gc(struct ncsi_request *nr)
 	 */
 	nc->vlan_filter.bitmap = U64_MAX;
 	nc->vlan_filter.n_vids = rsp->vlan_cnt;
+	np->ndp->channel_count = rsp->channel_cnt;
 
 	return 0;
 }
@@ -922,6 +1061,67 @@ static int ncsi_rsp_handler_gpuuid(struct ncsi_request *nr)
 	return 0;
 }
 
+static int ncsi_rsp_handler_pldm(struct ncsi_request *nr)
+{
+	return 0;
+}
+
+static int ncsi_rsp_handler_netlink(struct ncsi_request *nr)
+{
+	struct ncsi_dev_priv *ndp = nr->ndp;
+	struct ncsi_rsp_pkt *rsp;
+	struct ncsi_package *np;
+	struct ncsi_channel *nc;
+	int ret;
+
+	/* Find the package */
+	rsp = (struct ncsi_rsp_pkt *)skb_network_header(nr->rsp);
+	ncsi_find_package_and_channel(ndp, rsp->rsp.common.channel,
+				      &np, &nc);
+	if (!np)
+		return -ENODEV;
+
+	ret = ncsi_send_netlink_rsp(nr, np, nc);
+
+	return ret;
+}
+
+static int ncsi_rsp_handler_gmcma(struct ncsi_request *nr)
+{
+	struct ncsi_dev_priv *ndp = nr->ndp;
+	struct sockaddr_storage *saddr = &ndp->pending_mac;
+	struct net_device *ndev = ndp->ndev.dev;
+	struct ncsi_rsp_gmcma_pkt *rsp;
+	int i;
+
+	rsp = (struct ncsi_rsp_gmcma_pkt *)skb_network_header(nr->rsp);
+	ndev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
+
+	netdev_info(ndev, "NCSI: Received %d provisioned MAC addresses\n",
+		    rsp->address_count);
+	for (i = 0; i < rsp->address_count; i++) {
+		netdev_info(ndev, "NCSI: MAC address %d: %02x:%02x:%02x:%02x:%02x:%02x\n",
+			    i, rsp->addresses[i][0], rsp->addresses[i][1],
+			    rsp->addresses[i][2], rsp->addresses[i][3],
+			    rsp->addresses[i][4], rsp->addresses[i][5]);
+	}
+
+	saddr->ss_family = ndev->type;
+	for (i = 0; i < rsp->address_count; i++) {
+		if (!is_valid_ether_addr(rsp->addresses[i])) {
+			netdev_warn(ndev, "NCSI: Unable to assign %pM to device\n",
+				    rsp->addresses[i]);
+			continue;
+		}
+		memcpy(saddr->__data, rsp->addresses[i], ETH_ALEN);
+		netdev_warn(ndev, "NCSI: Will set MAC address to %pM\n", saddr->__data);
+		break;
+	}
+
+	ndp->gma_flag = 1;
+	return 0;
+}
+
 static struct ncsi_rsp_handler {
 	unsigned char	type;
 	int             payload;
@@ -950,13 +1150,16 @@ static struct ncsi_rsp_handler {
 	{ NCSI_PKT_RSP_GVI,    40, ncsi_rsp_handler_gvi     },
 	{ NCSI_PKT_RSP_GC,     32, ncsi_rsp_handler_gc      },
 	{ NCSI_PKT_RSP_GP,     -1, ncsi_rsp_handler_gp      },
-	{ NCSI_PKT_RSP_GCPS,  172, ncsi_rsp_handler_gcps    },
-	{ NCSI_PKT_RSP_GNS,   172, ncsi_rsp_handler_gns     },
-	{ NCSI_PKT_RSP_GNPTS, 172, ncsi_rsp_handler_gnpts   },
+	{ NCSI_PKT_RSP_GCPS,  204, ncsi_rsp_handler_gcps    },
+	{ NCSI_PKT_RSP_GNS,    32, ncsi_rsp_handler_gns     },
+	{ NCSI_PKT_RSP_GNPTS,  48, ncsi_rsp_handler_gnpts   },
 	{ NCSI_PKT_RSP_GPS,     8, ncsi_rsp_handler_gps     },
-	{ NCSI_PKT_RSP_OEM,     0, NULL                     },
-	{ NCSI_PKT_RSP_PLDM,    0, NULL                     },
-	{ NCSI_PKT_RSP_GPUUID, 20, ncsi_rsp_handler_gpuuid  }
+	{ NCSI_PKT_RSP_OEM,    -1, ncsi_rsp_handler_oem     },
+	{ NCSI_PKT_RSP_PLDM,   -1, ncsi_rsp_handler_pldm    },
+	{ NCSI_PKT_RSP_GPUUID, 20, ncsi_rsp_handler_gpuuid  },
+	{ NCSI_PKT_RSP_QPNPR,  -1, ncsi_rsp_handler_pldm    },
+	{ NCSI_PKT_RSP_SNPR,   -1, ncsi_rsp_handler_pldm    },
+	{ NCSI_PKT_RSP_GMCMA,  -1, ncsi_rsp_handler_gmcma   },
 };
 
 int ncsi_rcv_rsp(struct sk_buff *skb, struct net_device *dev,
@@ -973,8 +1176,10 @@ int ncsi_rcv_rsp(struct sk_buff *skb, struct net_device *dev,
 	/* Find the NCSI device */
 	nd = ncsi_find_dev(orig_dev);
 	ndp = nd ? TO_NCSI_DEV_PRIV(nd) : NULL;
-	if (!ndp)
-		return -ENODEV;
+	if (!ndp) {
+		ret = -ENODEV;
+		goto err_free_skb;
+	}
 
 	/* Check if it is AEN packet */
 	hdr = (struct ncsi_pkt_hdr *)skb_network_header(skb);
@@ -996,7 +1201,8 @@ int ncsi_rcv_rsp(struct sk_buff *skb, struct net_device *dev,
 	if (!nrh) {
 		netdev_err(nd->dev, "Received unrecognized packet (0x%x)\n",
 			   hdr->type);
-		return -ENOENT;
+		ret = -ENOENT;
+		goto err_free_skb;
 	}
 
 	/* Associate with the request */
@@ -1004,7 +1210,8 @@ int ncsi_rcv_rsp(struct sk_buff *skb, struct net_device *dev,
 	nr = &ndp->requests[hdr->id];
 	if (!nr->used) {
 		spin_unlock_irqrestore(&ndp->lock, flags);
-		return -ENODEV;
+		ret = -ENODEV;
+		goto err_free_skb;
 	}
 
 	nr->rsp = skb;
@@ -1024,6 +1231,17 @@ int ncsi_rcv_rsp(struct sk_buff *skb, struct net_device *dev,
 		netdev_warn(ndp->ndev.dev,
 			    "NCSI: 'bad' packet ignored for type 0x%x\n",
 			    hdr->type);
+
+		if (nr->flags == NCSI_REQ_FLAG_NETLINK_DRIVEN) {
+			if (ret == -EPERM)
+				goto out_netlink;
+			else
+				ncsi_send_netlink_err(ndp->ndev.dev,
+						      nr->snd_seq,
+						      nr->snd_portid,
+						      &nr->nlhdr,
+						      ret);
+		}
 		goto out;
 	}
 
@@ -1033,7 +1251,22 @@ int ncsi_rcv_rsp(struct sk_buff *skb, struct net_device *dev,
 		netdev_err(ndp->ndev.dev,
 			   "NCSI: Handler for packet type 0x%x returned %d\n",
 			   hdr->type, ret);
+
+out_netlink:
+	if (nr->flags == NCSI_REQ_FLAG_NETLINK_DRIVEN) {
+		ret = ncsi_rsp_handler_netlink(nr);
+		if (ret) {
+			netdev_err(ndp->ndev.dev,
+				   "NCSI: Netlink handler for packet type 0x%x returned %d\n",
+				   hdr->type, ret);
+		}
+	}
+
 out:
 	ncsi_free_request(nr);
+	return ret;
+
+err_free_skb:
+	kfree_skb(skb);
 	return ret;
 }

@@ -1,9 +1,5 @@
-# SPDX-License-Identifier: GPL-2.0-only
-#
-# Makefile for the MHI stack
-#
+# Host MHI stack
+obj-$(CONFIG_MHI_BUS) += host/
 
-# core layer
-obj-y += core/
-obj-y += controllers/
-obj-y += devices/
+# Endpoint MHI stack
+obj-$(CONFIG_MHI_BUS_EP) += ep/

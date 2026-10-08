@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * HSI core.
  *
  * Copyright (C) 2010 Nokia Corporation. All rights reserved.
  *
  * Contact: Carlos Chinea <carlos.chinea@nokia.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
  */
 #include <linux/hsi/hsi.h>
 #include <linux/compiler.h>
@@ -43,14 +30,14 @@ static struct attribute *hsi_bus_dev_attrs[] = {
 };
 ATTRIBUTE_GROUPS(hsi_bus_dev);
 
-static int hsi_bus_uevent(struct device *dev, struct kobj_uevent_env *env)
+static int hsi_bus_uevent(const struct device *dev, struct kobj_uevent_env *env)
 {
 	add_uevent_var(env, "MODALIAS=hsi:%s", dev_name(dev));
 
 	return 0;
 }
 
-static int hsi_bus_match(struct device *dev, struct device_driver *driver)
+static int hsi_bus_match(struct device *dev, const struct device_driver *driver)
 {
 	if (of_driver_match_device(dev, driver))
 		return true;
@@ -61,7 +48,7 @@ static int hsi_bus_match(struct device *dev, struct device_driver *driver)
 	return false;
 }
 
-static struct bus_type hsi_bus_type = {
+static const struct bus_type hsi_bus_type = {
 	.name		= "hsi",
 	.dev_groups	= hsi_bus_dev_groups,
 	.match		= hsi_bus_match,
@@ -220,7 +207,7 @@ static void hsi_add_client_from_dt(struct hsi_port *port,
 	if (!cl)
 		return;
 
-	err = of_modalias_node(client, name, sizeof(name));
+	err = of_alias_from_compatible(client, name, sizeof(name));
 	if (err)
 		goto err;
 
@@ -365,7 +352,7 @@ static void hsi_port_release(struct device *dev)
 }
 
 /**
- * hsi_unregister_port - Unregister an HSI port
+ * hsi_port_unregister_clients - Unregister an HSI port
  * @port: The HSI port to unregister
  */
 void hsi_port_unregister_clients(struct hsi_port *port)

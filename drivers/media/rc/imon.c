@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *   imon.c:	input and display driver for SoundGraph iMON IR/VFD/LCD
  *
@@ -10,16 +11,6 @@
  *   which the support for them wouldn't be nearly as good. Thanks
  *   also to the numerous 0xffdc device owners that tested auto-config
  *   support for me and provided debug dumps from their devices.
- *
- *   imon is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ":%s: " fmt, __func__
@@ -47,11 +38,6 @@
 
 #define DISPLAY_MINOR_BASE	144
 #define DEVICE_NAME	"lcd%d"
-
-#define BUF_CHUNK_SIZE	8
-#define BUF_SIZE	128
-
-#define BIT_DURATION	250	/* each bit received is 250us */
 
 #define IMON_CLOCK_ENABLE_PACKETS	2
 
@@ -661,12 +647,15 @@ static int send_packet(struct imon_context *ictx)
 		smp_rmb(); /* ensure later readers know we're not busy */
 		pr_err_ratelimited("error submitting urb(%d)\n", retval);
 	} else {
-		/* Wait for transmission to complete (or abort) */
-		retval = wait_for_completion_interruptible(
-				&ictx->tx.finished);
-		if (retval) {
+		/* Wait for transmission to complete (or abort or timeout) */
+		retval = wait_for_completion_interruptible_timeout(&ictx->tx.finished, 10 * HZ);
+		if (retval <= 0) {
 			usb_kill_urb(ictx->tx_urb);
 			pr_err_ratelimited("task interrupted\n");
+			if (retval < 0)
+				ictx->tx.status = retval;
+			else
+				ictx->tx.status = -ETIMEDOUT;
 		}
 
 		ictx->tx.busy = false;
@@ -699,7 +688,6 @@ static int send_packet(struct imon_context *ictx)
  */
 static int send_associate_24g(struct imon_context *ictx)
 {
-	int retval;
 	const unsigned char packet[8] = { 0x01, 0x00, 0x00, 0x00,
 					  0x00, 0x00, 0x00, 0x20 };
 
@@ -714,9 +702,8 @@ static int send_associate_24g(struct imon_context *ictx)
 	}
 
 	memcpy(ictx->usb_tx_buf, packet, sizeof(packet));
-	retval = send_packet(ictx);
 
-	return retval;
+	return send_packet(ictx);
 }
 
 /*
@@ -809,7 +796,7 @@ static int send_set_imon_clock(struct imon_context *ictx,
 /*
  * These are the sysfs functions to handle the association on the iMON 2.4G LT.
  */
-static ssize_t show_associate_remote(struct device *d,
+static ssize_t associate_remote_show(struct device *d,
 				     struct device_attribute *attr,
 				     char *buf)
 {
@@ -820,16 +807,16 @@ static ssize_t show_associate_remote(struct device *d,
 
 	mutex_lock(&ictx->lock);
 	if (ictx->rf_isassociating)
-		strcpy(buf, "associating\n");
+		strscpy(buf, "associating\n", PAGE_SIZE);
 	else
-		strcpy(buf, "closed\n");
+		strscpy(buf, "closed\n", PAGE_SIZE);
 
-	dev_info(d, "Visit http://www.lirc.org/html/imon-24g.html for instructions on how to associate your iMON 2.4G DT/LT remote\n");
+	dev_info(d, "Visit https://www.lirc.org/html/imon-24g.html for instructions on how to associate your iMON 2.4G DT/LT remote\n");
 	mutex_unlock(&ictx->lock);
 	return strlen(buf);
 }
 
-static ssize_t store_associate_remote(struct device *d,
+static ssize_t associate_remote_store(struct device *d,
 				      struct device_attribute *attr,
 				      const char *buf, size_t count)
 {
@@ -851,7 +838,7 @@ static ssize_t store_associate_remote(struct device *d,
 /*
  * sysfs functions to control internal imon clock
  */
-static ssize_t show_imon_clock(struct device *d,
+static ssize_t imon_clock_show(struct device *d,
 			       struct device_attribute *attr, char *buf)
 {
 	struct imon_context *ictx = dev_get_drvdata(d);
@@ -863,13 +850,13 @@ static ssize_t show_imon_clock(struct device *d,
 	mutex_lock(&ictx->lock);
 
 	if (!ictx->display_supported) {
-		len = snprintf(buf, PAGE_SIZE, "Not supported.");
+		len = sysfs_emit(buf, "Not supported.");
 	} else {
-		len = snprintf(buf, PAGE_SIZE,
-			"To set the clock on your iMON display:\n"
-			"# date \"+%%y %%m %%d %%w %%H %%M %%S\" > imon_clock\n"
-			"%s", ictx->display_isopen ?
-			"\nNOTE: imon device must be closed\n" : "");
+		len = sysfs_emit(buf,
+				 "To set the clock on your iMON display:\n"
+				 "# date \"+%%y %%m %%d %%w %%H %%M %%S\" > imon_clock\n"
+				 "%s", ictx->display_isopen ?
+				 "\nNOTE: imon device must be closed\n" : "");
 	}
 
 	mutex_unlock(&ictx->lock);
@@ -877,7 +864,7 @@ static ssize_t show_imon_clock(struct device *d,
 	return len;
 }
 
-static ssize_t store_imon_clock(struct device *d,
+static ssize_t imon_clock_store(struct device *d,
 				struct device_attribute *attr,
 				const char *buf, size_t count)
 {
@@ -924,11 +911,8 @@ exit:
 }
 
 
-static DEVICE_ATTR(imon_clock, S_IWUSR | S_IRUGO, show_imon_clock,
-		   store_imon_clock);
-
-static DEVICE_ATTR(associate_remote, S_IWUSR | S_IRUGO, show_associate_remote,
-		   store_associate_remote);
+static DEVICE_ATTR_RW(imon_clock);
+static DEVICE_ATTR_RW(associate_remote);
 
 static struct attribute *imon_display_sysfs_entries[] = {
 	&dev_attr_imon_clock.attr,
@@ -1116,7 +1100,7 @@ static void usb_tx_callback(struct urb *urb)
  */
 static void imon_touch_display_timeout(struct timer_list *t)
 {
-	struct imon_context *ictx = from_timer(ictx, t, ttimer);
+	struct imon_context *ictx = timer_container_of(ictx, t, ttimer);
 
 	if (ictx->display_type != IMON_DISPLAY_TYPE_VGA)
 		return;
@@ -1768,14 +1752,6 @@ static void usb_rx_callback_intf0(struct urb *urb)
 	if (!ictx)
 		return;
 
-	/*
-	 * if we get a callback before we're done configuring the hardware, we
-	 * can't yet process the data, as there's nowhere to send it, but we
-	 * still need to submit a new rx URB to avoid wedging the hardware
-	 */
-	if (!ictx->dev_present_intf0)
-		goto out;
-
 	switch (urb->status) {
 	case -ENOENT:		/* usbcore unlink successful! */
 		return;
@@ -1784,8 +1760,22 @@ static void usb_rx_callback_intf0(struct urb *urb)
 		break;
 
 	case 0:
-		imon_incoming_packet(ictx, urb, intfnum);
+		/*
+		 * if we get a callback before we're done configuring the hardware, we
+		 * can't yet process the data, as there's nowhere to send it, but we
+		 * still need to submit a new rx URB to avoid wedging the hardware
+		 */
+		if (ictx->dev_present_intf0)
+			imon_incoming_packet(ictx, urb, intfnum);
 		break;
+
+	case -ECONNRESET:
+	case -EILSEQ:
+	case -EPROTO:
+	case -EPIPE:
+		dev_warn(ictx->dev, "imon %s: status(%d)\n",
+			 __func__, urb->status);
+		return;
 
 	default:
 		dev_warn(ictx->dev, "imon %s: status(%d): ignored\n",
@@ -1793,7 +1783,6 @@ static void usb_rx_callback_intf0(struct urb *urb)
 		break;
 	}
 
-out:
 	usb_submit_urb(ictx->rx_urb_intf0, GFP_ATOMIC);
 }
 
@@ -1809,14 +1798,6 @@ static void usb_rx_callback_intf1(struct urb *urb)
 	if (!ictx)
 		return;
 
-	/*
-	 * if we get a callback before we're done configuring the hardware, we
-	 * can't yet process the data, as there's nowhere to send it, but we
-	 * still need to submit a new rx URB to avoid wedging the hardware
-	 */
-	if (!ictx->dev_present_intf1)
-		goto out;
-
 	switch (urb->status) {
 	case -ENOENT:		/* usbcore unlink successful! */
 		return;
@@ -1825,8 +1806,22 @@ static void usb_rx_callback_intf1(struct urb *urb)
 		break;
 
 	case 0:
-		imon_incoming_packet(ictx, urb, intfnum);
+		/*
+		 * if we get a callback before we're done configuring the hardware, we
+		 * can't yet process the data, as there's nowhere to send it, but we
+		 * still need to submit a new rx URB to avoid wedging the hardware
+		 */
+		if (ictx->dev_present_intf1)
+			imon_incoming_packet(ictx, urb, intfnum);
 		break;
+
+	case -ECONNRESET:
+	case -EILSEQ:
+	case -EPROTO:
+	case -EPIPE:
+		dev_warn(ictx->dev, "imon %s: status(%d)\n",
+			 __func__, urb->status);
+		return;
 
 	default:
 		dev_warn(ictx->dev, "imon %s: status(%d): ignored\n",
@@ -1834,7 +1829,6 @@ static void usb_rx_callback_intf1(struct urb *urb)
 		break;
 	}
 
-out:
 	usb_submit_urb(ictx->rx_urb_intf1, GFP_ATOMIC);
 }
 
@@ -2384,8 +2378,10 @@ urb_submit_failed:
 touch_setup_failed:
 find_endpoint_failed:
 	usb_put_dev(ictx->usbdev_intf1);
+	ictx->usbdev_intf1 = NULL;
 	mutex_unlock(&ictx->lock);
 	usb_free_urb(rx_urb);
+	ictx->rx_urb_intf1 = NULL;
 rx_urb_alloc_failed:
 	dev_err(ictx->dev, "unable to initialize intf1, err %d\n", ret);
 
@@ -2442,6 +2438,12 @@ static int imon_probe(struct usb_interface *interface,
 	first_if = usb_ifnum_to_if(usbdev, 0);
 	if (!first_if) {
 		ret = -ENODEV;
+		goto fail;
+	}
+
+	if (first_if->dev.driver != interface->dev.driver) {
+		dev_err(&interface->dev, "inconsistent driver matching\n");
+		ret = -EINVAL;
 		goto fail;
 	}
 
@@ -2540,7 +2542,6 @@ static void imon_disconnect(struct usb_interface *interface)
 	if (ifnum == 0) {
 		ictx->dev_present_intf0 = false;
 		usb_kill_urb(ictx->rx_urb_intf0);
-		usb_put_dev(ictx->usbdev_intf0);
 		input_unregister_device(ictx->idev);
 		rc_unregister_device(ictx->rdev);
 		if (ictx->display_supported) {
@@ -2549,14 +2550,15 @@ static void imon_disconnect(struct usb_interface *interface)
 			else if (ictx->display_type == IMON_DISPLAY_TYPE_VFD)
 				usb_deregister_dev(interface, &imon_vfd_class);
 		}
+		usb_put_dev(ictx->usbdev_intf0);
 	} else {
 		ictx->dev_present_intf1 = false;
 		usb_kill_urb(ictx->rx_urb_intf1);
-		usb_put_dev(ictx->usbdev_intf1);
 		if (ictx->display_type == IMON_DISPLAY_TYPE_VGA) {
+			timer_delete_sync(&ictx->ttimer);
 			input_unregister_device(ictx->touch);
-			del_timer_sync(&ictx->ttimer);
 		}
+		usb_put_dev(ictx->usbdev_intf1);
 	}
 
 	if (refcount_dec_and_test(&ictx->users))
@@ -2593,7 +2595,7 @@ static int imon_resume(struct usb_interface *intf)
 			usb_rx_callback_intf0, ictx,
 			ictx->rx_endpoint_intf0->bInterval);
 
-		rc = usb_submit_urb(ictx->rx_urb_intf0, GFP_ATOMIC);
+		rc = usb_submit_urb(ictx->rx_urb_intf0, GFP_NOIO);
 
 	} else {
 		usb_fill_int_urb(ictx->rx_urb_intf1, ictx->usbdev_intf1,
@@ -2603,7 +2605,7 @@ static int imon_resume(struct usb_interface *intf)
 			usb_rx_callback_intf1, ictx,
 			ictx->rx_endpoint_intf1->bInterval);
 
-		rc = usb_submit_urb(ictx->rx_urb_intf1, GFP_ATOMIC);
+		rc = usb_submit_urb(ictx->rx_urb_intf1, GFP_NOIO);
 	}
 
 	return rc;

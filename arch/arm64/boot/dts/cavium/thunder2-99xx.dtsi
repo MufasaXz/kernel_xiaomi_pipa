@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * dtsi file for Cavium ThunderX2 CN99XX processor
  *
  * Copyright (c) 2017 Cavium Inc.
  * Copyright (c) 2013-2016 Broadcom
  * Author: Zi Shen Lim <zlim@broadcom.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of
- * the License, or (at your option) any later version.
  */
 
 #include <dt-bindings/interrupt-controller/arm-gic.h>
@@ -27,28 +23,28 @@
 
 		cpu@0 {
 			device_type = "cpu";
-			compatible = "cavium,thunder2", "brcm,vulcan", "arm,armv8";
+			compatible = "cavium,thunder2", "brcm,vulcan";
 			reg = <0x0 0x0>;
 			enable-method = "psci";
 		};
 
 		cpu@1 {
 			device_type = "cpu";
-			compatible = "cavium,thunder2", "brcm,vulcan", "arm,armv8";
+			compatible = "cavium,thunder2", "brcm,vulcan";
 			reg = <0x0 0x1>;
 			enable-method = "psci";
 		};
 
 		cpu@2 {
 			device_type = "cpu";
-			compatible = "cavium,thunder2", "brcm,vulcan", "arm,armv8";
+			compatible = "cavium,thunder2", "brcm,vulcan";
 			reg = <0x0 0x2>;
 			enable-method = "psci";
 		};
 
 		cpu@3 {
 			device_type = "cpu";
-			compatible = "cavium,thunder2", "brcm,vulcan", "arm,armv8";
+			compatible = "cavium,thunder2", "brcm,vulcan";
 			reg = <0x0 0x3>;
 			enable-method = "psci";
 		};
@@ -59,7 +55,7 @@
 		method = "smc";
 	};
 
-	gic: interrupt-controller@400080000 {
+	gic: interrupt-controller@4000080000 {
 		compatible = "arm,gic-v3";
 		#interrupt-cells = <3>;
 		#address-cells = <2>;
@@ -71,7 +67,7 @@
 		      <0x04 0x01000000 0x0 0x1000000>;	/* GICR */
 		interrupts = <GIC_PPI 9 IRQ_TYPE_LEVEL_HIGH>;
 
-		gicits: gic-its@40010000 {
+		gicits: msi-controller@4000100000 {
 			compatible = "arm,gic-v3-its";
 			msi-controller;
 			reg = <0x04 0x00100000 0x0 0x20000>;	/* GIC ITS */
@@ -87,7 +83,7 @@
 	};
 
 	pmu {
-		compatible = "brcm,vulcan-pmu", "arm,armv8-pmuv3";
+		compatible = "brcm,vulcan-pmu";
 		interrupts = <GIC_PPI 7 IRQ_TYPE_LEVEL_HIGH>; /* PMU overflow */
 	};
 
@@ -107,7 +103,6 @@
 
 		/* ECAM at 0x3000_0000 - 0x4000_0000 */
 		reg = <0x0 0x30000000  0x0 0x10000000>;
-		reg-names = "PCI ECAM";
 
 		/*
 		 * PCI ranges:
@@ -141,8 +136,8 @@
 			reg = <0x04 0x02020000 0x0 0x1000>;
 			interrupt-parent = <&gic>;
 			interrupts = <GIC_SPI 49 IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&clk125mhz>;
-			clock-names = "apb_pclk";
+			clocks = <&clk125mhz>, <&clk125mhz>;
+			clock-names = "uartclk", "apb_pclk";
 		};
 	};
 

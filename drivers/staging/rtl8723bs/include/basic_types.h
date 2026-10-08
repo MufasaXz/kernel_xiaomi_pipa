@@ -13,9 +13,7 @@
 
 #include <linux/types.h>
 
-typedef	signed int sint;
-
-#define FIELD_OFFSET(s, field)	((__kernel_ssize_t)&((s*)(0))->field)
+#define FIELD_OFFSET(s, field)	((__kernel_ssize_t)&((s *)(0))->field)
 
 #define SIZE_PTR __kernel_size_t
 #define SSIZE_PTR __kernel_ssize_t
@@ -24,11 +22,11 @@ typedef	signed int sint;
 /*  TODO: Belows are Sync from SD7-Driver. It is necessary to check correctness */
 
 /*
- *Call endian free function when
+ * Call endian free function when
  *	1. Read/write packet content.
  *	2. Before write integer to IO.
  *	3. After read integer from IO.
-*/
+ */
 
 /*  */
 /*  Byte Swapping routine. */
@@ -70,7 +68,8 @@ typedef	signed int sint;
 		(*((u32 *)(_ptr))) = EF2BYTE(_val);	\
 	} while (0)
 
-/* Create a bit mask
+/*
+ * Create a bit mask
  * Examples:
  * BIT_LEN_MASK_32(0) => 0x00000000
  * BIT_LEN_MASK_32(1) => 0x00000001
@@ -84,7 +83,8 @@ typedef	signed int sint;
 #define BIT_LEN_MASK_8(__bitlen) \
 	(0xFF >> (8 - (__bitlen)))
 
-/* Create an offset bit mask
+/*
+ * Create an offset bit mask
  * Examples:
  * BIT_OFFSET_LEN_MASK_32(0, 2) => 0x00000003
  * BIT_OFFSET_LEN_MASK_32(16, 2) => 0x00030000
@@ -96,7 +96,8 @@ typedef	signed int sint;
 #define BIT_OFFSET_LEN_MASK_8(__bitoffset, __bitlen) \
 	(BIT_LEN_MASK_8(__bitlen) << (__bitoffset))
 
-/*Description:
+/*
+ * Description:
  * Return 4-byte value in host byte ordering from
  * 4-byte pointer in little-endian system.
  */
@@ -107,11 +108,11 @@ typedef	signed int sint;
 #define LE_P1BYTE_TO_HOST_1BYTE(__pstart) \
 	(EF1BYTE(*((u8 *)(__pstart))))
 
-/*  */
-/* 	Description: */
-/* 		Translate subfield (continuous bits in little-endian) of 4-byte value in litten byte to */
-/* 		4-byte value in host byte ordering. */
-/*  */
+/*
+ * Description:
+ * Translate subfield (continuous bits in little-endian) of 4-byte value in
+ * little byte to 4-byte value in host byte ordering.
+ */
 #define LE_BITS_TO_4BYTE(__pstart, __bitoffset, __bitlen) \
 	(\
 		(LE_P4BYTE_TO_HOST_4BYTE(__pstart) >> (__bitoffset))  & \
@@ -128,11 +129,11 @@ typedef	signed int sint;
 		BIT_LEN_MASK_8(__bitlen) \
 	)
 
-/*  */
-/* 	Description: */
-/* 		Mask subfield (continuous bits in little-endian) of 4-byte value in litten byte oredering */
-/* 		and return the result in 4-byte value in host byte ordering. */
-/*  */
+/*
+ * Description:
+ * Mask subfield (continuous bits in little-endian) of 4-byte value in little
+ * byte ordering and return the result in 4-byte value in host byte ordering.
+ */
 #define LE_BITS_CLEARED_TO_4BYTE(__pstart, __bitoffset, __bitlen) \
 	(\
 		LE_P4BYTE_TO_HOST_4BYTE(__pstart)  & \
@@ -149,10 +150,10 @@ typedef	signed int sint;
 		(~BIT_OFFSET_LEN_MASK_8(__bitoffset, __bitlen)) \
 	)
 
-/*  */
-/* 	Description: */
-/* 		Set subfield of little-endian 4-byte value to specified value. */
-/*  */
+/*
+ * Description:
+ * Set subfield of little-endian 4-byte value to specified value.
+ */
 #define SET_BITS_TO_LE_4BYTE(__pstart, __bitoffset, __bitlen, __val) \
 		*((u32 *)(__pstart)) =				\
 		(						\
@@ -165,7 +166,7 @@ typedef	signed int sint;
 		(					\
 		LE_BITS_CLEARED_TO_2BYTE(__pstart, __bitoffset, __bitlen) | \
 		((((u16)__val) & BIT_LEN_MASK_16(__bitlen)) << (__bitoffset)) \
-		);
+		)
 
 #define SET_BITS_TO_LE_1BYTE(__pstart, __bitoffset, __bitlen, __val) \
 		*((u8 *)(__pstart)) = EF1BYTE			\
@@ -189,7 +190,7 @@ typedef	signed int sint;
 		); \
 }
 
-/*  Get the N-bytes aligment offset from the current length */
+/*  Get the N-bytes alignent offset from the current length */
 #define N_BYTE_ALIGMENT(__Value, __Aligment) ((__Aligment == 1) ? (__Value) : (((__Value + __Aligment - 1) / __Aligment) * __Aligment))
 
 #define TEST_FLAG(__Flag, __testFlag)		(((__Flag) & (__testFlag)) != 0)

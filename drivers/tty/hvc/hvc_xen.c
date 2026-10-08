@@ -84,13 +84,13 @@ static inline void notify_daemon(struct xencons_info *cons)
 	notify_remote_via_evtchn(cons->evtchn);
 }
 
-static int __write_console(struct xencons_info *xencons,
-		const char *data, int len)
+static ssize_t __write_console(struct xencons_info *xencons,
+			       const u8 *data, size_t len)
 {
 	XENCONS_RING_IDX cons, prod;
 	struct xencons_interface *intf = xencons->intf;
-	int sent = 0;
 	unsigned long flags;
+	size_t sent = 0;
 
 	spin_lock_irqsave(&xencons->ring_lock, flags);
 	cons = intf->out_cons;
@@ -115,10 +115,11 @@ static int __write_console(struct xencons_info *xencons,
 	return sent;
 }
 
-static int domU_write_console(uint32_t vtermno, const char *data, int len)
+static ssize_t domU_write_console(uint32_t vtermno, const u8 *data, size_t len)
 {
-	int ret = len;
 	struct xencons_info *cons = vtermno_to_xencons(vtermno);
+	size_t ret = len;
+
 	if (cons == NULL)
 		return -EINVAL;
 
@@ -129,7 +130,7 @@ static int domU_write_console(uint32_t vtermno, const char *data, int len)
 	 * kernel is crippled.
 	 */
 	while (len) {
-		int sent = __write_console(cons, data, len);
+		ssize_t sent = __write_console(cons, data, len);
 
 		if (sent < 0)
 			return sent;
@@ -144,14 +145,14 @@ static int domU_write_console(uint32_t vtermno, const char *data, int len)
 	return ret;
 }
 
-static int domU_read_console(uint32_t vtermno, char *buf, int len)
+static ssize_t domU_read_console(uint32_t vtermno, u8 *buf, size_t len)
 {
 	struct xencons_interface *intf;
 	XENCONS_RING_IDX cons, prod;
-	int recv = 0;
 	struct xencons_info *xencons = vtermno_to_xencons(vtermno);
 	unsigned int eoiflag = 0;
 	unsigned long flags;
+	size_t recv = 0;
 
 	if (xencons == NULL)
 		return -EINVAL;
@@ -209,7 +210,7 @@ static const struct hv_ops domU_hvc_ops = {
 	.notifier_hangup = notifier_hangup_irq,
 };
 
-static int dom0_read_console(uint32_t vtermno, char *buf, int len)
+static ssize_t dom0_read_console(uint32_t vtermno, u8 *buf, size_t len)
 {
 	return HYPERVISOR_console_io(CONSOLEIO_read, len, buf);
 }
@@ -218,9 +219,9 @@ static int dom0_read_console(uint32_t vtermno, char *buf, int len)
  * Either for a dom0 to write to the system console, or a domU with a
  * debug version of Xen
  */
-static int dom0_write_console(uint32_t vtermno, const char *str, int len)
+static ssize_t dom0_write_console(uint32_t vtermno, const u8 *str, size_t len)
 {
-	int rc = HYPERVISOR_console_io(CONSOLEIO_write, len, (char *)str);
+	int rc = HYPERVISOR_console_io(CONSOLEIO_write, len, (u8 *)str);
 	if (rc < 0)
 		return rc;
 
@@ -270,7 +271,7 @@ static int xen_hvm_console_init(void)
 	if (r < 0 || v == 0)
 		goto err;
 	gfn = v;
-	info->intf = xen_remap(gfn << XEN_PAGE_SHIFT, XEN_PAGE_SIZE);
+	info->intf = memremap(gfn << XEN_PAGE_SHIFT, XEN_PAGE_SIZE, MEMREMAP_WB);
 	if (info->intf == NULL)
 		goto err;
 	info->vtermno = HVC_COOKIE;
@@ -377,18 +378,21 @@ void xen_console_resume(void)
 #ifdef CONFIG_HVC_XEN_FRONTEND
 static void xencons_disconnect_backend(struct xencons_info *info)
 {
-	if (info->irq > 0)
-		unbind_from_irqhandler(info->irq, NULL);
-	info->irq = 0;
+	if (info->hvc != NULL)
+		hvc_remove(info->hvc);
+	info->hvc = NULL;
+	if (info->irq > 0) {
+		evtchn_put(info->evtchn);
+		info->irq = 0;
+		info->evtchn = 0;
+	}
+	/* evtchn_put() will also close it so this is only an error path */
 	if (info->evtchn > 0)
 		xenbus_free_evtchn(info->xbdev, info->evtchn);
 	info->evtchn = 0;
 	if (info->gntref > 0)
 		gnttab_free_grant_references(info->gntref);
 	info->gntref = 0;
-	if (info->hvc != NULL)
-		hvc_remove(info->hvc);
-	info->hvc = NULL;
 }
 
 static void xencons_free(struct xencons_info *info)
@@ -417,9 +421,9 @@ static int xen_console_remove(struct xencons_info *info)
 	return 0;
 }
 
-static int xencons_remove(struct xenbus_device *dev)
+static void xencons_remove(struct xenbus_device *dev)
 {
-	return xen_console_remove(dev_get_drvdata(&dev->dev));
+	xen_console_remove(dev_get_drvdata(&dev->dev));
 }
 
 static int xencons_connect_backend(struct xenbus_device *dev,
@@ -433,7 +437,7 @@ static int xencons_connect_backend(struct xenbus_device *dev,
 	if (ret)
 		return ret;
 	info->evtchn = evtchn;
-	irq = bind_interdomain_evtchn_to_irq_lateeoi(dev->otherend_id, evtchn);
+	irq = bind_evtchn_to_irq_lateeoi(evtchn);
 	if (irq < 0)
 		return irq;
 	info->irq = irq;
@@ -552,10 +556,23 @@ static void xencons_backend_changed(struct xenbus_device *dev,
 	case XenbusStateClosed:
 		if (dev->state == XenbusStateClosed)
 			break;
-		/* Missed the backend's CLOSING state -- fallthrough */
-	case XenbusStateClosing:
+		fallthrough;	/* Missed the backend's CLOSING state */
+	case XenbusStateClosing: {
+		struct xencons_info *info = dev_get_drvdata(&dev->dev);
+
+		/*
+		 * Don't tear down the evtchn and grant ref before the other
+		 * end has disconnected, but do stop userspace from trying
+		 * to use the device before we allow the backend to close.
+		 */
+		if (info->hvc) {
+			hvc_remove(info->hvc);
+			info->hvc = NULL;
+		}
+
 		xenbus_frontend_closed(dev);
 		break;
+	}
 	}
 }
 
@@ -571,6 +588,7 @@ static struct xenbus_driver xencons_driver = {
 	.remove = xencons_remove,
 	.resume = xencons_resume,
 	.otherend_changed = xencons_backend_changed,
+	.not_essential = true,
 };
 #endif /* CONFIG_HVC_XEN_FRONTEND */
 
@@ -615,7 +633,7 @@ static int __init xen_hvc_init(void)
 		list_del(&info->list);
 		spin_unlock_irqrestore(&xencons_lock, flags);
 		if (info->irq)
-			unbind_from_irqhandler(info->irq, NULL);
+			evtchn_put(info->evtchn);
 		kfree(info);
 		return r;
 	}
@@ -666,14 +684,12 @@ static void xen_hvm_early_write(uint32_t vtermno, const char *str, int len) { }
 #endif
 
 #ifdef CONFIG_EARLY_PRINTK
-static int __init xenboot_setup_console(struct console *console, char *string)
+static int __init xenboot_console_setup(struct console *console, char *string)
 {
 	static struct xencons_info xenboot;
 
-	if (xen_initial_domain())
+	if (xen_initial_domain() || !xen_pv_domain())
 		return 0;
-	if (!xen_pv_domain())
-		return -ENODEV;
 
 	return xencons_info_pv_init(&xenboot, 0);
 }
@@ -684,17 +700,16 @@ static void xenboot_write_console(struct console *console, const char *string,
 	unsigned int linelen, off = 0;
 	const char *pos;
 
+	if (dom0_write_console(0, string, len) >= 0)
+		return;
+
 	if (!xen_pv_domain()) {
 		xen_hvm_early_write(0, string, len);
 		return;
 	}
 
-	dom0_write_console(0, string, len);
-
-	if (xen_initial_domain())
+	if (domU_write_console(0, "(early) ", 8) < 0)
 		return;
-
-	domU_write_console(0, "(early) ", 8);
 	while (off < len && NULL != (pos = strchr(string+off, '\n'))) {
 		linelen = pos-string+off;
 		if (off + linelen > len)
@@ -710,7 +725,7 @@ static void xenboot_write_console(struct console *console, const char *string,
 struct console xenboot_console = {
 	.name		= "xenboot",
 	.write		= xenboot_write_console,
-	.setup		= xenboot_setup_console,
+	.setup		= xenboot_console_setup,
 	.flags		= CON_PRINTBUFFER | CON_BOOT | CON_ANYTIME,
 	.index		= -1,
 };

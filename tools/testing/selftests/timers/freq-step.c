@@ -21,9 +21,9 @@
 #define SAMPLE_READINGS 10
 #define MEAN_SAMPLE_INTERVAL 0.1
 #define STEP_INTERVAL 1.0
-#define MAX_PRECISION 100e-9
-#define MAX_FREQ_ERROR 10e-6
-#define MAX_STDDEV 1000e-9
+#define MAX_PRECISION 500e-9
+#define MAX_FREQ_ERROR 0.02e-6
+#define MAX_STDDEV 50e-9
 
 #ifndef ADJ_SETOFFSET
   #define ADJ_SETOFFSET 0x0100
@@ -257,7 +257,7 @@ int main(int argc, char **argv)
 	set_frequency(0.0);
 
 	if (fails)
-		return ksft_exit_fail();
+		ksft_exit_fail();
 
-	return ksft_exit_pass();
+	ksft_exit_pass();
 }

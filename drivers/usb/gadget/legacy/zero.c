@@ -11,8 +11,8 @@
  * can write a hardware-agnostic gadget driver running inside a USB device.
  * Some hardware details are visible, but don't affect most of the driver.
  *
- * Use it with the Linux host/master side "usbtest" driver to get a basic
- * functional test of your device-side usb stack, or with "usb-skeleton".
+ * Use it with the Linux host side "usbtest" driver to get a basic functional
+ * test of your device-side usb stack, or with "usb-skeleton".
  *
  * It supports two similar configurations.  One sinks whatever the usb host
  * writes, and in return sources zeroes.  The other loops whatever the host
@@ -194,7 +194,7 @@ static void zero_suspend(struct usb_composite_dev *cdev)
 static void zero_resume(struct usb_composite_dev *cdev)
 {
 	DBG(cdev, "%s\n", __func__);
-	del_timer(&autoresume_timer);
+	timer_delete(&autoresume_timer);
 }
 
 /*-------------------------------------------------------------------------*/
@@ -398,7 +398,7 @@ err_put_func_inst_ss:
 
 static int zero_unbind(struct usb_composite_dev *cdev)
 {
-	del_timer_sync(&autoresume_timer);
+	timer_delete_sync(&autoresume_timer);
 	if (!IS_ERR_OR_NULL(func_ss))
 		usb_put_function(func_ss);
 	usb_put_function_instance(func_inst_ss);
@@ -425,4 +425,5 @@ static struct usb_composite_driver zero_driver = {
 module_usb_composite_driver(zero_driver);
 
 MODULE_AUTHOR("David Brownell");
+MODULE_DESCRIPTION("Gadget Zero, for USB development");
 MODULE_LICENSE("GPL");

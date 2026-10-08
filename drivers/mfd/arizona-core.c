@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Arizona core driver
  *
  * Copyright 2012 Wolfson Microelectronics plc
  *
  * Author: Mark Brown <broonie@opensource.wolfsonmicro.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/clk.h>
@@ -18,7 +15,6 @@
 #include <linux/mfd/core.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
@@ -48,7 +44,7 @@ int arizona_clk32k_enable(struct arizona *arizona)
 	if (arizona->clk32k_ref == 1) {
 		switch (arizona->pdata.clk32k_src) {
 		case ARIZONA_32KZ_MCLK1:
-			ret = pm_runtime_get_sync(arizona->dev);
+			ret = pm_runtime_resume_and_get(arizona->dev);
 			if (ret != 0)
 				goto err_ref;
 			ret = clk_prepare_enable(arizona->mclk[ARIZONA_MCLK1]);
@@ -83,7 +79,7 @@ int arizona_clk32k_disable(struct arizona *arizona)
 {
 	mutex_lock(&arizona->clk_lock);
 
-	BUG_ON(arizona->clk32k_ref <= 0);
+	WARN_ON(arizona->clk32k_ref <= 0);
 
 	arizona->clk32k_ref--;
 
@@ -483,7 +479,6 @@ static int wm5102_clear_write_sequencer(struct arizona *arizona)
 	return 0;
 }
 
-#ifdef CONFIG_PM
 static int arizona_isolate_dcvdd(struct arizona *arizona)
 {
 	int ret;
@@ -745,9 +740,7 @@ static int arizona_runtime_suspend(struct device *dev)
 
 	return 0;
 }
-#endif
 
-#ifdef CONFIG_PM_SLEEP
 static int arizona_suspend(struct device *dev)
 {
 	struct arizona *arizona = dev_get_drvdata(dev);
@@ -787,41 +780,24 @@ static int arizona_resume(struct device *dev)
 
 	return 0;
 }
-#endif
 
-const struct dev_pm_ops arizona_pm_ops = {
-	SET_RUNTIME_PM_OPS(arizona_runtime_suspend,
-			   arizona_runtime_resume,
-			   NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(arizona_suspend, arizona_resume)
-	SET_NOIRQ_SYSTEM_SLEEP_PM_OPS(arizona_suspend_noirq,
-				      arizona_resume_noirq)
+EXPORT_GPL_DEV_PM_OPS(arizona_pm_ops) = {
+	RUNTIME_PM_OPS(arizona_runtime_suspend,
+		       arizona_runtime_resume,
+		       NULL)
+	SYSTEM_SLEEP_PM_OPS(arizona_suspend, arizona_resume)
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(arizona_suspend_noirq,
+				  arizona_resume_noirq)
 };
-EXPORT_SYMBOL_GPL(arizona_pm_ops);
 
 #ifdef CONFIG_OF
-unsigned long arizona_of_get_type(struct device *dev)
-{
-	const struct of_device_id *id = of_match_device(arizona_of_match, dev);
-
-	if (id)
-		return (unsigned long)id->data;
-	else
-		return 0;
-}
-EXPORT_SYMBOL_GPL(arizona_of_get_type);
-
 static int arizona_of_get_core_pdata(struct arizona *arizona)
 {
 	struct arizona_pdata *pdata = &arizona->pdata;
 	int ret, i;
 
 	/* Handle old non-standard DT binding */
-	pdata->reset = devm_gpiod_get_from_of_node(arizona->dev,
-						   arizona->dev->of_node,
-						   "wlf,reset", 0,
-						   GPIOD_OUT_LOW,
-						   "arizona /RESET");
+	pdata->reset = devm_gpiod_get(arizona->dev, "wlf,reset", GPIOD_OUT_LOW);
 	if (IS_ERR(pdata->reset)) {
 		ret = PTR_ERR(pdata->reset);
 
@@ -863,19 +839,6 @@ static int arizona_of_get_core_pdata(struct arizona *arizona)
 
 	return 0;
 }
-
-const struct of_device_id arizona_of_match[] = {
-	{ .compatible = "wlf,wm5102", .data = (void *)WM5102 },
-	{ .compatible = "wlf,wm5110", .data = (void *)WM5110 },
-	{ .compatible = "wlf,wm8280", .data = (void *)WM8280 },
-	{ .compatible = "wlf,wm8997", .data = (void *)WM8997 },
-	{ .compatible = "wlf,wm8998", .data = (void *)WM8998 },
-	{ .compatible = "wlf,wm1814", .data = (void *)WM1814 },
-	{ .compatible = "wlf,wm1831", .data = (void *)WM1831 },
-	{ .compatible = "cirrus,cs47l24", .data = (void *)CS47L24 },
-	{},
-};
-EXPORT_SYMBOL_GPL(arizona_of_match);
 #else
 static inline int arizona_of_get_core_pdata(struct arizona *arizona)
 {
@@ -899,11 +862,6 @@ static const char * const wm5102_supplies[] = {
 static const struct mfd_cell wm5102_devs[] = {
 	{ .name = "arizona-micsupp" },
 	{ .name = "arizona-gpio" },
-	{
-		.name = "arizona-extcon",
-		.parent_supplies = wm5102_supplies,
-		.num_parent_supplies = 1, /* We only need MICVDD */
-	},
 	{ .name = "arizona-haptics" },
 	{ .name = "arizona-pwm" },
 	{
@@ -916,11 +874,6 @@ static const struct mfd_cell wm5102_devs[] = {
 static const struct mfd_cell wm5110_devs[] = {
 	{ .name = "arizona-micsupp" },
 	{ .name = "arizona-gpio" },
-	{
-		.name = "arizona-extcon",
-		.parent_supplies = wm5102_supplies,
-		.num_parent_supplies = 1, /* We only need MICVDD */
-	},
 	{ .name = "arizona-haptics" },
 	{ .name = "arizona-pwm" },
 	{
@@ -957,11 +910,6 @@ static const char * const wm8997_supplies[] = {
 static const struct mfd_cell wm8997_devs[] = {
 	{ .name = "arizona-micsupp" },
 	{ .name = "arizona-gpio" },
-	{
-		.name = "arizona-extcon",
-		.parent_supplies = wm8997_supplies,
-		.num_parent_supplies = 1, /* We only need MICVDD */
-	},
 	{ .name = "arizona-haptics" },
 	{ .name = "arizona-pwm" },
 	{
@@ -974,11 +922,6 @@ static const struct mfd_cell wm8997_devs[] = {
 static const struct mfd_cell wm8998_devs[] = {
 	{ .name = "arizona-micsupp" },
 	{ .name = "arizona-gpio" },
-	{
-		.name = "arizona-extcon",
-		.parent_supplies = wm5102_supplies,
-		.num_parent_supplies = 1, /* We only need MICVDD */
-	},
 	{ .name = "arizona-haptics" },
 	{ .name = "arizona-pwm" },
 	{
@@ -990,7 +933,7 @@ static const struct mfd_cell wm8998_devs[] = {
 
 int arizona_dev_init(struct arizona *arizona)
 {
-	const char * const mclk_name[] = { "mclk1", "mclk2" };
+	static const char * const mclk_name[] = { "mclk1", "mclk2" };
 	struct device *dev = arizona->dev;
 	const char *type_name = NULL;
 	unsigned int reg, val;
@@ -1157,7 +1100,7 @@ int arizona_dev_init(struct arizona *arizona)
 		} else if (val & 0x01) {
 			ret = wm5102_clear_write_sequencer(arizona);
 			if (ret)
-				return ret;
+				goto err_reset;
 		}
 		break;
 	default:
@@ -1485,3 +1428,6 @@ int arizona_dev_exit(struct arizona *arizona)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(arizona_dev_exit);
+
+MODULE_DESCRIPTION("Wolfson Arizona core driver");
+MODULE_LICENSE("GPL v2");

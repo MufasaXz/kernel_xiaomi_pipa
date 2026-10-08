@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Clk driver for NXP LPC18xx/43xx Configuration Registers (CREG)
  *
  * Copyright (C) 2015 Joachim Eastwood <manabian@gmail.com>
- *
- * This file is licensed under the terms of the GNU General Public
- * License version 2. This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 
 #include <linux/clk-provider.h>
@@ -141,7 +138,7 @@ static struct clk *clk_register_creg_clk(struct device *dev,
 					 const char **parent_name,
 					 struct regmap *syscon)
 {
-	struct clk_init_data init = {};
+	struct clk_init_data init;
 
 	init.ops = creg_clk->ops;
 	init.name = creg_clk->name;

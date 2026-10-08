@@ -1,19 +1,8 @@
+// SPDX-License-Identifier: ISC
 /*
  * Copyright (c) 2007-2011 Atheros Communications Inc.
  * Copyright (c) 2011-2012,2017 Qualcomm Atheros, Inc.
  * Copyright (c) 2016-2017 Erik Stromdahl <erik.stromdahl@gmail.com>
- *
- * Permission to use, copy, modify, and/or distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
 #include <linux/module.h>
@@ -142,7 +131,7 @@ static void ath10k_usb_recv_complete(struct urb *urb)
 	int status = 0;
 
 	ath10k_dbg(ar, ATH10K_DBG_USB_BULK,
-		   "usb recv pipe %d stat %d len %d urb 0x%pK\n",
+		   "usb recv pipe %d stat %d len %d urb 0x%p\n",
 		   pipe->logical_pipe_num, urb->status, urb->actual_length,
 		   urb);
 
@@ -241,7 +230,7 @@ static void ath10k_usb_post_recv_transfers(struct ath10k *ar,
 				  ath10k_usb_recv_complete, urb_context);
 
 		ath10k_dbg(ar, ATH10K_DBG_USB_BULK,
-			   "usb bulk recv submit %d 0x%x ep 0x%2.2x len %d buf 0x%pK\n",
+			   "usb bulk recv submit %d 0x%x ep 0x%2.2x len %d buf 0x%p\n",
 			   recv_pipe->logical_pipe_num,
 			   recv_pipe->usb_pipe_handle, recv_pipe->ep_address,
 			   ATH10K_USB_RX_BUFFER_SIZE, urb_context->skb);
@@ -356,6 +345,12 @@ static void ath10k_usb_rx_complete(struct ath10k *ar, struct sk_buff *skb)
 	ep->ep_ops.ep_rx_complete(ar, skb);
 	/* The RX complete handler now owns the skb... */
 
+	if (test_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags)) {
+		local_bh_disable();
+		napi_schedule(&ar->napi);
+		local_bh_enable();
+	}
+
 	return;
 
 out_free_skb:
@@ -398,6 +393,7 @@ static int ath10k_usb_hif_start(struct ath10k *ar)
 	int i;
 	struct ath10k_usb *ar_usb = ath10k_usb_priv(ar);
 
+	ath10k_core_napi_enable(ar);
 	ath10k_usb_start_recv_pipes(ar);
 
 	/* set the TX resource avail threshold for each TX pipe */
@@ -473,6 +469,7 @@ err:
 static void ath10k_usb_hif_stop(struct ath10k *ar)
 {
 	ath10k_usb_flush_all(ar);
+	ath10k_core_napi_sync_disable(ar);
 }
 
 static u16 ath10k_usb_hif_get_free_queue_number(struct ath10k *ar, u8 pipe_id)
@@ -704,18 +701,8 @@ static int ath10k_usb_hif_map_service_to_pipe(struct ath10k *ar, u16 svc_id,
 	return 0;
 }
 
-/* This op is currently only used by htc_wait_target if the HTC ready
- * message times out. It is not applicable for USB since there is nothing
- * we can do if the HTC ready message does not arrive in time.
- * TODO: Make this op non mandatory by introducing a NULL check in the
- * hif op wrapper.
- */
-static void ath10k_usb_hif_send_complete_check(struct ath10k *ar,
-					       u8 pipe, int force)
-{
-}
-
-static int ath10k_usb_hif_power_up(struct ath10k *ar)
+static int ath10k_usb_hif_power_up(struct ath10k *ar,
+				   enum ath10k_firmware_mode fw_mode)
 {
 	return 0;
 }
@@ -747,7 +734,6 @@ static const struct ath10k_hif_ops ath10k_usb_hif_ops = {
 	.stop			= ath10k_usb_hif_stop,
 	.map_service_to_pipe	= ath10k_usb_hif_map_service_to_pipe,
 	.get_default_pipe	= ath10k_usb_hif_get_default_pipe,
-	.send_complete_check	= ath10k_usb_hif_send_complete_check,
 	.get_free_queue_number	= ath10k_usb_hif_get_free_queue_number,
 	.power_up		= ath10k_usb_hif_power_up,
 	.power_down		= ath10k_usb_hif_power_down,
@@ -846,7 +832,7 @@ static int ath10k_usb_setup_pipe_resources(struct ath10k *ar,
 
 	ath10k_dbg(ar, ATH10K_DBG_USB, "usb setting up pipes using interface\n");
 
-	/* walk decriptors and setup pipes */
+	/* walk descriptors and setup pipes */
 	for (i = 0; i < iface_desc->desc.bNumEndpoints; ++i) {
 		endpoint = &iface_desc->endpoint[i].desc;
 
@@ -988,6 +974,20 @@ err:
 	return ret;
 }
 
+static int ath10k_usb_napi_poll(struct napi_struct *ctx, int budget)
+{
+	struct ath10k *ar = container_of(ctx, struct ath10k, napi);
+	int done;
+
+	done = ath10k_htt_rx_hl_indication(ar, budget);
+	ath10k_dbg(ar, ATH10K_DBG_USB, "napi poll: done: %d, budget:%d\n", done, budget);
+
+	if (done < budget)
+		napi_complete_done(ctx, done);
+
+	return done;
+}
+
 /* ath10k usb driver registered functions */
 static int ath10k_usb_probe(struct usb_interface *interface,
 			    const struct usb_device_id *id)
@@ -997,7 +997,7 @@ static int ath10k_usb_probe(struct usb_interface *interface,
 	struct usb_device *dev = interface_to_usbdev(interface);
 	int ret, vendor_id, product_id;
 	enum ath10k_hw_rev hw_rev;
-	u32 chip_id;
+	struct ath10k_bus_params bus_params = {};
 
 	/* Assumption: All USB based chipsets (so far) are QCA9377 based.
 	 * If there will be newer chipsets that does not use the hw reg
@@ -1013,6 +1013,8 @@ static int ath10k_usb_probe(struct usb_interface *interface,
 		dev_err(&dev->dev, "failed to allocate core\n");
 		return -ENOMEM;
 	}
+
+	netif_napi_add(ar->napi_dev, &ar->napi, ath10k_usb_napi_poll);
 
 	usb_get_dev(dev);
 	vendor_id = le16_to_cpu(dev->descriptor.idVendor);
@@ -1032,9 +1034,11 @@ static int ath10k_usb_probe(struct usb_interface *interface,
 	ar->id.vendor = vendor_id;
 	ar->id.device = product_id;
 
+	bus_params.dev_type = ATH10K_DEV_TYPE_HL;
 	/* TODO: don't know yet how to get chip_id with USB */
-	chip_id = 0;
-	ret = ath10k_core_register(ar, chip_id);
+	bus_params.chip_id = 0;
+	bus_params.hl_msdu_ids = true;
+	ret = ath10k_core_register(ar, &bus_params);
 	if (ret) {
 		ath10k_warn(ar, "failed to register driver core: %d\n", ret);
 		goto err_usb_destroy;
@@ -1065,6 +1069,7 @@ static void ath10k_usb_remove(struct usb_interface *interface)
 		return;
 
 	ath10k_core_unregister(ar_usb->ar);
+	netif_napi_del(&ar_usb->ar->napi);
 	ath10k_usb_destroy(ar_usb->ar);
 	usb_put_dev(interface_to_usbdev(interface));
 	ath10k_core_destroy(ar_usb->ar);
@@ -1121,5 +1126,5 @@ static struct usb_driver ath10k_usb_driver = {
 module_usb_driver(ath10k_usb_driver);
 
 MODULE_AUTHOR("Atheros Communications, Inc.");
-MODULE_DESCRIPTION("Driver support for Qualcomm Atheros 802.11ac WLAN USB devices");
+MODULE_DESCRIPTION("Driver support for Qualcomm Atheros USB 802.11ac WLAN devices");
 MODULE_LICENSE("Dual BSD/GPL");

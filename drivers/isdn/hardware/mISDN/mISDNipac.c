@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * isac.c   ISAC specific routines
  *
  * Author       Karsten Keil <keil@isdn4linux.de>
  *
  * Copyright 2009  by Karsten Keil <keil@isdn4linux.de>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  */
 
 #include <linux/irqreturn.h>
@@ -34,6 +21,7 @@
 
 MODULE_AUTHOR("Karsten Keil");
 MODULE_VERSION(ISAC_REV);
+MODULE_DESCRIPTION("mISDN driver for ISAC specific functions");
 MODULE_LICENSE("GPL v2");
 
 #define ReadISAC(is, o)		(is->read_reg(is->dch.hw, o + is->off))
@@ -170,7 +158,7 @@ isac_fill_fifo(struct isac_hw *isac)
 	WriteISAC(isac, ISAC_CMDR, more ? 0x8 : 0xa);
 	if (test_and_set_bit(FLG_BUSY_TIMER, &isac->dch.Flags)) {
 		pr_debug("%s: %s dbusytimer running\n", isac->name, __func__);
-		del_timer(&isac->dch.timer);
+		timer_delete(&isac->dch.timer);
 	}
 	isac->dch.timer.expires = jiffies + ((DBUSY_TIMER_VALUE * HZ)/1000);
 	add_timer(&isac->dch.timer);
@@ -203,8 +191,7 @@ isac_rme_irq(struct isac_hw *isac)
 #endif
 		}
 		WriteISAC(isac, ISAC_CMDR, 0x80);
-		if (isac->dch.rx_skb)
-			dev_kfree_skb(isac->dch.rx_skb);
+		dev_kfree_skb(isac->dch.rx_skb);
 		isac->dch.rx_skb = NULL;
 	} else {
 		count = ReadISAC(isac, ISAC_RBCL) & 0x1f;
@@ -219,12 +206,11 @@ static void
 isac_xpr_irq(struct isac_hw *isac)
 {
 	if (test_and_clear_bit(FLG_BUSY_TIMER, &isac->dch.Flags))
-		del_timer(&isac->dch.timer);
+		timer_delete(&isac->dch.timer);
 	if (isac->dch.tx_skb && isac->dch.tx_idx < isac->dch.tx_skb->len) {
 		isac_fill_fifo(isac);
 	} else {
-		if (isac->dch.tx_skb)
-			dev_kfree_skb(isac->dch.tx_skb);
+		dev_kfree_skb(isac->dch.tx_skb);
 		if (get_next_dframe(&isac->dch))
 			isac_fill_fifo(isac);
 	}
@@ -234,7 +220,7 @@ static void
 isac_retransmit(struct isac_hw *isac)
 {
 	if (test_and_clear_bit(FLG_BUSY_TIMER, &isac->dch.Flags))
-		del_timer(&isac->dch.timer);
+		timer_delete(&isac->dch.timer);
 	if (test_bit(FLG_TX_BUSY, &isac->dch.Flags)) {
 		/* Restart frame */
 		isac->dch.tx_idx = 0;
@@ -477,8 +463,7 @@ isacsx_rme_irq(struct isac_hw *isac)
 			isac->dch.err_crc++;
 #endif
 		WriteISAC(isac, ISACX_CMDRD, ISACX_CMDRD_RMC);
-		if (isac->dch.rx_skb)
-			dev_kfree_skb(isac->dch.rx_skb);
+		dev_kfree_skb(isac->dch.rx_skb);
 		isac->dch.rx_skb = NULL;
 	} else {
 		count = ReadISAC(isac, ISACX_RBCLD) & 0x1f;
@@ -680,7 +665,7 @@ isac_l1cmd(struct dchannel *dch, u32 cmd)
 		}
 		test_and_clear_bit(FLG_TX_BUSY, &dch->Flags);
 		if (test_and_clear_bit(FLG_BUSY_TIMER, &dch->Flags))
-			del_timer(&dch->timer);
+			timer_delete(&dch->timer);
 		break;
 	case HW_POWERUP_REQ:
 		spin_lock_irqsave(isac->hwlock, flags);
@@ -713,7 +698,7 @@ isac_release(struct isac_hw *isac)
 	else if (isac->type != 0)
 		WriteISAC(isac, ISAC_MASK, 0xff);
 	if (isac->dch.timer.function != NULL) {
-		del_timer(&isac->dch.timer);
+		timer_delete(&isac->dch.timer);
 		isac->dch.timer.function = NULL;
 	}
 	kfree(isac->mon_rx);
@@ -728,7 +713,7 @@ isac_release(struct isac_hw *isac)
 static void
 dbusy_timer_handler(struct timer_list *t)
 {
-	struct isac_hw *isac = from_timer(isac, t, dch.timer);
+	struct isac_hw *isac = timer_container_of(isac, t, dch.timer);
 	int rbch, star;
 	u_long flags;
 
@@ -952,8 +937,8 @@ hscx_empty_fifo(struct hscx_hw *hscx, u8 count)
 		hscx_cmdr(hscx, 0x80); /* RMC */
 		if (hscx->bch.rx_skb)
 			skb_trim(hscx->bch.rx_skb, 0);
-		pr_warning("%s.B%d: No bufferspace for %d bytes\n",
-			   hscx->ip->name, hscx->bch.nr, count);
+		pr_warn("%s.B%d: No bufferspace for %d bytes\n",
+			hscx->ip->name, hscx->bch.nr, count);
 		return;
 	}
 	p = skb_put(hscx->bch.rx_skb, count);
@@ -1025,8 +1010,7 @@ hscx_xpr(struct hscx_hw *hx)
 	if (hx->bch.tx_skb && hx->bch.tx_idx < hx->bch.tx_skb->len) {
 		hscx_fill_fifo(hx);
 	} else {
-		if (hx->bch.tx_skb)
-			dev_kfree_skb(hx->bch.tx_skb);
+		dev_kfree_skb(hx->bch.tx_skb);
 		if (get_next_bframe(&hx->bch)) {
 			hscx_fill_fifo(hx);
 			test_and_clear_bit(FLG_TX_EMPTY, &hx->bch.Flags);
@@ -1079,7 +1063,7 @@ ipac_rme(struct hscx_hw *hx)
 	if (!hx->bch.rx_skb)
 		return;
 	if (hx->bch.rx_skb->len < 2) {
-		pr_debug("%s: B%1d frame to short %d\n",
+		pr_debug("%s: B%1d frame too short %d\n",
 			 hx->ip->name, hx->bch.nr, hx->bch.rx_skb->len);
 		skb_trim(hx->bch.rx_skb, 0);
 	} else {

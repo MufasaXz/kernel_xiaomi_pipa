@@ -6,6 +6,7 @@
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#define dev_fmt pr_fmt
 
 #include <linux/module.h>
 #include <linux/init.h>
@@ -18,7 +19,11 @@
 #include <linux/sched.h>
 #include <linux/atomic.h>
 #include <xen/events.h>
-#include <asm/xen/pci.h>
+#include <xen/pci.h>
+#include <xen/xen.h>
+#ifdef CONFIG_XEN_ACPI
+#include <xen/acpi.h>
+#endif
 #include <asm/xen/hypervisor.h>
 #include <xen/interface/physdev.h>
 #include "pciback.h"
@@ -51,6 +56,9 @@ struct pcistub_device {
 
 	struct pci_dev *dev;
 	struct xen_pcibk_device *pdev;/* non-NULL if struct pci_dev is in use */
+#ifdef CONFIG_XEN_ACPI
+	int gsi;
+#endif
 };
 
 /* Access to pcistub_devices & seized_devices lists and the initialize_devices
@@ -83,8 +91,21 @@ static struct pcistub_device *pcistub_device_alloc(struct pci_dev *dev)
 
 	kref_init(&psdev->kref);
 	spin_lock_init(&psdev->lock);
+#ifdef CONFIG_XEN_ACPI
+	psdev->gsi = -1;
+#endif
 
 	return psdev;
+}
+
+static int pcistub_reset_device_state(struct pci_dev *dev)
+{
+	__pci_reset_function_locked(dev);
+
+	if (!xen_pv_domain())
+		return xen_reset_device(dev);
+	else
+		return 0;
 }
 
 /* Don't call this directly as it's called by pcistub_device_put */
@@ -105,7 +126,7 @@ static void pcistub_device_release(struct kref *kref)
 	/* Call the reset function which does not take lock as this
 	 * is called from "unbind" which takes a device_lock mutex.
 	 */
-	__pci_reset_function_locked(dev);
+	pcistub_reset_device_state(dev);
 	if (dev_data &&
 	    pci_load_and_free_saved_state(dev, &dev_data->pci_saved_state))
 		dev_info(&dev->dev, "Could not reload PCI state\n");
@@ -192,8 +213,6 @@ static struct pci_dev *pcistub_device_get_pci_dev(struct xen_pcibk_device *pdev,
 	struct pci_dev *pci_dev = NULL;
 	unsigned long flags;
 
-	pcistub_device_get(psdev);
-
 	spin_lock_irqsave(&psdev->lock, flags);
 	if (!psdev->pdev) {
 		psdev->pdev = pdev;
@@ -201,11 +220,29 @@ static struct pci_dev *pcistub_device_get_pci_dev(struct xen_pcibk_device *pdev,
 	}
 	spin_unlock_irqrestore(&psdev->lock, flags);
 
-	if (!pci_dev)
-		pcistub_device_put(psdev);
+	if (pci_dev)
+		pcistub_device_get(psdev);
 
 	return pci_dev;
 }
+
+#ifdef CONFIG_XEN_ACPI
+static int pcistub_get_gsi_from_sbdf(unsigned int sbdf)
+{
+	struct pcistub_device *psdev;
+	int domain = (sbdf >> 16) & 0xffff;
+	int bus = PCI_BUS_NUM(sbdf);
+	int slot = PCI_SLOT(sbdf);
+	int func = PCI_FUNC(sbdf);
+
+	psdev = pcistub_device_find(domain, bus, slot, func);
+
+	if (!psdev)
+		return -ENODEV;
+
+	return psdev->gsi;
+}
+#endif
 
 struct pci_dev *pcistub_get_pci_dev_by_slot(struct xen_pcibk_device *pdev,
 					    int domain, int bus,
@@ -220,26 +257,6 @@ struct pci_dev *pcistub_get_pci_dev_by_slot(struct xen_pcibk_device *pdev,
 	psdev = pcistub_device_find_locked(domain, bus, slot, func);
 	if (psdev)
 		found_dev = pcistub_device_get_pci_dev(pdev, psdev);
-
-	spin_unlock_irqrestore(&pcistub_devices_lock, flags);
-	return found_dev;
-}
-
-struct pci_dev *pcistub_get_pci_dev(struct xen_pcibk_device *pdev,
-				    struct pci_dev *dev)
-{
-	struct pcistub_device *psdev;
-	struct pci_dev *found_dev = NULL;
-	unsigned long flags;
-
-	spin_lock_irqsave(&pcistub_devices_lock, flags);
-
-	list_for_each_entry(psdev, &pcistub_devices, dev_list) {
-		if (psdev->dev == dev) {
-			found_dev = pcistub_device_get_pci_dev(pdev, psdev);
-			break;
-		}
-	}
 
 	spin_unlock_irqrestore(&pcistub_devices_lock, flags);
 	return found_dev;
@@ -284,7 +301,7 @@ void pcistub_put_pci_dev(struct pci_dev *dev)
 	 * (so it's ready for the next domain)
 	 */
 	device_lock_assert(&dev->dev);
-	__pci_reset_function_locked(dev);
+	pcistub_reset_device_state(dev);
 
 	dev_data = pci_get_drvdata(dev);
 	ret = pci_load_saved_state(dev, dev_data->pci_saved_state);
@@ -303,6 +320,8 @@ void pcistub_put_pci_dev(struct pci_dev *dev)
 	/* And cleanup up our emulated fields. */
 	xen_pcibk_config_reset_dev(dev);
 	xen_pcibk_config_free_dyn_fields(dev);
+
+	dev_data->allow_interrupt_control = 0;
 
 	xen_unregister_device_domain_owner(dev);
 
@@ -352,10 +371,19 @@ static int pcistub_match(struct pci_dev *dev)
 	return found;
 }
 
-static int pcistub_init_device(struct pci_dev *dev)
+static int pcistub_init_device(struct pcistub_device *psdev)
 {
 	struct xen_pcibk_dev_data *dev_data;
+	struct pci_dev *dev;
+#ifdef CONFIG_XEN_ACPI
+	int gsi, trigger, polarity;
+#endif
 	int err = 0;
+
+	if (!psdev)
+		return -EINVAL;
+
+	dev = psdev->dev;
 
 	dev_dbg(&dev->dev, "initializing...\n");
 
@@ -418,9 +446,26 @@ static int pcistub_init_device(struct pci_dev *dev)
 		dev_err(&dev->dev, "Could not store PCI conf saved state!\n");
 	else {
 		dev_dbg(&dev->dev, "resetting (FLR, D3, etc) the device\n");
-		__pci_reset_function_locked(dev);
+		err = pcistub_reset_device_state(dev);
+		if (err)
+			goto config_release;
 		pci_restore_state(dev);
 	}
+
+#ifdef CONFIG_XEN_ACPI
+	if (xen_initial_domain() && xen_pvh_domain()) {
+		err = xen_acpi_get_gsi_info(dev, &gsi, &trigger, &polarity);
+		if (err) {
+			dev_err(&dev->dev, "Fail to get gsi info!\n");
+			goto config_release;
+		}
+		err = xen_pvh_setup_gsi(gsi, trigger, polarity);
+		if (err)
+			goto config_release;
+		psdev->gsi = gsi;
+	}
+#endif
+
 	/* Now disable the device (this also ensures some private device
 	 * data is setup before we export)
 	 */
@@ -460,7 +505,7 @@ static int __init pcistub_init_devices_late(void)
 
 		spin_unlock_irqrestore(&pcistub_devices_lock, flags);
 
-		err = pcistub_init_device(psdev->dev);
+		err = pcistub_init_device(psdev);
 		if (err) {
 			dev_err(&psdev->dev->dev,
 				"error %d initializing device\n", err);
@@ -530,7 +575,7 @@ static int pcistub_seize(struct pci_dev *dev,
 		spin_unlock_irqrestore(&pcistub_devices_lock, flags);
 
 		/* don't want irqs disabled when calling pcistub_init_device */
-		err = pcistub_init_device(psdev->dev);
+		err = pcistub_init_device(psdev);
 
 		spin_lock_irqsave(&pcistub_devices_lock, flags);
 
@@ -624,11 +669,11 @@ static void pcistub_remove(struct pci_dev *dev)
 		if (found_psdev->pdev) {
 			int domid = xen_find_device_domain_owner(dev);
 
-			pr_warn("****** removing device %s while still in-use by domain %d! ******\n",
+			dev_warn(&dev->dev, "****** removing device %s while still in-use by domain %d! ******\n",
 			       pci_name(found_psdev->dev), domid);
-			pr_warn("****** driver domain may still access this device's i/o resources!\n");
-			pr_warn("****** shutdown driver domain before binding device\n");
-			pr_warn("****** to other drivers or domains\n");
+			dev_warn(&dev->dev, "****** driver domain may still access this device's i/o resources!\n");
+			dev_warn(&dev->dev, "****** shutdown driver domain before binding device\n");
+			dev_warn(&dev->dev, "****** to other drivers or domains\n");
 
 			/* N.B. This ends up calling pcistub_put_pci_dev which ends up
 			 * doing the FLR. */
@@ -709,14 +754,12 @@ static pci_ers_result_t common_process(struct pcistub_device *psdev,
 	ret = xen_pcibk_get_pcifront_dev(psdev->dev, psdev->pdev,
 		&aer_op->domain, &aer_op->bus, &aer_op->devfn);
 	if (!ret) {
-		dev_err(&psdev->dev->dev,
-			DRV_NAME ": failed to get pcifront device\n");
+		dev_err(&psdev->dev->dev, "failed to get pcifront device\n");
 		return PCI_ERS_RESULT_NONE;
 	}
 	wmb();
 
-	dev_dbg(&psdev->dev->dev,
-			DRV_NAME ": aer_op %x dom %x bus %x devfn %x\n",
+	dev_dbg(&psdev->dev->dev, "aer_op %x dom %x bus %x devfn %x\n",
 			aer_cmd, aer_op->domain, aer_op->bus, aer_op->devfn);
 	/*local flag to mark there's aer request, xen_pcibk callback will use
 	* this flag to judge whether we need to check pci-front give aer
@@ -757,7 +800,7 @@ static pci_ers_result_t common_process(struct pcistub_device *psdev,
 	}
 	clear_bit(_PCIB_op_pending, (unsigned long *)&pdev->flags);
 
-	res = (pci_ers_result_t)aer_op->err;
+	res = (__force pci_ers_result_t)aer_op->err;
 	return res;
 }
 
@@ -784,13 +827,12 @@ static pci_ers_result_t xen_pcibk_slot_reset(struct pci_dev *dev)
 				PCI_FUNC(dev->devfn));
 
 	if (!psdev || !psdev->pdev) {
-		dev_err(&dev->dev,
-			DRV_NAME " device is not found/assigned\n");
+		dev_err(&dev->dev, "device is not found/assigned\n");
 		goto end;
 	}
 
 	if (!psdev->pdev->sh_info) {
-		dev_err(&dev->dev, DRV_NAME " device is not connected or owned"
+		dev_err(&dev->dev, "device is not connected or owned"
 			" by HVM, kill it\n");
 		kill_domain_by_device(psdev);
 		goto end;
@@ -802,7 +844,7 @@ static pci_ers_result_t xen_pcibk_slot_reset(struct pci_dev *dev)
 			"guest with no AER driver should have been killed\n");
 		goto end;
 	}
-	result = common_process(psdev, 1, XEN_PCI_OP_aer_slotreset, result);
+	result = common_process(psdev, pci_channel_io_normal, XEN_PCI_OP_aer_slotreset, result);
 
 	if (result == PCI_ERS_RESULT_NONE ||
 		result == PCI_ERS_RESULT_DISCONNECT) {
@@ -842,13 +884,12 @@ static pci_ers_result_t xen_pcibk_mmio_enabled(struct pci_dev *dev)
 				PCI_FUNC(dev->devfn));
 
 	if (!psdev || !psdev->pdev) {
-		dev_err(&dev->dev,
-			DRV_NAME " device is not found/assigned\n");
+		dev_err(&dev->dev, "device is not found/assigned\n");
 		goto end;
 	}
 
 	if (!psdev->pdev->sh_info) {
-		dev_err(&dev->dev, DRV_NAME " device is not connected or owned"
+		dev_err(&dev->dev, "device is not connected or owned"
 			" by HVM, kill it\n");
 		kill_domain_by_device(psdev);
 		goto end;
@@ -860,7 +901,7 @@ static pci_ers_result_t xen_pcibk_mmio_enabled(struct pci_dev *dev)
 			"guest with no AER driver should have been killed\n");
 		goto end;
 	}
-	result = common_process(psdev, 1, XEN_PCI_OP_aer_mmio, result);
+	result = common_process(psdev, pci_channel_io_normal, XEN_PCI_OP_aer_mmio, result);
 
 	if (result == PCI_ERS_RESULT_NONE ||
 		result == PCI_ERS_RESULT_DISCONNECT) {
@@ -900,13 +941,12 @@ static pci_ers_result_t xen_pcibk_error_detected(struct pci_dev *dev,
 				PCI_FUNC(dev->devfn));
 
 	if (!psdev || !psdev->pdev) {
-		dev_err(&dev->dev,
-			DRV_NAME " device is not found/assigned\n");
+		dev_err(&dev->dev, "device is not found/assigned\n");
 		goto end;
 	}
 
 	if (!psdev->pdev->sh_info) {
-		dev_err(&dev->dev, DRV_NAME " device is not connected or owned"
+		dev_err(&dev->dev, "device is not connected or owned"
 			" by HVM, kill it\n");
 		kill_domain_by_device(psdev);
 		goto end;
@@ -954,13 +994,12 @@ static void xen_pcibk_error_resume(struct pci_dev *dev)
 				PCI_FUNC(dev->devfn));
 
 	if (!psdev || !psdev->pdev) {
-		dev_err(&dev->dev,
-			DRV_NAME " device is not found/assigned\n");
+		dev_err(&dev->dev, "device is not found/assigned\n");
 		goto end;
 	}
 
 	if (!psdev->pdev->sh_info) {
-		dev_err(&dev->dev, DRV_NAME " device is not connected or owned"
+		dev_err(&dev->dev, "device is not connected or owned"
 			" by HVM, kill it\n");
 		kill_domain_by_device(psdev);
 		goto end;
@@ -973,7 +1012,7 @@ static void xen_pcibk_error_resume(struct pci_dev *dev)
 		kill_domain_by_device(psdev);
 		goto end;
 	}
-	common_process(psdev, 1, XEN_PCI_OP_aer_resume,
+	common_process(psdev, pci_channel_io_normal, XEN_PCI_OP_aer_resume,
 		       PCI_ERS_RESULT_RECOVERED);
 end:
 	if (psdev)
@@ -1222,7 +1261,7 @@ static ssize_t slots_show(struct device_driver *drv, char *buf)
 		if (count >= PAGE_SIZE)
 			break;
 
-		count += scnprintf(buf + count, PAGE_SIZE - count,
+		count += sysfs_emit_at(buf, count,
 				   "%04x:%02x:%02x.%d\n",
 				   pci_dev_id->domain, pci_dev_id->bus,
 				   PCI_SLOT(pci_dev_id->devfn),
@@ -1251,7 +1290,7 @@ static ssize_t irq_handlers_show(struct device_driver *drv, char *buf)
 		if (!dev_data)
 			continue;
 		count +=
-		    scnprintf(buf + count, PAGE_SIZE - count,
+		    sysfs_emit_at(buf, count,
 			      "%s:%s:%sing:%ld\n",
 			      pci_name(psdev->dev),
 			      dev_data->isr_on ? "on" : "off",
@@ -1336,7 +1375,7 @@ static ssize_t quirks_show(struct device_driver *drv, char *buf)
 		if (count >= PAGE_SIZE)
 			goto out;
 
-		count += scnprintf(buf + count, PAGE_SIZE - count,
+		count += sysfs_emit_at(buf, count,
 				   "%02x:%02x.%01x\n\t%04x:%04x:%04x:%04x\n",
 				   quirk->pdev->bus->number,
 				   PCI_SLOT(quirk->pdev->devfn),
@@ -1352,7 +1391,7 @@ static ssize_t quirks_show(struct device_driver *drv, char *buf)
 			if (count >= PAGE_SIZE)
 				goto out;
 
-			count += scnprintf(buf + count, PAGE_SIZE - count,
+			count += sysfs_emit_at(buf, count,
 					   "\t\t%08x:%01x:%08x\n",
 					   cfg_entry->base_offset +
 					   field->offset, field->size,
@@ -1423,13 +1462,72 @@ static ssize_t permissive_show(struct device_driver *drv, char *buf)
 		if (!dev_data || !dev_data->permissive)
 			continue;
 		count +=
-		    scnprintf(buf + count, PAGE_SIZE - count, "%s\n",
+		    sysfs_emit_at(buf, count, "%s\n",
 			      pci_name(psdev->dev));
 	}
 	spin_unlock_irqrestore(&pcistub_devices_lock, flags);
 	return count;
 }
 static DRIVER_ATTR_RW(permissive);
+
+static ssize_t allow_interrupt_control_store(struct device_driver *drv,
+					     const char *buf, size_t count)
+{
+	int domain, bus, slot, func;
+	int err;
+	struct pcistub_device *psdev;
+	struct xen_pcibk_dev_data *dev_data;
+
+	err = str_to_slot(buf, &domain, &bus, &slot, &func);
+	if (err)
+		goto out;
+
+	psdev = pcistub_device_find(domain, bus, slot, func);
+	if (!psdev) {
+		err = -ENODEV;
+		goto out;
+	}
+
+	dev_data = pci_get_drvdata(psdev->dev);
+	/* the driver data for a device should never be null at this point */
+	if (!dev_data) {
+		err = -ENXIO;
+		goto release;
+	}
+	dev_data->allow_interrupt_control = 1;
+release:
+	pcistub_device_put(psdev);
+out:
+	if (!err)
+		err = count;
+	return err;
+}
+
+static ssize_t allow_interrupt_control_show(struct device_driver *drv,
+					    char *buf)
+{
+	struct pcistub_device *psdev;
+	struct xen_pcibk_dev_data *dev_data;
+	size_t count = 0;
+	unsigned long flags;
+
+	spin_lock_irqsave(&pcistub_devices_lock, flags);
+	list_for_each_entry(psdev, &pcistub_devices, dev_list) {
+		if (count >= PAGE_SIZE)
+			break;
+		if (!psdev->dev)
+			continue;
+		dev_data = pci_get_drvdata(psdev->dev);
+		if (!dev_data || !dev_data->allow_interrupt_control)
+			continue;
+		count +=
+		    sysfs_emit_at(buf, count, "%s\n",
+			      pci_name(psdev->dev));
+	}
+	spin_unlock_irqrestore(&pcistub_devices_lock, flags);
+	return count;
+}
+static DRIVER_ATTR_RW(allow_interrupt_control);
 
 static void pcistub_exit(void)
 {
@@ -1440,6 +1538,8 @@ static void pcistub_exit(void)
 	driver_remove_file(&xen_pcibk_pci_driver.driver, &driver_attr_quirks);
 	driver_remove_file(&xen_pcibk_pci_driver.driver,
 			   &driver_attr_permissive);
+	driver_remove_file(&xen_pcibk_pci_driver.driver,
+			   &driver_attr_allow_interrupt_control);
 	driver_remove_file(&xen_pcibk_pci_driver.driver,
 			   &driver_attr_irq_handlers);
 	driver_remove_file(&xen_pcibk_pci_driver.driver,
@@ -1530,6 +1630,9 @@ static int __init pcistub_init(void)
 	if (!err)
 		err = driver_create_file(&xen_pcibk_pci_driver.driver,
 					 &driver_attr_permissive);
+	if (!err)
+		err = driver_create_file(&xen_pcibk_pci_driver.driver,
+					 &driver_attr_allow_interrupt_control);
 
 	if (!err)
 		err = driver_create_file(&xen_pcibk_pci_driver.driver,
@@ -1633,11 +1736,19 @@ static int __init xen_pcibk_init(void)
 		bus_register_notifier(&pci_bus_type, &pci_stub_nb);
 #endif
 
+#ifdef CONFIG_XEN_ACPI
+	xen_acpi_register_get_gsi_func(pcistub_get_gsi_from_sbdf);
+#endif
+
 	return err;
 }
 
 static void __exit xen_pcibk_cleanup(void)
 {
+#ifdef CONFIG_XEN_ACPI
+	xen_acpi_register_get_gsi_func(NULL);
+#endif
+
 #ifdef CONFIG_PCI_IOV
 	bus_unregister_notifier(&pci_bus_type, &pci_stub_nb);
 #endif
@@ -1648,5 +1759,6 @@ static void __exit xen_pcibk_cleanup(void)
 module_init(xen_pcibk_init);
 module_exit(xen_pcibk_cleanup);
 
+MODULE_DESCRIPTION("Xen PCI-device stub driver");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_ALIAS("xen-backend:pci");

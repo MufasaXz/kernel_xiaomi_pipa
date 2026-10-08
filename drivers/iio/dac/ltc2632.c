@@ -1,22 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * LTC2632 Digital to analog convertors spi driver
  *
  * Copyright 2017 Maxime Roussin-Bélanger
  * expanded by Silvan Murer <silvan.murer@gmail.com>
- *
- * Licensed under the GPL-2.
  */
 
 #include <linux/device.h>
 #include <linux/spi/spi.h>
 #include <linux/module.h>
 #include <linux/iio/iio.h>
+#include <linux/property.h>
 #include <linux/regulator/consumer.h>
 
-#define LTC2632_DAC_CHANNELS                    2
-
-#define LTC2632_ADDR_DAC0                       0x0
-#define LTC2632_ADDR_DAC1                       0x1
+#include <linux/unaligned.h>
 
 #define LTC2632_CMD_WRITE_INPUT_N               0x0
 #define LTC2632_CMD_UPDATE_DAC_N                0x1
@@ -30,25 +27,25 @@
 /**
  * struct ltc2632_chip_info - chip specific information
  * @channels:		channel spec for the DAC
+ * @num_channels:	DAC channel count of the chip
  * @vref_mv:		internal reference voltage
  */
 struct ltc2632_chip_info {
 	const struct iio_chan_spec *channels;
+	const size_t num_channels;
 	const int vref_mv;
 };
 
 /**
  * struct ltc2632_state - driver instance specific data
  * @spi_dev:			pointer to the spi_device struct
- * @powerdown_cache_mask	used to show current channel powerdown state
- * @vref_mv			used reference voltage (internal or external)
- * @vref_reg		regulator for the reference voltage
+ * @powerdown_cache_mask:	used to show current channel powerdown state
+ * @vref_mv:			used reference voltage (internal or external)
  */
 struct ltc2632_state {
 	struct spi_device *spi_dev;
 	unsigned int powerdown_cache_mask;
 	int vref_mv;
-	struct regulator *vref_reg;
 };
 
 enum ltc2632_supported_device_ids {
@@ -58,6 +55,18 @@ enum ltc2632_supported_device_ids {
 	ID_LTC2632H12,
 	ID_LTC2632H10,
 	ID_LTC2632H8,
+	ID_LTC2634L12,
+	ID_LTC2634L10,
+	ID_LTC2634L8,
+	ID_LTC2634H12,
+	ID_LTC2634H10,
+	ID_LTC2634H8,
+	ID_LTC2636L12,
+	ID_LTC2636L10,
+	ID_LTC2636L8,
+	ID_LTC2636H12,
+	ID_LTC2636H10,
+	ID_LTC2636H8,
 };
 
 static int ltc2632_spi_write(struct spi_device *spi,
@@ -74,9 +83,7 @@ static int ltc2632_spi_write(struct spi_device *spi,
 	 * 10-, 8-bit input code followed by 4, 6, or 8 don't care bits.
 	 */
 	data = (cmd << 20) | (addr << 16) | (val << shift);
-	msg[0] = data >> 16;
-	msg[1] = data >> 8;
-	msg[2] = data;
+	put_unaligned_be24(data, &msg[0]);
 
 	return spi_write(spi, msg, sizeof(msg));
 }
@@ -127,8 +134,8 @@ static ssize_t ltc2632_read_dac_powerdown(struct iio_dev *indio_dev,
 {
 	struct ltc2632_state *st = iio_priv(indio_dev);
 
-	return sprintf(buf, "%d\n",
-		       !!(st->powerdown_cache_mask & (1 << chan->channel)));
+	return sysfs_emit(buf, "%d\n",
+			  !!(st->powerdown_cache_mask & (1 << chan->channel)));
 }
 
 static ssize_t ltc2632_write_dac_powerdown(struct iio_dev *indio_dev,
@@ -141,7 +148,7 @@ static ssize_t ltc2632_write_dac_powerdown(struct iio_dev *indio_dev,
 	int ret;
 	struct ltc2632_state *st = iio_priv(indio_dev);
 
-	ret = strtobool(buf, &pwr_down);
+	ret = kstrtobool(buf, &pwr_down);
 	if (ret)
 		return ret;
 
@@ -169,7 +176,7 @@ static const struct iio_chan_spec_ext_info ltc2632_ext_info[] = {
 		.write = ltc2632_write_dac_powerdown,
 		.shared = IIO_SEPARATE,
 	},
-	{ },
+	{ }
 };
 
 #define LTC2632_CHANNEL(_chan, _bits) { \
@@ -191,39 +198,107 @@ static const struct iio_chan_spec_ext_info ltc2632_ext_info[] = {
 	const struct iio_chan_spec _name ## _channels[] = { \
 		LTC2632_CHANNEL(0, _bits), \
 		LTC2632_CHANNEL(1, _bits), \
+		LTC2632_CHANNEL(2, _bits), \
+		LTC2632_CHANNEL(3, _bits), \
+		LTC2632_CHANNEL(4, _bits), \
+		LTC2632_CHANNEL(5, _bits), \
+		LTC2632_CHANNEL(6, _bits), \
+		LTC2632_CHANNEL(7, _bits), \
 	}
 
-static DECLARE_LTC2632_CHANNELS(ltc2632l12, 12);
-static DECLARE_LTC2632_CHANNELS(ltc2632l10, 10);
-static DECLARE_LTC2632_CHANNELS(ltc2632l8, 8);
-
-static DECLARE_LTC2632_CHANNELS(ltc2632h12, 12);
-static DECLARE_LTC2632_CHANNELS(ltc2632h10, 10);
-static DECLARE_LTC2632_CHANNELS(ltc2632h8, 8);
+static DECLARE_LTC2632_CHANNELS(ltc2632x12, 12);
+static DECLARE_LTC2632_CHANNELS(ltc2632x10, 10);
+static DECLARE_LTC2632_CHANNELS(ltc2632x8, 8);
 
 static const struct ltc2632_chip_info ltc2632_chip_info_tbl[] = {
 	[ID_LTC2632L12] = {
-		.channels	= ltc2632l12_channels,
+		.channels	= ltc2632x12_channels,
+		.num_channels	= 2,
 		.vref_mv	= 2500,
 	},
 	[ID_LTC2632L10] = {
-		.channels	= ltc2632l10_channels,
+		.channels	= ltc2632x10_channels,
+		.num_channels	= 2,
 		.vref_mv	= 2500,
 	},
 	[ID_LTC2632L8] =  {
-		.channels	= ltc2632l8_channels,
+		.channels	= ltc2632x8_channels,
+		.num_channels	= 2,
 		.vref_mv	= 2500,
 	},
 	[ID_LTC2632H12] = {
-		.channels	= ltc2632h12_channels,
+		.channels	= ltc2632x12_channels,
+		.num_channels	= 2,
 		.vref_mv	= 4096,
 	},
 	[ID_LTC2632H10] = {
-		.channels	= ltc2632h10_channels,
+		.channels	= ltc2632x10_channels,
+		.num_channels	= 2,
 		.vref_mv	= 4096,
 	},
 	[ID_LTC2632H8] =  {
-		.channels	= ltc2632h8_channels,
+		.channels	= ltc2632x8_channels,
+		.num_channels	= 2,
+		.vref_mv	= 4096,
+	},
+	[ID_LTC2634L12] = {
+		.channels	= ltc2632x12_channels,
+		.num_channels	= 4,
+		.vref_mv	= 2500,
+	},
+	[ID_LTC2634L10] = {
+		.channels	= ltc2632x10_channels,
+		.num_channels	= 4,
+		.vref_mv	= 2500,
+	},
+	[ID_LTC2634L8] =  {
+		.channels	= ltc2632x8_channels,
+		.num_channels	= 4,
+		.vref_mv	= 2500,
+	},
+	[ID_LTC2634H12] = {
+		.channels	= ltc2632x12_channels,
+		.num_channels	= 4,
+		.vref_mv	= 4096,
+	},
+	[ID_LTC2634H10] = {
+		.channels	= ltc2632x10_channels,
+		.num_channels	= 4,
+		.vref_mv	= 4096,
+	},
+	[ID_LTC2634H8] =  {
+		.channels	= ltc2632x8_channels,
+		.num_channels	= 4,
+		.vref_mv	= 4096,
+	},
+	[ID_LTC2636L12] = {
+		.channels	= ltc2632x12_channels,
+		.num_channels	= 8,
+		.vref_mv	= 2500,
+	},
+	[ID_LTC2636L10] = {
+		.channels	= ltc2632x10_channels,
+		.num_channels	= 8,
+		.vref_mv	= 2500,
+	},
+	[ID_LTC2636L8] =  {
+		.channels	= ltc2632x8_channels,
+		.num_channels	= 8,
+		.vref_mv	= 2500,
+	},
+	[ID_LTC2636H12] = {
+		.channels	= ltc2632x12_channels,
+		.num_channels	= 8,
+		.vref_mv	= 4096,
+	},
+	[ID_LTC2636H10] = {
+		.channels	= ltc2632x10_channels,
+		.num_channels	= 8,
+		.vref_mv	= 4096,
+	},
+	[ID_LTC2636H8] =  {
+		.channels	= ltc2632x8_channels,
+		.num_channels	= 8,
 		.vref_mv	= 4096,
 	},
 };
@@ -233,6 +308,7 @@ static int ltc2632_probe(struct spi_device *spi)
 	struct ltc2632_state *st;
 	struct iio_dev *indio_dev;
 	struct ltc2632_chip_info *chip_info;
+	bool has_external_vref;
 	int ret;
 
 	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
@@ -241,73 +317,40 @@ static int ltc2632_probe(struct spi_device *spi)
 
 	st = iio_priv(indio_dev);
 
-	spi_set_drvdata(spi, indio_dev);
 	st->spi_dev = spi;
 
 	chip_info = (struct ltc2632_chip_info *)
 			spi_get_device_id(spi)->driver_data;
 
-	st->vref_reg = devm_regulator_get_optional(&spi->dev, "vref");
-	if (PTR_ERR(st->vref_reg) == -ENODEV) {
-		/* use internal reference voltage */
-		st->vref_reg = NULL;
-		st->vref_mv = chip_info->vref_mv;
+	ret = devm_regulator_get_enable_read_voltage(&spi->dev, "vref");
+	if (ret < 0 && ret != -ENODEV)
+		return dev_err_probe(&spi->dev, ret,
+				     "Failed to get vref regulator voltage\n");
 
-		ret = ltc2632_spi_write(spi, LTC2632_CMD_INTERNAL_REFER,
-				0, 0, 0);
-		if (ret) {
-			dev_err(&spi->dev,
-				"Set internal reference command failed, %d\n",
-				ret);
-			return ret;
-		}
-	} else if (IS_ERR(st->vref_reg)) {
-		dev_err(&spi->dev,
-				"Error getting voltage reference regulator\n");
-		return PTR_ERR(st->vref_reg);
-	} else {
-		/* use external reference voltage */
-		ret = regulator_enable(st->vref_reg);
-		if (ret) {
-			dev_err(&spi->dev,
-				"enable reference regulator failed, %d\n",
-				ret);
-			return ret;
-		}
-		st->vref_mv = regulator_get_voltage(st->vref_reg) / 1000;
+	has_external_vref = ret != -ENODEV;
+	st->vref_mv = has_external_vref ? ret / 1000 : chip_info->vref_mv;
 
+	if (has_external_vref) {
 		ret = ltc2632_spi_write(spi, LTC2632_CMD_EXTERNAL_REFER,
-				0, 0, 0);
-		if (ret) {
-			dev_err(&spi->dev,
-				"Set external reference command failed, %d\n",
-				ret);
-			return ret;
-		}
+					0, 0, 0);
+		if (ret)
+			return dev_err_probe(&spi->dev, ret,
+				"Set external reference command failed\n");
+	} else {
+		ret = ltc2632_spi_write(spi, LTC2632_CMD_INTERNAL_REFER,
+					0, 0, 0);
+		if (ret)
+			return dev_err_probe(&spi->dev, ret,
+				"Set internal reference command failed\n");
 	}
 
-	indio_dev->dev.parent = &spi->dev;
-	indio_dev->name = dev_of_node(&spi->dev) ? dev_of_node(&spi->dev)->name
-						 : spi_get_device_id(spi)->name;
+	indio_dev->name = fwnode_get_name(dev_fwnode(&spi->dev)) ?: spi_get_device_id(spi)->name;
 	indio_dev->info = &ltc2632_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->channels = chip_info->channels;
-	indio_dev->num_channels = LTC2632_DAC_CHANNELS;
+	indio_dev->num_channels = chip_info->num_channels;
 
-	return iio_device_register(indio_dev);
-}
-
-static int ltc2632_remove(struct spi_device *spi)
-{
-	struct iio_dev *indio_dev = spi_get_drvdata(spi);
-	struct ltc2632_state *st = iio_priv(indio_dev);
-
-	iio_device_unregister(indio_dev);
-
-	if (st->vref_reg)
-		regulator_disable(st->vref_reg);
-
-	return 0;
+	return devm_iio_device_register(&spi->dev, indio_dev);
 }
 
 static const struct spi_device_id ltc2632_id[] = {
@@ -317,7 +360,19 @@ static const struct spi_device_id ltc2632_id[] = {
 	{ "ltc2632-h12", (kernel_ulong_t)&ltc2632_chip_info_tbl[ID_LTC2632H12] },
 	{ "ltc2632-h10", (kernel_ulong_t)&ltc2632_chip_info_tbl[ID_LTC2632H10] },
 	{ "ltc2632-h8", (kernel_ulong_t)&ltc2632_chip_info_tbl[ID_LTC2632H8] },
-	{}
+	{ "ltc2634-l12", (kernel_ulong_t)&ltc2632_chip_info_tbl[ID_LTC2634L12] },
+	{ "ltc2634-l10", (kernel_ulong_t)&ltc2632_chip_info_tbl[ID_LTC2634L10] },
+	{ "ltc2634-l8", (kernel_ulong_t)&ltc2632_chip_info_tbl[ID_LTC2634L8] },
+	{ "ltc2634-h12", (kernel_ulong_t)&ltc2632_chip_info_tbl[ID_LTC2634H12] },
+	{ "ltc2634-h10", (kernel_ulong_t)&ltc2632_chip_info_tbl[ID_LTC2634H10] },
+	{ "ltc2634-h8", (kernel_ulong_t)&ltc2632_chip_info_tbl[ID_LTC2634H8] },
+	{ "ltc2636-l12", (kernel_ulong_t)&ltc2632_chip_info_tbl[ID_LTC2636L12] },
+	{ "ltc2636-l10", (kernel_ulong_t)&ltc2632_chip_info_tbl[ID_LTC2636L10] },
+	{ "ltc2636-l8", (kernel_ulong_t)&ltc2632_chip_info_tbl[ID_LTC2636L8] },
+	{ "ltc2636-h12", (kernel_ulong_t)&ltc2632_chip_info_tbl[ID_LTC2636H12] },
+	{ "ltc2636-h10", (kernel_ulong_t)&ltc2632_chip_info_tbl[ID_LTC2636H10] },
+	{ "ltc2636-h8", (kernel_ulong_t)&ltc2632_chip_info_tbl[ID_LTC2636H8] },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, ltc2632_id);
 
@@ -340,18 +395,53 @@ static const struct of_device_id ltc2632_of_match[] = {
 	}, {
 		.compatible = "lltc,ltc2632-h8",
 		.data = &ltc2632_chip_info_tbl[ID_LTC2632H8]
+	}, {
+		.compatible = "lltc,ltc2634-l12",
+		.data = &ltc2632_chip_info_tbl[ID_LTC2634L12]
+	}, {
+		.compatible = "lltc,ltc2634-l10",
+		.data = &ltc2632_chip_info_tbl[ID_LTC2634L10]
+	}, {
+		.compatible = "lltc,ltc2634-l8",
+		.data = &ltc2632_chip_info_tbl[ID_LTC2634L8]
+	}, {
+		.compatible = "lltc,ltc2634-h12",
+		.data = &ltc2632_chip_info_tbl[ID_LTC2634H12]
+	}, {
+		.compatible = "lltc,ltc2634-h10",
+		.data = &ltc2632_chip_info_tbl[ID_LTC2634H10]
+	}, {
+		.compatible = "lltc,ltc2634-h8",
+		.data = &ltc2632_chip_info_tbl[ID_LTC2634H8]
+	}, {
+		.compatible = "lltc,ltc2636-l12",
+		.data = &ltc2632_chip_info_tbl[ID_LTC2636L12]
+	}, {
+		.compatible = "lltc,ltc2636-l10",
+		.data = &ltc2632_chip_info_tbl[ID_LTC2636L10]
+	}, {
+		.compatible = "lltc,ltc2636-l8",
+		.data = &ltc2632_chip_info_tbl[ID_LTC2636L8]
+	}, {
+		.compatible = "lltc,ltc2636-h12",
+		.data = &ltc2632_chip_info_tbl[ID_LTC2636H12]
+	}, {
+		.compatible = "lltc,ltc2636-h10",
+		.data = &ltc2632_chip_info_tbl[ID_LTC2636H10]
+	}, {
+		.compatible = "lltc,ltc2636-h8",
+		.data = &ltc2632_chip_info_tbl[ID_LTC2636H8]
 	},
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, ltc2632_of_match);
 
 static struct spi_driver ltc2632_driver = {
 	.driver		= {
 		.name	= "ltc2632",
-		.of_match_table = of_match_ptr(ltc2632_of_match),
+		.of_match_table = ltc2632_of_match,
 	},
 	.probe		= ltc2632_probe,
-	.remove		= ltc2632_remove,
 	.id_table	= ltc2632_id,
 };
 module_spi_driver(ltc2632_driver);

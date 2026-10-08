@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * net/core/netprio_cgroup.c	Priority Control Group
- *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
  *
  * Authors:	Neil Horman <nhorman@tuxdriver.com>
  */
@@ -211,8 +207,6 @@ static ssize_t write_priomap(struct kernfs_open_file *of,
 	if (!dev)
 		return -ENODEV;
 
-	cgroup_sk_alloc_disable();
-
 	rtnl_lock();
 
 	ret = netprio_set_prio(of_css(of), dev, prio);
@@ -224,14 +218,11 @@ static ssize_t write_priomap(struct kernfs_open_file *of,
 
 static int update_netprio(const void *v, struct file *file, unsigned n)
 {
-	int err;
-	struct socket *sock = sock_from_file(file, &err);
-	if (sock) {
-		spin_lock(&cgroup_sk_update_lock);
+	struct socket *sock = sock_from_file(file);
+
+	if (sock)
 		sock_cgroup_set_prioidx(&sock->sk->sk_cgrp_data,
 					(unsigned long)v);
-		spin_unlock(&cgroup_sk_update_lock);
-	}
 	return 0;
 }
 
@@ -239,8 +230,6 @@ static void net_prio_attach(struct cgroup_taskset *tset)
 {
 	struct task_struct *p;
 	struct cgroup_subsys_state *css;
-
-	cgroup_sk_alloc_disable();
 
 	cgroup_taskset_for_each(p, css, tset) {
 		void *v = (void *)(unsigned long)css->id;
@@ -303,6 +292,4 @@ static int __init init_cgroup_netprio(void)
 	register_netdevice_notifier(&netprio_device_notifier);
 	return 0;
 }
-
 subsys_initcall(init_cgroup_netprio);
-MODULE_LICENSE("GPL v2");

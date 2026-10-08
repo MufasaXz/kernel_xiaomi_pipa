@@ -1,11 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Analog Devices ADF7242 Low-Power IEEE 802.15.4 Transceiver
  *
  * Copyright 2009-2017 Analog Devices Inc.
  *
- * Licensed under the GPL-2 or later.
- *
- * http://www.analog.com/ADF7242
+ * https://www.analog.com/ADF7242
  */
 
 #include <linux/kernel.h>
@@ -1161,23 +1160,17 @@ static int adf7242_stats_show(struct seq_file *file, void *offset)
 	return 0;
 }
 
-static int adf7242_debugfs_init(struct adf7242_local *lp)
+static void adf7242_debugfs_init(struct adf7242_local *lp)
 {
-	char debugfs_dir_name[DNAME_INLINE_LEN + 1] = "adf7242-";
-	struct dentry *stats;
+	char debugfs_dir_name[DNAME_INLINE_LEN + 1];
 
-	strncat(debugfs_dir_name, dev_name(&lp->spi->dev), DNAME_INLINE_LEN);
+	snprintf(debugfs_dir_name, sizeof(debugfs_dir_name),
+		 "adf7242-%s", dev_name(&lp->spi->dev));
 
 	lp->debugfs_root = debugfs_create_dir(debugfs_dir_name, NULL);
-	if (IS_ERR_OR_NULL(lp->debugfs_root))
-		return PTR_ERR_OR_ZERO(lp->debugfs_root);
 
-	stats = debugfs_create_devm_seqfile(&lp->spi->dev, "status",
-					    lp->debugfs_root,
-					    adf7242_stats_show);
-	return PTR_ERR_OR_ZERO(stats);
-
-	return 0;
+	debugfs_create_devm_seqfile(&lp->spi->dev, "status", lp->debugfs_root,
+				    adf7242_stats_show);
 }
 
 static const s32 adf7242_powers[] = {
@@ -1312,7 +1305,7 @@ err_alloc_wq:
 	return ret;
 }
 
-static int adf7242_remove(struct spi_device *spi)
+static void adf7242_remove(struct spi_device *spi)
 {
 	struct adf7242_local *lp = spi_get_drvdata(spi);
 
@@ -1325,8 +1318,6 @@ static int adf7242_remove(struct spi_device *spi)
 
 	mutex_destroy(&lp->bmux);
 	ieee802154_free_hw(lp->hw);
-
-	return 0;
 }
 
 static const struct of_device_id adf7242_of_match[] = {
@@ -1346,9 +1337,8 @@ MODULE_DEVICE_TABLE(spi, adf7242_device_id);
 static struct spi_driver adf7242_driver = {
 	.id_table = adf7242_device_id,
 	.driver = {
-		   .of_match_table = of_match_ptr(adf7242_of_match),
+		   .of_match_table = adf7242_of_match,
 		   .name = "adf7242",
-		   .owner = THIS_MODULE,
 		   },
 	.probe = adf7242_probe,
 	.remove = adf7242_remove,
@@ -1359,3 +1349,5 @@ module_spi_driver(adf7242_driver);
 MODULE_AUTHOR("Michael Hennerich <michael.hennerich@analog.com>");
 MODULE_DESCRIPTION("ADF7242 IEEE802.15.4 Transceiver Driver");
 MODULE_LICENSE("GPL");
+
+MODULE_FIRMWARE(FIRMWARE);

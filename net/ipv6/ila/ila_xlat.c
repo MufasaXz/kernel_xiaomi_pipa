@@ -5,7 +5,6 @@
 #include <linux/rhashtable.h>
 #include <linux/vmalloc.h>
 #include <net/genetlink.h>
-#include <net/ila.h>
 #include <net/netns/generic.h>
 #include <uapi/linux/genetlink.h>
 #include "ila.h"
@@ -106,16 +105,11 @@ static int parse_nl_config(struct genl_info *info,
 		xp->ip.locator_match.v64 = (__force __be64)nla_get_u64(
 			info->attrs[ILA_ATTR_LOCATOR_MATCH]);
 
-	if (info->attrs[ILA_ATTR_CSUM_MODE])
-		xp->ip.csum_mode = nla_get_u8(info->attrs[ILA_ATTR_CSUM_MODE]);
-	else
-		xp->ip.csum_mode = ILA_CSUM_NO_ACTION;
+	xp->ip.csum_mode = nla_get_u8_default(info->attrs[ILA_ATTR_CSUM_MODE],
+					      ILA_CSUM_NO_ACTION);
 
-	if (info->attrs[ILA_ATTR_IDENT_TYPE])
-		xp->ip.ident_type = nla_get_u8(
-				info->attrs[ILA_ATTR_IDENT_TYPE]);
-	else
-		xp->ip.ident_type = ILA_ATYPE_USE_FORMAT;
+	xp->ip.ident_type = nla_get_u8_default(info->attrs[ILA_ATTR_IDENT_TYPE],
+					       ILA_ATYPE_USE_FORMAT);
 
 	if (info->attrs[ILA_ATTR_IFINDEX])
 		xp->ifindex = nla_get_s32(info->attrs[ILA_ATTR_IFINDEX]);
@@ -389,12 +383,9 @@ int ila_xlat_nl_cmd_flush(struct sk_buff *skb, struct genl_info *info)
 	struct rhashtable_iter iter;
 	struct ila_map *ila;
 	spinlock_t *lock;
-	int ret;
+	int ret = 0;
 
-	ret = rhashtable_walk_init(&ilan->xlat.rhash_table, &iter, GFP_KERNEL);
-	if (ret)
-		goto done;
-
+	rhashtable_walk_enter(&ilan->xlat.rhash_table, &iter);
 	rhashtable_walk_start(&iter);
 
 	for (;;) {
@@ -517,23 +508,17 @@ int ila_xlat_nl_dump_start(struct netlink_callback *cb)
 	struct net *net = sock_net(cb->skb->sk);
 	struct ila_net *ilan = net_generic(net, ila_net_id);
 	struct ila_dump_iter *iter;
-	int ret;
 
 	iter = kmalloc(sizeof(*iter), GFP_KERNEL);
 	if (!iter)
 		return -ENOMEM;
 
-	ret = rhashtable_walk_init(&ilan->xlat.rhash_table, &iter->rhiter,
-				   GFP_KERNEL);
-	if (ret) {
-		kfree(iter);
-		return ret;
-	}
+	rhashtable_walk_enter(&ilan->xlat.rhash_table, &iter->rhiter);
 
 	iter->skip = 0;
 	cb->args[0] = (long)iter;
 
-	return ret;
+	return 0;
 }
 
 int ila_xlat_nl_dump_done(struct netlink_callback *cb)
@@ -617,8 +602,6 @@ out_ret:
 	return ret;
 }
 
-#define ILA_HASH_TABLE_SIZE 1024
-
 int ila_xlat_init_net(struct net *net)
 {
 	struct ila_net *ilan = net_generic(net, ila_net_id);
@@ -628,7 +611,11 @@ int ila_xlat_init_net(struct net *net)
 	if (err)
 		return err;
 
-	rhashtable_init(&ilan->xlat.rhash_table, &rht_params);
+	err = rhashtable_init(&ilan->xlat.rhash_table, &rht_params);
+	if (err) {
+		free_bucket_spinlocks(ilan->xlat.locks);
+		return err;
+	}
 
 	return 0;
 }

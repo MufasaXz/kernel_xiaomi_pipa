@@ -1,17 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for Mediatek Hardware Random Number Generator
  *
  * Copyright (C) 2017 Sean Wang <sean.wang@mediatek.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of
- * the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
  */
 #define MTK_RNG_DEV KBUILD_MODNAME
 
@@ -31,7 +22,7 @@
 #define RNG_AUTOSUSPEND_TIMEOUT		100
 
 #define USEC_POLL			2
-#define TIMEOUT_POLL			20
+#define TIMEOUT_POLL			60
 
 #define RNG_CTRL			0x00
 #define RNG_EN				BIT(0)
@@ -45,6 +36,7 @@ struct mtk_rng {
 	void __iomem *base;
 	struct clk *clk;
 	struct hwrng rng;
+	struct device *dev;
 };
 
 static int mtk_rng_init(struct hwrng *rng)
@@ -86,7 +78,7 @@ static bool mtk_rng_wait_ready(struct hwrng *rng, bool wait)
 		readl_poll_timeout_atomic(priv->base + RNG_CTRL, ready,
 					  ready & RNG_READY, USEC_POLL,
 					  TIMEOUT_POLL);
-	return !!ready;
+	return !!(ready & RNG_READY);
 }
 
 static int mtk_rng_read(struct hwrng *rng, void *buf, size_t max, bool wait)
@@ -94,7 +86,7 @@ static int mtk_rng_read(struct hwrng *rng, void *buf, size_t max, bool wait)
 	struct mtk_rng *priv = to_mtk_rng(rng);
 	int retval = 0;
 
-	pm_runtime_get_sync((struct device *)priv->rng.priv);
+	pm_runtime_get_sync(priv->dev);
 
 	while (max >= sizeof(u32)) {
 		if (!mtk_rng_wait_ready(rng, wait))
@@ -106,35 +98,27 @@ static int mtk_rng_read(struct hwrng *rng, void *buf, size_t max, bool wait)
 		max -= sizeof(u32);
 	}
 
-	pm_runtime_mark_last_busy((struct device *)priv->rng.priv);
-	pm_runtime_put_sync_autosuspend((struct device *)priv->rng.priv);
+	pm_runtime_put_sync_autosuspend(priv->dev);
 
 	return retval || !wait ? retval : -EIO;
 }
 
 static int mtk_rng_probe(struct platform_device *pdev)
 {
-	struct resource *res;
 	int ret;
 	struct mtk_rng *priv;
-
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res) {
-		dev_err(&pdev->dev, "no iomem resource\n");
-		return -ENXIO;
-	}
 
 	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 
+	priv->dev = &pdev->dev;
 	priv->rng.name = pdev->name;
 #ifndef CONFIG_PM
 	priv->rng.init = mtk_rng_init;
 	priv->rng.cleanup = mtk_rng_cleanup;
 #endif
 	priv->rng.read = mtk_rng_read;
-	priv->rng.priv = (unsigned long)&pdev->dev;
 	priv->rng.quality = 900;
 
 	priv->clk = devm_clk_get(&pdev->dev, "rng");
@@ -144,7 +128,7 @@ static int mtk_rng_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	priv->base = devm_ioremap_resource(&pdev->dev, res);
+	priv->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(priv->base))
 		return PTR_ERR(priv->base);
 
@@ -158,7 +142,9 @@ static int mtk_rng_probe(struct platform_device *pdev)
 	dev_set_drvdata(&pdev->dev, priv);
 	pm_runtime_set_autosuspend_delay(&pdev->dev, RNG_AUTOSUSPEND_TIMEOUT);
 	pm_runtime_use_autosuspend(&pdev->dev);
-	pm_runtime_enable(&pdev->dev);
+	ret = devm_pm_runtime_enable(&pdev->dev);
+	if (ret)
+		return ret;
 
 	dev_info(&pdev->dev, "registered RNG driver\n");
 
@@ -195,6 +181,7 @@ static const struct dev_pm_ops mtk_rng_pm_ops = {
 #endif	/* CONFIG_PM */
 
 static const struct of_device_id mtk_rng_match[] = {
+	{ .compatible = "mediatek,mt7986-rng" },
 	{ .compatible = "mediatek,mt7623-rng" },
 	{},
 };

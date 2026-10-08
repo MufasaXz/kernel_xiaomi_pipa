@@ -2,6 +2,8 @@
 #include <linux/slab.h>
 #include <linux/pci.h>
 #include <asm/apicdef.h>
+#include <asm/intel-family.h>
+#include <linux/io-64-nonatomic-lo-hi.h>
 
 #include <linux/perf_event.h>
 #include "../perf_event.h"
@@ -32,6 +34,8 @@
 
 #define UNCORE_EVENT_CONSTRAINT(c, n) EVENT_CONSTRAINT(c, n, 0xff)
 
+#define UNCORE_IGNORE_END		-1
+
 struct pci_extra_dev {
 	struct pci_dev *dev[UNCORE_EXTRA_PCI_DEV_MAX];
 };
@@ -41,6 +45,7 @@ struct intel_uncore_pmu;
 struct intel_uncore_box;
 struct uncore_event_desc;
 struct freerunning_counters;
+struct intel_uncore_topology;
 
 struct intel_uncore_type {
 	const char *name;
@@ -49,6 +54,7 @@ struct intel_uncore_type {
 	int perf_ctr_bits;
 	int fixed_ctr_bits;
 	int num_freerunning_types;
+	int type_id;
 	unsigned perf_ctr;
 	unsigned event_ctl;
 	unsigned event_mask;
@@ -56,11 +62,19 @@ struct intel_uncore_type {
 	unsigned fixed_ctr;
 	unsigned fixed_ctl;
 	unsigned box_ctl;
-	unsigned msr_offset;
+	union {
+		unsigned msr_offset;
+		unsigned mmio_offset;
+	};
+	unsigned mmio_map_size;
 	unsigned num_shared_regs:8;
 	unsigned single_fixed:1;
 	unsigned pair_ctr_ctl:1;
-	unsigned *msr_offsets;
+	union {
+		u64 *msr_offsets;
+		u64 *pci_offsets;
+		u64 *mmio_offsets;
+	};
 	struct event_constraint unconstrainted;
 	struct event_constraint *constraints;
 	struct intel_uncore_pmu *pmus;
@@ -68,7 +82,25 @@ struct intel_uncore_type {
 	struct uncore_event_desc *event_descs;
 	struct freerunning_counters *freerunning;
 	const struct attribute_group *attr_groups[4];
+	const struct attribute_group **attr_update;
 	struct pmu *pmu; /* for custom pmu ops */
+	struct rb_root *boxes;
+	/*
+	 * Uncore PMU would store relevant platform topology configuration here
+	 * to identify which platform component each PMON block of that type is
+	 * supposed to monitor.
+	 */
+	struct intel_uncore_topology **topology;
+	/*
+	 * Optional callbacks for managing mapping of Uncore units to PMONs
+	 */
+	int (*get_topology)(struct intel_uncore_type *type);
+	void (*set_mapping)(struct intel_uncore_type *type);
+	void (*cleanup_mapping)(struct intel_uncore_type *type);
+	/*
+	 * Optional callbacks for extra uncore units cleanup
+	 */
+	void (*cleanup_extra_boxes)(struct intel_uncore_type *type);
 };
 
 #define pmu_group attr_groups[0]
@@ -93,9 +125,9 @@ struct intel_uncore_pmu {
 	struct pmu			pmu;
 	char				name[UNCORE_PMU_NAME_LEN];
 	int				pmu_idx;
-	int				func_id;
 	bool				registered;
 	atomic_t			activeboxes;
+	cpumask_t			cpu_mask;
 	struct intel_uncore_type	*type;
 	struct intel_uncore_box		**boxes;
 };
@@ -107,8 +139,7 @@ struct intel_uncore_extra_reg {
 };
 
 struct intel_uncore_box {
-	int pci_phys_id;
-	int pkgid;	/* Logical package ID */
+	int dieid;	/* Logical die ID */
 	int n_active;	/* number of active events */
 	int n_events;
 	int cpu;	/* cpu to collect events */
@@ -125,12 +156,19 @@ struct intel_uncore_box {
 	struct hrtimer hrtimer;
 	struct list_head list;
 	struct list_head active_list;
-	void *io_addr;
-	struct intel_uncore_extra_reg shared_regs[0];
+	void __iomem *io_addr;
+	struct intel_uncore_extra_reg shared_regs[];
 };
 
-#define UNCORE_BOX_FLAG_INITIATED	0
-#define UNCORE_BOX_FLAG_CTL_OFFS8	1 /* event config registers are 8-byte apart */
+/* CFL uncore 8th cbox MSRs */
+#define CFL_UNC_CBO_7_PERFEVTSEL0		0xf70
+#define CFL_UNC_CBO_7_PER_CTR0			0xf76
+
+#define UNCORE_BOX_FLAG_INITIATED		0
+/* event config registers are 8-byte apart */
+#define UNCORE_BOX_FLAG_CTL_OFFS8		1
+/* CFL 8th CBOX has different MSR space */
+#define UNCORE_BOX_FLAG_CFL8_CBOX_MSR_OFFS	2
 
 struct uncore_event_desc {
 	struct device_attribute attr;
@@ -143,18 +181,54 @@ struct freerunning_counters {
 	unsigned int box_offset;
 	unsigned int num_counters;
 	unsigned int bits;
+	unsigned *box_offsets;
+};
+
+struct uncore_iio_topology {
+	int pci_bus_no;
+	int segment;
+};
+
+struct uncore_upi_topology {
+	int die_to;
+	int pmu_idx_to;
+	int enabled;
+};
+
+struct intel_uncore_topology {
+	int pmu_idx;
+	union {
+		void *untyped;
+		struct uncore_iio_topology *iio;
+		struct uncore_upi_topology *upi;
+	};
 };
 
 struct pci2phy_map {
 	struct list_head list;
 	int segment;
-	int pbus_to_physid[256];
+	int pbus_to_dieid[256];
 };
 
 struct pci2phy_map *__find_pci2phy_map(int segment);
+int uncore_pcibus_to_dieid(struct pci_bus *bus);
+int uncore_die_to_segment(int die);
+int uncore_device_to_die(struct pci_dev *dev);
 
 ssize_t uncore_event_show(struct device *dev,
 			  struct device_attribute *attr, char *buf);
+
+static inline struct intel_uncore_pmu *dev_to_uncore_pmu(struct device *dev)
+{
+	return container_of(dev_get_drvdata(dev), struct intel_uncore_pmu, pmu);
+}
+
+#define to_device_attribute(n)	container_of(n, struct device_attribute, attr)
+#define to_dev_ext_attribute(n)	container_of(n, struct dev_ext_attribute, attr)
+#define attr_to_ext_attr(n)	to_dev_ext_attribute(to_device_attribute(n))
+
+extern int __uncore_max_dies;
+#define uncore_max_dies()	(__uncore_max_dies)
 
 #define INTEL_UNCORE_EVENT_DESC(_name, _config)			\
 {								\
@@ -181,6 +255,25 @@ static inline bool uncore_pmc_fixed(int idx)
 static inline bool uncore_pmc_freerunning(int idx)
 {
 	return idx == UNCORE_PMC_IDX_FREERUNNING;
+}
+
+static inline bool uncore_mmio_is_valid_offset(struct intel_uncore_box *box,
+					       unsigned long offset)
+{
+	if (offset < box->pmu->type->mmio_map_size)
+		return true;
+
+	pr_warn_once("perf uncore: Invalid offset 0x%lx exceeds mapped area of %s.\n",
+		     offset, box->pmu->type->name);
+
+	return false;
+}
+
+static inline
+unsigned int uncore_mmio_box_ctl(struct intel_uncore_box *box)
+{
+	return box->pmu->type->box_ctl +
+	       box->pmu->type->mmio_offset * box->pmu->pmu_idx;
 }
 
 static inline unsigned uncore_pci_box_ctl(struct intel_uncore_box *box)
@@ -291,29 +384,41 @@ unsigned int uncore_freerunning_counter(struct intel_uncore_box *box,
 
 	return pmu->type->freerunning[type].counter_base +
 	       pmu->type->freerunning[type].counter_offset * idx +
-	       pmu->type->freerunning[type].box_offset * pmu->pmu_idx;
+	       (pmu->type->freerunning[type].box_offsets ?
+	        pmu->type->freerunning[type].box_offsets[pmu->pmu_idx] :
+	        pmu->type->freerunning[type].box_offset * pmu->pmu_idx);
 }
 
 static inline
 unsigned uncore_msr_event_ctl(struct intel_uncore_box *box, int idx)
 {
-	return box->pmu->type->event_ctl +
-		(box->pmu->type->pair_ctr_ctl ? 2 * idx : idx) +
-		uncore_msr_box_offset(box);
+	if (test_bit(UNCORE_BOX_FLAG_CFL8_CBOX_MSR_OFFS, &box->flags)) {
+		return CFL_UNC_CBO_7_PERFEVTSEL0 +
+		       (box->pmu->type->pair_ctr_ctl ? 2 * idx : idx);
+	} else {
+		return box->pmu->type->event_ctl +
+		       (box->pmu->type->pair_ctr_ctl ? 2 * idx : idx) +
+		       uncore_msr_box_offset(box);
+	}
 }
 
 static inline
 unsigned uncore_msr_perf_ctr(struct intel_uncore_box *box, int idx)
 {
-	return box->pmu->type->perf_ctr +
-		(box->pmu->type->pair_ctr_ctl ? 2 * idx : idx) +
-		uncore_msr_box_offset(box);
+	if (test_bit(UNCORE_BOX_FLAG_CFL8_CBOX_MSR_OFFS, &box->flags)) {
+		return CFL_UNC_CBO_7_PER_CTR0 +
+		       (box->pmu->type->pair_ctr_ctl ? 2 * idx : idx);
+	} else {
+		return box->pmu->type->perf_ctr +
+		       (box->pmu->type->pair_ctr_ctl ? 2 * idx : idx) +
+		       uncore_msr_box_offset(box);
+	}
 }
 
 static inline
 unsigned uncore_fixed_ctl(struct intel_uncore_box *box)
 {
-	if (box->pci_dev)
+	if (box->pci_dev || box->io_addr)
 		return uncore_pci_fixed_ctl(box);
 	else
 		return uncore_msr_fixed_ctl(box);
@@ -322,7 +427,7 @@ unsigned uncore_fixed_ctl(struct intel_uncore_box *box)
 static inline
 unsigned uncore_fixed_ctr(struct intel_uncore_box *box)
 {
-	if (box->pci_dev)
+	if (box->pci_dev || box->io_addr)
 		return uncore_pci_fixed_ctr(box);
 	else
 		return uncore_msr_fixed_ctr(box);
@@ -331,7 +436,7 @@ unsigned uncore_fixed_ctr(struct intel_uncore_box *box)
 static inline
 unsigned uncore_event_ctl(struct intel_uncore_box *box, int idx)
 {
-	if (box->pci_dev)
+	if (box->pci_dev || box->io_addr)
 		return uncore_pci_event_ctl(box, idx);
 	else
 		return uncore_msr_event_ctl(box, idx);
@@ -340,7 +445,7 @@ unsigned uncore_event_ctl(struct intel_uncore_box *box, int idx)
 static inline
 unsigned uncore_perf_ctr(struct intel_uncore_box *box, int idx)
 {
-	if (box->pci_dev)
+	if (box->pci_dev || box->io_addr)
 		return uncore_pci_perf_ctr(box, idx);
 	else
 		return uncore_msr_perf_ctr(box, idx);
@@ -448,7 +553,7 @@ static inline void uncore_box_exit(struct intel_uncore_box *box)
 
 static inline bool uncore_box_is_fake(struct intel_uncore_box *box)
 {
-	return (box->pkgid < 0);
+	return (box->dieid < 0);
 }
 
 static inline struct intel_uncore_pmu *uncore_event_to_pmu(struct perf_event *event)
@@ -463,6 +568,9 @@ static inline struct intel_uncore_box *uncore_event_to_box(struct perf_event *ev
 
 struct intel_uncore_box *uncore_pmu_to_box(struct intel_uncore_pmu *pmu, int cpu);
 u64 uncore_msr_read_counter(struct intel_uncore_box *box, struct perf_event *event);
+void uncore_mmio_exit_box(struct intel_uncore_box *box);
+u64 uncore_mmio_read_counter(struct intel_uncore_box *box,
+			     struct perf_event *event);
 void uncore_pmu_start_hrtimer(struct intel_uncore_box *box);
 void uncore_pmu_cancel_hrtimer(struct intel_uncore_box *box);
 void uncore_pmu_event_start(struct perf_event *event, int flags);
@@ -475,14 +583,20 @@ struct event_constraint *
 uncore_get_constraint(struct intel_uncore_box *box, struct perf_event *event);
 void uncore_put_constraint(struct intel_uncore_box *box, struct perf_event *event);
 u64 uncore_shared_reg_config(struct intel_uncore_box *box, int idx);
+void uncore_get_alias_name(char *pmu_name, struct intel_uncore_pmu *pmu);
 
+extern struct intel_uncore_type *empty_uncore[];
 extern struct intel_uncore_type **uncore_msr_uncores;
 extern struct intel_uncore_type **uncore_pci_uncores;
+extern struct intel_uncore_type **uncore_mmio_uncores;
 extern struct pci_driver *uncore_pci_driver;
+extern struct pci_driver *uncore_pci_sub_driver;
 extern raw_spinlock_t pci2phy_map_lock;
 extern struct list_head pci2phy_map_head;
 extern struct pci_extra_dev *uncore_extra_pci_dev;
 extern struct event_constraint uncore_constraint_empty;
+extern int spr_uncore_units_ignore[];
+extern int gnr_uncore_units_ignore[];
 
 /* uncore_snb.c */
 int snb_uncore_pci_init(void);
@@ -493,6 +607,17 @@ int skl_uncore_pci_init(void);
 void snb_uncore_cpu_init(void);
 void nhm_uncore_cpu_init(void);
 void skl_uncore_cpu_init(void);
+void icl_uncore_cpu_init(void);
+void tgl_uncore_cpu_init(void);
+void adl_uncore_cpu_init(void);
+void lnl_uncore_cpu_init(void);
+void mtl_uncore_cpu_init(void);
+void ptl_uncore_cpu_init(void);
+void tgl_uncore_mmio_init(void);
+void tgl_l_uncore_mmio_init(void);
+void adl_uncore_mmio_init(void);
+void lnl_uncore_mmio_init(void);
+void ptl_uncore_mmio_init(void);
 int snb_pci2phy_map_init(int devid);
 
 /* uncore_snbep.c */
@@ -508,6 +633,18 @@ int knl_uncore_pci_init(void);
 void knl_uncore_cpu_init(void);
 int skx_uncore_pci_init(void);
 void skx_uncore_cpu_init(void);
+int snr_uncore_pci_init(void);
+void snr_uncore_cpu_init(void);
+void snr_uncore_mmio_init(void);
+int icx_uncore_pci_init(void);
+void icx_uncore_cpu_init(void);
+void icx_uncore_mmio_init(void);
+int spr_uncore_pci_init(void);
+void spr_uncore_cpu_init(void);
+void spr_uncore_mmio_init(void);
+int gnr_uncore_pci_init(void);
+void gnr_uncore_cpu_init(void);
+void gnr_uncore_mmio_init(void);
 
 /* uncore_nhmex.c */
 void nhmex_uncore_cpu_init(void);

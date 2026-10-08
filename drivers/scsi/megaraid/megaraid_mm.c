@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *			Linux MegaRAID device driver
  *
  * Copyright (c) 2003-2004  LSI Logic Corporation.
- *
- *	   This program is free software; you can redistribute it and/or
- *	   modify it under the terms of the GNU General Public License
- *	   as published by the Free Software Foundation; either version
- *	   2 of the License, or (at your option) any later version.
  *
  * FILE		: megaraid_mm.c
  * Version	: v2.20.2.7 (Jul 16 2006)
@@ -45,10 +41,6 @@ static int mraid_mm_setup_dma_pools(mraid_mmadp_t *);
 static void mraid_mm_free_adp_resources(mraid_mmadp_t *);
 static void mraid_mm_teardown_dma_pools(mraid_mmadp_t *);
 
-#ifdef CONFIG_COMPAT
-static long mraid_mm_compat_ioctl(struct file *, unsigned int, unsigned long);
-#endif
-
 MODULE_AUTHOR("LSI Logic Corporation");
 MODULE_DESCRIPTION("LSI Logic Management Module");
 MODULE_LICENSE("GPL");
@@ -72,9 +64,7 @@ static wait_queue_head_t wait_q;
 static const struct file_operations lsi_fops = {
 	.open	= mraid_mm_open,
 	.unlocked_ioctl = mraid_mm_unlocked_ioctl,
-#ifdef CONFIG_COMPAT
-	.compat_ioctl = mraid_mm_compat_ioctl,
-#endif
+	.compat_ioctl = compat_ptr_ioctl,
 	.owner	= THIS_MODULE,
 	.llseek = noop_llseek,
 };
@@ -105,7 +95,6 @@ mraid_mm_open(struct inode *inode, struct file *filep)
 
 /**
  * mraid_mm_ioctl - module entry-point for ioctls
- * @inode	: inode (ignored)
  * @filep	: file operations pointer (ignored)
  * @cmd		: ioctl command
  * @arg		: user ioctl packet
@@ -228,7 +217,6 @@ mraid_mm_unlocked_ioctl(struct file *filep, unsigned int cmd,
 {
 	int err;
 
-	/* inconsistent: mraid_mm_compat_ioctl doesn't take the BKL */
 	mutex_lock(&mraid_mm_mutex);
 	err = mraid_mm_ioctl(filep, cmd, arg);
 	mutex_unlock(&mraid_mm_mutex);
@@ -506,7 +494,7 @@ mimd_to_kioc(mimd_t __user *umimd, mraid_mmadp_t *adp, uioc_t *kioc)
 }
 
 /**
- * mraid_mm_attch_buf - Attach a free dma buffer for required size
+ * mraid_mm_attach_buf - Attach a free dma buffer for required size
  * @adp		: Adapter softstate
  * @kioc	: kioc that the buffer needs to be attached to
  * @xferlen	: required length for buffer
@@ -715,8 +703,8 @@ lld_ioctl(mraid_mmadp_t *adp, uioc_t *kioc)
 	 */
 	wait_event(wait_q, (kioc->status != -ENODATA));
 	if (timeout.timer.function) {
-		del_timer_sync(&timeout.timer);
-		destroy_timer_on_stack(&timeout.timer);
+		timer_delete_sync(&timeout.timer);
+		timer_destroy_on_stack(&timeout.timer);
 	}
 
 	/*
@@ -795,7 +783,7 @@ ioctl_done(uioc_t *kioc)
 static void
 lld_timedout(struct timer_list *t)
 {
-	struct uioc_timeout *timeout = from_timer(timeout, t, timer);
+	struct uioc_timeout *timeout = timer_container_of(timeout, t, timer);
 	uioc_t *kioc	= timeout->uioc;
 
 	kioc->status 	= -ETIME;
@@ -1026,8 +1014,7 @@ memalloc_error:
 	kfree(adapter->kioc_list);
 	kfree(adapter->mbox_list);
 
-	if (adapter->pthru_dma_pool)
-		dma_pool_destroy(adapter->pthru_dma_pool);
+	dma_pool_destroy(adapter->pthru_dma_pool);
 
 	kfree(adapter);
 
@@ -1241,25 +1228,6 @@ mraid_mm_init(void)
 	return 0;
 }
 
-
-#ifdef CONFIG_COMPAT
-/**
- * mraid_mm_compat_ioctl	- 32bit to 64bit ioctl conversion routine
- * @filep	: file operations pointer (ignored)
- * @cmd		: ioctl command
- * @arg		: user ioctl packet
- */
-static long
-mraid_mm_compat_ioctl(struct file *filep, unsigned int cmd,
-		      unsigned long arg)
-{
-	int err;
-
-	err = mraid_mm_ioctl(filep, cmd, arg);
-
-	return err;
-}
-#endif
 
 /**
  * mraid_mm_exit	- Module exit point

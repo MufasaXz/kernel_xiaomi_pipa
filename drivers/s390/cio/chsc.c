@@ -11,6 +11,7 @@
 #define KMSG_COMPONENT "cio"
 #define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
+#include <linux/export.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/init.h>
@@ -36,6 +37,23 @@ static void *sei_page;
 static void *chsc_page;
 static DEFINE_SPINLOCK(chsc_page_lock);
 
+#define SEI_VF_FLA	0xc0 /* VF flag for Full Link Address */
+#define SEI_RS_CHPID	0x4  /* 4 in RS field indicates CHPID */
+
+static BLOCKING_NOTIFIER_HEAD(chsc_notifiers);
+
+int chsc_notifier_register(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_register(&chsc_notifiers, nb);
+}
+EXPORT_SYMBOL(chsc_notifier_register);
+
+int chsc_notifier_unregister(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_unregister(&chsc_notifiers, nb);
+}
+EXPORT_SYMBOL(chsc_notifier_unregister);
+
 /**
  * chsc_error_from_response() - convert a chsc response to an error
  * @response: chsc response code
@@ -56,6 +74,7 @@ int chsc_error_from_response(int response)
 	case 0x0104:
 		return -EINVAL;
 	case 0x0004:
+	case 0x0106:		/* "Wrong Channel Parm" for the op 0x003d */
 		return -EOPNOTSUPP;
 	case 0x000b:
 	case 0x0107:		/* "Channel busy" for the op 0x003d */
@@ -63,6 +82,8 @@ int chsc_error_from_response(int response)
 	case 0x0100:
 	case 0x0102:
 		return -ENOMEM;
+	case 0x0108:		/* "HW limit exceeded" for the op 0x003d */
+		return -EUSERS;
 	default:
 		return -EIO;
 	}
@@ -179,11 +200,12 @@ EXPORT_SYMBOL_GPL(chsc_ssqd);
  * @scssc: request and response block for SADC
  * @summary_indicator_addr: summary indicator address
  * @subchannel_indicator_addr: subchannel indicator address
+ * @isc: Interruption Subclass for this subchannel
  *
  * Returns 0 on success.
  */
 int chsc_sadc(struct subchannel_id schid, struct chsc_scssc_area *scssc,
-	      u64 summary_indicator_addr, u64 subchannel_indicator_addr)
+	      dma64_t summary_indicator_addr, dma64_t subchannel_indicator_addr, u8 isc)
 {
 	memset(scssc, 0, sizeof(*scssc));
 	scssc->request.length = 0x0fe0;
@@ -195,7 +217,7 @@ int chsc_sadc(struct subchannel_id schid, struct chsc_scssc_area *scssc,
 
 	scssc->ks = PAGE_DEFAULT_KEY >> 4;
 	scssc->kc = PAGE_DEFAULT_KEY >> 4;
-	scssc->isc = QDIO_AIRQ_ISC;
+	scssc->isc = isc;
 	scssc->schid = schid;
 
 	/* enable the time delay disablement facility */
@@ -211,16 +233,16 @@ EXPORT_SYMBOL_GPL(chsc_sadc);
 
 static int s390_subchannel_remove_chpid(struct subchannel *sch, void *data)
 {
-	spin_lock_irq(sch->lock);
+	spin_lock_irq(&sch->lock);
 	if (sch->driver && sch->driver->chp_event)
 		if (sch->driver->chp_event(sch, data, CHP_OFFLINE) != 0)
 			goto out_unreg;
-	spin_unlock_irq(sch->lock);
+	spin_unlock_irq(&sch->lock);
 	return 0;
 
 out_unreg:
 	sch->lpm = 0;
-	spin_unlock_irq(sch->lock);
+	spin_unlock_irq(&sch->lock);
 	css_schedule_eval(sch->schid);
 	return 0;
 }
@@ -250,10 +272,10 @@ void chsc_chp_offline(struct chp_id chpid)
 
 static int __s390_process_res_acc(struct subchannel *sch, void *data)
 {
-	spin_lock_irq(sch->lock);
+	spin_lock_irq(&sch->lock);
 	if (sch->driver && sch->driver->chp_event)
 		sch->driver->chp_event(sch, data, CHP_ONLINE);
-	spin_unlock_irq(sch->lock);
+	spin_unlock_irq(&sch->lock);
 
 	return 0;
 }
@@ -280,6 +302,15 @@ static void s390_process_res_acc(struct chp_link *link)
 	 */
 	for_each_subchannel_staged(__s390_process_res_acc, NULL, link);
 	css_schedule_reprobe();
+}
+
+static int process_fces_event(struct subchannel *sch, void *data)
+{
+	spin_lock_irq(&sch->lock);
+	if (sch->driver && sch->driver->chp_event)
+		sch->driver->chp_event(sch, data, CHP_FCES_EVENT);
+	spin_unlock_irq(&sch->lock);
+	return 0;
 }
 
 struct chsc_sei_nt0_area {
@@ -322,36 +353,6 @@ struct chsc_sei {
 } __packed __aligned(PAGE_SIZE);
 
 /*
- * Node Descriptor as defined in SA22-7204, "Common I/O-Device Commands"
- */
-
-#define ND_VALIDITY_VALID	0
-#define ND_VALIDITY_OUTDATED	1
-#define ND_VALIDITY_INVALID	2
-
-struct node_descriptor {
-	/* Flags. */
-	union {
-		struct {
-			u32 validity:3;
-			u32 reserved:5;
-		} __packed;
-		u8 byte0;
-	} __packed;
-
-	/* Node parameters. */
-	u32 params:24;
-
-	/* Node ID. */
-	char type[6];
-	char model[3];
-	char manufacturer[3];
-	char plant[2];
-	char seq[12];
-	u16 tag;
-} __packed;
-
-/*
  * Link Incident Record as defined in SA22-7202, "ESCON I/O Interface"
  */
 
@@ -376,7 +377,7 @@ struct lir {
 #define PARAMS_LEN	10	/* PARAMS=xx,xxxxxx */
 #define NODEID_LEN	35	/* NODEID=tttttt/mdl,mmm.ppssssssssssss,xxxx */
 
-/* Copy EBCIDC text, convert to ASCII and optionally add delimiter. */
+/* Copy EBCDIC text, convert to ASCII and optionally add delimiter. */
 static char *store_ebcdic(char *dest, const char *src, unsigned long len,
 			  char delim)
 {
@@ -389,6 +390,16 @@ static char *store_ebcdic(char *dest, const char *src, unsigned long len,
 	return dest + len;
 }
 
+static void chsc_link_from_sei(struct chp_link *link,
+				struct chsc_sei_nt0_area *sei_area)
+{
+	if ((sei_area->vf & SEI_VF_FLA) != 0) {
+		link->fla	= sei_area->fla;
+		link->fla_mask	= ((sei_area->vf & SEI_VF_FLA) == SEI_VF_FLA) ?
+							0xffff : 0xff00;
+	}
+}
+
 /* Format node ID and parameters for output in LIR log message. */
 static void format_node_data(char *params, char *id, struct node_descriptor *nd)
 {
@@ -396,8 +407,8 @@ static void format_node_data(char *params, char *id, struct node_descriptor *nd)
 	memset(id, 0, NODEID_LEN);
 
 	if (nd->validity != ND_VALIDITY_VALID) {
-		strncpy(params, "n/a", PARAMS_LEN - 1);
-		strncpy(id, "n/a", NODEID_LEN - 1);
+		strscpy(params, "n/a", PARAMS_LEN);
+		strscpy(id, "n/a", NODEID_LEN);
 		return;
 	}
 
@@ -478,15 +489,7 @@ static void chsc_process_sei_res_acc(struct chsc_sei_nt0_area *sei_area)
 	}
 	memset(&link, 0, sizeof(struct chp_link));
 	link.chpid = chpid;
-	if ((sei_area->vf & 0xc0) != 0) {
-		link.fla = sei_area->fla;
-		if ((sei_area->vf & 0xc0) == 0xc0)
-			/* full link address */
-			link.fla_mask = 0xffff;
-		else
-			/* link address */
-			link.fla_mask = 0xff00;
-	}
+	chsc_link_from_sei(&link, sei_area);
 	s390_process_res_acc(&link);
 }
 
@@ -586,6 +589,43 @@ static void chsc_process_sei_scm_avail(struct chsc_sei_nt0_area *sei_area)
 			      " failed (rc=%d).\n", ret);
 }
 
+static void chsc_process_sei_ap_cfg_chg(struct chsc_sei_nt0_area *sei_area)
+{
+	CIO_CRW_EVENT(3, "chsc: ap config changed\n");
+	if (sei_area->rs != 5)
+		return;
+
+	blocking_notifier_call_chain(&chsc_notifiers,
+				     CHSC_NOTIFY_AP_CFG, NULL);
+}
+
+static void chsc_process_sei_fces_event(struct chsc_sei_nt0_area *sei_area)
+{
+	struct chp_link link;
+	struct chp_id chpid;
+	struct channel_path *chp;
+
+	CIO_CRW_EVENT(4,
+	"chsc: FCES status notification (rs=%02x, rs_id=%04x, FCES-status=%x)\n",
+		sei_area->rs, sei_area->rsid, sei_area->ccdf[0]);
+
+	if (sei_area->rs != SEI_RS_CHPID)
+		return;
+	chp_id_init(&chpid);
+	chpid.id = sei_area->rsid;
+
+	/* Ignore the event on unknown/invalid chp */
+	chp = chpid_to_chp(chpid);
+	if (!chp)
+		return;
+
+	memset(&link, 0, sizeof(struct chp_link));
+	link.chpid = chpid;
+	chsc_link_from_sei(&link, sei_area);
+
+	for_each_subchannel_staged(process_fces_event, NULL, &link);
+}
+
 static void chsc_process_sei_nt2(struct chsc_sei_nt2_area *sei_area)
 {
 	switch (sei_area->cc) {
@@ -612,6 +652,9 @@ static void chsc_process_sei_nt0(struct chsc_sei_nt0_area *sei_area)
 	case 2: /* i/o resource accessibility */
 		chsc_process_sei_res_acc(sei_area);
 		break;
+	case 3: /* ap config changed */
+		chsc_process_sei_ap_cfg_chg(sei_area);
+		break;
 	case 7: /* channel-path-availability information */
 		chsc_process_sei_chp_avail(sei_area);
 		break;
@@ -623,6 +666,9 @@ static void chsc_process_sei_nt0(struct chsc_sei_nt0_area *sei_area)
 		break;
 	case 14: /* scm available notification */
 		chsc_process_sei_scm_avail(sei_area);
+		break;
+	case 15: /* FCES event notification */
+		chsc_process_sei_fces_event(sei_area);
 		break;
 	default: /* other stuff */
 		CIO_CRW_EVENT(2, "chsc: sei nt0 unhandled cc=%d\n",
@@ -738,11 +784,11 @@ static void __s390_subchannel_vary_chpid(struct subchannel *sch,
 
 	memset(&link, 0, sizeof(struct chp_link));
 	link.chpid = chpid;
-	spin_lock_irqsave(sch->lock, flags);
+	spin_lock_irqsave(&sch->lock, flags);
 	if (sch->driver && sch->driver->chp_event)
 		sch->driver->chp_event(sch, &link,
 				       on ? CHP_VARY_ON : CHP_VARY_OFF);
-	spin_unlock_irqrestore(sch->lock, flags);
+	spin_unlock_irqrestore(&sch->lock, flags);
 }
 
 static int s390_subchannel_vary_chpid_off(struct subchannel *sch, void *data)
@@ -813,7 +859,7 @@ chsc_add_cmg_attr(struct channel_subsystem *css)
 	}
 	return ret;
 cleanup:
-	for (--i; i >= 0; i--) {
+	while (i--) {
 		if (!css->chps[i])
 			continue;
 		chp_remove_cmg_attr(css->chps[i]);
@@ -826,22 +872,22 @@ int __chsc_do_secm(struct channel_subsystem *css, int enable)
 	struct {
 		struct chsc_header request;
 		u32 operation_code : 2;
-		u32 : 30;
+		u32 : 1;
+		u32 e : 1;
+		u32 : 28;
 		u32 key : 4;
 		u32 : 28;
-		u32 zeroes1;
-		u32 cub_addr1;
-		u32 zeroes2;
-		u32 cub_addr2;
-		u32 reserved[13];
+		dma64_t cub[CSS_NUM_CUB_PAGES];
+		dma64_t ecub[CSS_NUM_ECUB_PAGES];
+		u32 reserved[5];
 		struct chsc_header response;
 		u32 status : 8;
 		u32 : 4;
 		u32 fmt : 4;
 		u32 : 16;
-	} *secm_area;
+	} __packed *secm_area;
 	unsigned long flags;
-	int ret, ccode;
+	int ret, ccode, i;
 
 	spin_lock_irqsave(&chsc_page_lock, flags);
 	memset(chsc_page, 0, PAGE_SIZE);
@@ -850,8 +896,12 @@ int __chsc_do_secm(struct channel_subsystem *css, int enable)
 	secm_area->request.code = 0x0016;
 
 	secm_area->key = PAGE_DEFAULT_KEY >> 4;
-	secm_area->cub_addr1 = (u64)(unsigned long)css->cub_addr1;
-	secm_area->cub_addr2 = (u64)(unsigned long)css->cub_addr2;
+	secm_area->e = 1;
+
+	for (i = 0; i < CSS_NUM_CUB_PAGES; i++)
+		secm_area->cub[i] = (__force dma64_t)virt_to_dma32(css->cub[i]);
+	for (i = 0; i < CSS_NUM_ECUB_PAGES; i++)
+		secm_area->ecub[i] = virt_to_dma64(css->ecub[i]);
 
 	secm_area->operation_code = enable ? 0 : 1;
 
@@ -877,19 +927,47 @@ out:
 	return ret;
 }
 
+static int cub_alloc(struct channel_subsystem *css)
+{
+	int i;
+
+	for (i = 0; i < CSS_NUM_CUB_PAGES; i++) {
+		css->cub[i] = (void *)get_zeroed_page(GFP_KERNEL | GFP_DMA);
+		if (!css->cub[i])
+			return -ENOMEM;
+	}
+	for (i = 0; i < CSS_NUM_ECUB_PAGES; i++) {
+		css->ecub[i] = (void *)get_zeroed_page(GFP_KERNEL);
+		if (!css->ecub[i])
+			return -ENOMEM;
+	}
+
+	return 0;
+}
+
+static void cub_free(struct channel_subsystem *css)
+{
+	int i;
+
+	for (i = 0; i < CSS_NUM_CUB_PAGES; i++) {
+		free_page((unsigned long)css->cub[i]);
+		css->cub[i] = NULL;
+	}
+	for (i = 0; i < CSS_NUM_ECUB_PAGES; i++) {
+		free_page((unsigned long)css->ecub[i]);
+		css->ecub[i] = NULL;
+	}
+}
+
 int
 chsc_secm(struct channel_subsystem *css, int enable)
 {
 	int ret;
 
 	if (enable && !css->cm_enabled) {
-		css->cub_addr1 = (void *)get_zeroed_page(GFP_KERNEL | GFP_DMA);
-		css->cub_addr2 = (void *)get_zeroed_page(GFP_KERNEL | GFP_DMA);
-		if (!css->cub_addr1 || !css->cub_addr2) {
-			free_page((unsigned long)css->cub_addr1);
-			free_page((unsigned long)css->cub_addr2);
-			return -ENOMEM;
-		}
+		ret = cub_alloc(css);
+		if (ret)
+			goto out;
 	}
 	ret = __chsc_do_secm(css, enable);
 	if (!ret) {
@@ -903,10 +981,11 @@ chsc_secm(struct channel_subsystem *css, int enable)
 		} else
 			chsc_remove_cmg_attr(css);
 	}
-	if (!css->cm_enabled) {
-		free_page((unsigned long)css->cub_addr1);
-		free_page((unsigned long)css->cub_addr2);
-	}
+
+out:
+	if (!css->cm_enabled)
+		cub_free(css);
+
 	return ret;
 }
 
@@ -988,6 +1067,18 @@ chsc_initialize_cmg_chars(struct channel_path *chp, u8 cmcv,
 	}
 }
 
+static unsigned long scmc_get_speed(u32 s, u32 p)
+{
+	unsigned long speed = s;
+
+	if (!p)
+		p = 8;
+	while (p--)
+		speed *= 10;
+
+	return speed;
+}
+
 int chsc_get_channel_measurement_chars(struct channel_path *chp)
 {
 	unsigned long flags;
@@ -1002,20 +1093,13 @@ int chsc_get_channel_measurement_chars(struct channel_path *chp)
 		u32 zeroes1;
 		struct chsc_header response;
 		u32 zeroes2;
-		u32 not_valid : 1;
-		u32 shared : 1;
-		u32 : 22;
-		u32 chpid : 8;
-		u32 cmcv : 5;
-		u32 : 11;
-		u32 cmgq : 8;
-		u32 cmg : 8;
-		u32 zeroes3;
-		u32 data[NR_MEASUREMENT_CHARS];
+		struct cmg_cmcb cmcb;
 	} *scmc_area;
 
 	chp->shared = -1;
 	chp->cmg = -1;
+	chp->extended = 0;
+	chp->speed = 0;
 
 	if (!css_chsc_characteristics.scmc || !css_chsc_characteristics.secm)
 		return -EINVAL;
@@ -1040,17 +1124,16 @@ int chsc_get_channel_measurement_chars(struct channel_path *chp)
 			      scmc_area->response.code);
 		goto out;
 	}
-	if (scmc_area->not_valid)
+	chp->cmcb = scmc_area->cmcb;
+	if (scmc_area->cmcb.not_valid)
 		goto out;
 
-	chp->cmg = scmc_area->cmg;
-	chp->shared = scmc_area->shared;
-	if (chp->cmg != 2 && chp->cmg != 3) {
-		/* No cmg-dependent data. */
-		goto out;
-	}
-	chsc_initialize_cmg_chars(chp, scmc_area->cmcv,
-				  (struct cmg_chars *) &scmc_area->data);
+	chp->cmg = scmc_area->cmcb.cmg;
+	chp->shared = scmc_area->cmcb.shared;
+	chp->extended = scmc_area->cmcb.extended;
+	chp->speed = scmc_get_speed(scmc_area->cmcb.cmgs, scmc_area->cmcb.cmgp);
+	chsc_initialize_cmg_chars(chp, scmc_area->cmcb.cmcv,
+				  (struct cmg_chars *)&scmc_area->cmcb.data);
 out:
 	spin_unlock_irqrestore(&chsc_page_lock, flags);
 	return ret;
@@ -1060,8 +1143,8 @@ int __init chsc_init(void)
 {
 	int ret;
 
-	sei_page = (void *)get_zeroed_page(GFP_KERNEL | GFP_DMA);
-	chsc_page = (void *)get_zeroed_page(GFP_KERNEL | GFP_DMA);
+	sei_page = (void *)get_zeroed_page(GFP_KERNEL);
+	chsc_page = (void *)get_zeroed_page(GFP_KERNEL);
 	if (!sei_page || !chsc_page) {
 		ret = -ENOMEM;
 		goto out_err;
@@ -1127,7 +1210,7 @@ int chsc_enable_facility(int operation_code)
 	return ret;
 }
 
-int __init chsc_get_cssid(int idx)
+int __init chsc_get_cssid_iid(int idx, u8 *cssid, u8 *iid)
 {
 	struct {
 		struct chsc_header request;
@@ -1138,8 +1221,9 @@ int __init chsc_get_cssid(int idx)
 		u32 reserved2[3];
 		struct {
 			u8 cssid;
-			u32 : 24;
-		} list[0];
+			u8 iid;
+			u32 : 16;
+		} list[];
 	} *sdcal_area;
 	int ret;
 
@@ -1164,8 +1248,10 @@ int __init chsc_get_cssid(int idx)
 	}
 
 	if ((addr_t) &sdcal_area->list[idx] <
-	    (addr_t) &sdcal_area->response + sdcal_area->response.length)
-		ret = sdcal_area->list[idx].cssid;
+	    (addr_t) &sdcal_area->response + sdcal_area->response.length) {
+		*cssid = sdcal_area->list[idx].cssid;
+		*iid = sdcal_area->list[idx].iid;
+	}
 	else
 		ret = -ENODEV;
 exit:
@@ -1221,7 +1307,7 @@ exit:
 EXPORT_SYMBOL_GPL(css_general_characteristics);
 EXPORT_SYMBOL_GPL(css_chsc_characteristics);
 
-int chsc_sstpc(void *page, unsigned int op, u16 ctrl, u64 *clock_delta)
+int chsc_sstpc(void *page, unsigned int op, u16 ctrl, long *clock_delta)
 {
 	struct {
 		struct chsc_header request;
@@ -1232,7 +1318,7 @@ int chsc_sstpc(void *page, unsigned int op, u16 ctrl, u64 *clock_delta)
 		unsigned int rsvd2[5];
 		struct chsc_header response;
 		unsigned int rsvd3[3];
-		u64 clock_delta;
+		s64 clock_delta;
 		unsigned int rsvd4[2];
 	} *rr;
 	int rc;
@@ -1266,6 +1352,27 @@ int chsc_sstpi(void *page, void *result, size_t size)
 	rr = page;
 	rr->request.length = 0x0010;
 	rr->request.code = 0x0038;
+	rc = chsc(rr);
+	if (rc)
+		return -EIO;
+	memcpy(result, &rr->data, size);
+	return (rr->response.code == 0x0001) ? 0 : -EIO;
+}
+
+int chsc_stzi(void *page, void *result, size_t size)
+{
+	struct {
+		struct chsc_header request;
+		unsigned int rsvd0[3];
+		struct chsc_header response;
+		char data[];
+	} *rr;
+	int rc;
+
+	memset(page, 0, PAGE_SIZE);
+	rr = page;
+	rr->request.length = 0x0010;
+	rr->request.code = 0x003e;
 	rc = chsc(rr);
 	if (rc)
 		return -EIO;
@@ -1350,33 +1457,151 @@ out:
 EXPORT_SYMBOL_GPL(chsc_scm_info);
 
 /**
- * chsc_pnso_brinfo() - Perform Network-Subchannel Operation, Bridge Info.
+ * chsc_pnso() - Perform Network-Subchannel Operation
  * @schid:		id of the subchannel on which PNSO is performed
- * @brinfo_area:	request and response block for the operation
+ * @pnso_area:		request and response block for the operation
+ * @oc:			Operation Code
  * @resume_token:	resume token for multiblock response
  * @cnc:		Boolean change-notification control
  *
- * brinfo_area must be allocated by the caller with get_zeroed_page(GFP_KERNEL)
+ * pnso_area must be allocated by the caller with get_zeroed_page(GFP_KERNEL)
  *
  * Returns 0 on success.
  */
-int chsc_pnso_brinfo(struct subchannel_id schid,
-		struct chsc_pnso_area *brinfo_area,
-		struct chsc_brinfo_resume_token resume_token,
-		int cnc)
+int chsc_pnso(struct subchannel_id schid, struct chsc_pnso_area *pnso_area,
+	      u8 oc, struct chsc_pnso_resume_token resume_token, int cnc)
 {
-	memset(brinfo_area, 0, sizeof(*brinfo_area));
-	brinfo_area->request.length = 0x0030;
-	brinfo_area->request.code = 0x003d; /* network-subchannel operation */
-	brinfo_area->m	   = schid.m;
-	brinfo_area->ssid  = schid.ssid;
-	brinfo_area->sch   = schid.sch_no;
-	brinfo_area->cssid = schid.cssid;
-	brinfo_area->oc    = 0; /* Store-network-bridging-information list */
-	brinfo_area->resume_token = resume_token;
-	brinfo_area->n	   = (cnc != 0);
-	if (chsc(brinfo_area))
+	memset(pnso_area, 0, sizeof(*pnso_area));
+	pnso_area->request.length = 0x0030;
+	pnso_area->request.code = 0x003d; /* network-subchannel operation */
+	pnso_area->m	   = schid.m;
+	pnso_area->ssid  = schid.ssid;
+	pnso_area->sch	 = schid.sch_no;
+	pnso_area->cssid = schid.cssid;
+	pnso_area->oc	 = oc;
+	pnso_area->resume_token = resume_token;
+	pnso_area->n	   = (cnc != 0);
+	if (chsc(pnso_area))
 		return -EIO;
-	return chsc_error_from_response(brinfo_area->response.code);
+	return chsc_error_from_response(pnso_area->response.code);
 }
-EXPORT_SYMBOL_GPL(chsc_pnso_brinfo);
+
+int chsc_sgib(u32 origin)
+{
+	struct {
+		struct chsc_header request;
+		u16 op;
+		u8  reserved01[2];
+		u8  reserved02:4;
+		u8  fmt:4;
+		u8  reserved03[7];
+		/* operation data area begin */
+		u8  reserved04[4];
+		u32 gib_origin;
+		u8  reserved05[10];
+		u8  aix;
+		u8  reserved06[4029];
+		struct chsc_header response;
+		u8  reserved07[4];
+	} *sgib_area;
+	int ret;
+
+	spin_lock_irq(&chsc_page_lock);
+	memset(chsc_page, 0, PAGE_SIZE);
+	sgib_area = chsc_page;
+	sgib_area->request.length = 0x0fe0;
+	sgib_area->request.code = 0x0021;
+	sgib_area->op = 0x1;
+	sgib_area->gib_origin = origin;
+
+	ret = chsc(sgib_area);
+	if (ret == 0)
+		ret = chsc_error_from_response(sgib_area->response.code);
+	spin_unlock_irq(&chsc_page_lock);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(chsc_sgib);
+
+#define SCUD_REQ_LEN	0x10 /* SCUD request block length */
+#define SCUD_REQ_CMD	0x4b /* SCUD Command Code */
+
+struct chse_cudb {
+	u16 flags:8;
+	u16 chp_valid:8;
+	u16 cu;
+	u32 esm_valid:8;
+	u32:24;
+	u8 chpid[8];
+	u32:32;
+	u32:32;
+	u8 esm[8];
+	u32 efla[8];
+} __packed;
+
+struct chsc_scud {
+	struct chsc_header request;
+	u16:4;
+	u16 fmt:4;
+	u16 cssid:8;
+	u16 first_cu;
+	u16:16;
+	u16 last_cu;
+	u32:32;
+	struct chsc_header response;
+	u16:4;
+	u16 fmt_resp:4;
+	u32:24;
+	struct chse_cudb cudb[];
+} __packed;
+
+/**
+ * chsc_scud() - Store control-unit description.
+ * @cu:		number of the control-unit
+ * @esm:	8 1-byte endpoint security mode values
+ * @esm_valid:	validity mask for @esm
+ *
+ * Interface to retrieve information about the endpoint security
+ * modes for up to 8 paths of a control unit.
+ *
+ * Returns 0 on success.
+ */
+int chsc_scud(u16 cu, u64 *esm, u8 *esm_valid)
+{
+	struct chsc_scud *scud = chsc_page;
+	int ret;
+
+	spin_lock_irq(&chsc_page_lock);
+	memset(chsc_page, 0, PAGE_SIZE);
+	scud->request.length = SCUD_REQ_LEN;
+	scud->request.code = SCUD_REQ_CMD;
+	scud->fmt = 0;
+	scud->cssid = 0;
+	scud->first_cu = cu;
+	scud->last_cu = cu;
+
+	ret = chsc(scud);
+	if (!ret)
+		ret = chsc_error_from_response(scud->response.code);
+
+	if (!ret && (scud->response.length <= 8 || scud->fmt_resp != 0
+			|| !(scud->cudb[0].flags & 0x80)
+			|| scud->cudb[0].cu != cu)) {
+
+		CIO_MSG_EVENT(2, "chsc: scud failed rc=%04x, L2=%04x "
+			"FMT=%04x, cudb.flags=%02x, cudb.cu=%04x",
+			scud->response.code, scud->response.length,
+			scud->fmt_resp, scud->cudb[0].flags, scud->cudb[0].cu);
+		ret = -EINVAL;
+	}
+
+	if (ret)
+		goto out;
+
+	memcpy(esm, scud->cudb[0].esm, sizeof(*esm));
+	*esm_valid = scud->cudb[0].esm_valid;
+out:
+	spin_unlock_irq(&chsc_page_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(chsc_scud);

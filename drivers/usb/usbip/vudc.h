@@ -115,7 +115,7 @@ struct vudc_device {
 	struct list_head dev_entry;
 };
 
-extern const struct attribute_group vudc_attr_group;
+extern const struct attribute_group *vudc_groups[];
 
 /* visible everywhere */
 
@@ -173,6 +173,6 @@ struct vudc_device *alloc_vudc_device(int devid);
 void put_vudc_device(struct vudc_device *udc_dev);
 
 int vudc_probe(struct platform_device *pdev);
-int vudc_remove(struct platform_device *pdev);
+void vudc_remove(struct platform_device *pdev);
 
 #endif /* __USBIP_VUDC_H */

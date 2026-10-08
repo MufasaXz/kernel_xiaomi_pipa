@@ -7,14 +7,8 @@
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
 #include <linux/poll.h>
-#include <linux/platform_device.h>
-#include <linux/module.h>
 
 #define SERPORT_ACTIVE		1
-
-static char *pdev_tty_port;
-module_param(pdev_tty_port, charp, 0644);
-MODULE_PARM_DESC(pdev_tty_port, "platform device tty port to claim");
 
 struct serport {
 	struct tty_port *port;
@@ -28,24 +22,22 @@ struct serport {
  * Callback functions from the tty port.
  */
 
-static int ttyport_receive_buf(struct tty_port *port, const unsigned char *cp,
-				const unsigned char *fp, size_t count)
+static size_t ttyport_receive_buf(struct tty_port *port, const u8 *cp,
+				  const u8 *fp, size_t count)
 {
 	struct serdev_controller *ctrl = port->client_data;
 	struct serport *serport = serdev_controller_get_drvdata(ctrl);
-	int ret;
+	size_t ret;
 
 	if (!test_bit(SERPORT_ACTIVE, &serport->flags))
 		return 0;
 
 	ret = serdev_controller_receive_buf(ctrl, cp, count);
 
-	dev_WARN_ONCE(&ctrl->dev, ret < 0 || ret > count,
-				"receive_buf returns %d (count = %zu)\n",
+	dev_WARN_ONCE(&ctrl->dev, ret > count,
+				"receive_buf returns %zu (count = %zu)\n",
 				ret, count);
-	if (ret < 0)
-		return 0;
-	else if (ret > count)
+	if (ret > count)
 		return count;
 
 	return ret;
@@ -80,7 +72,7 @@ static const struct tty_port_client_operations client_ops = {
  * Callback functions from the serdev core.
  */
 
-static int ttyport_write_buf(struct serdev_controller *ctrl, const unsigned char *data, size_t len)
+static ssize_t ttyport_write_buf(struct serdev_controller *ctrl, const u8 *data, size_t len)
 {
 	struct serport *serport = serdev_controller_get_drvdata(ctrl);
 	struct tty_struct *tty = serport->tty;
@@ -98,14 +90,6 @@ static void ttyport_write_flush(struct serdev_controller *ctrl)
 	struct tty_struct *tty = serport->tty;
 
 	tty_driver_flush_buffer(tty);
-}
-
-static int ttyport_write_room(struct serdev_controller *ctrl)
-{
-	struct serport *serport = serdev_controller_get_drvdata(ctrl);
-	struct tty_struct *tty = serport->tty;
-
-	return tty_write_room(tty);
 }
 
 static int ttyport_open(struct serdev_controller *ctrl)
@@ -237,9 +221,9 @@ static int ttyport_get_tiocm(struct serdev_controller *ctrl)
 	struct tty_struct *tty = serport->tty;
 
 	if (!tty->ops->tiocmget)
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 
-	return tty->driver->ops->tiocmget(tty);
+	return tty->ops->tiocmget(tty);
 }
 
 static int ttyport_set_tiocm(struct serdev_controller *ctrl, unsigned int set, unsigned int clear)
@@ -248,15 +232,25 @@ static int ttyport_set_tiocm(struct serdev_controller *ctrl, unsigned int set, u
 	struct tty_struct *tty = serport->tty;
 
 	if (!tty->ops->tiocmset)
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 
-	return tty->driver->ops->tiocmset(tty, set, clear);
+	return tty->ops->tiocmset(tty, set, clear);
+}
+
+static int ttyport_break_ctl(struct serdev_controller *ctrl, unsigned int break_state)
+{
+	struct serport *serport = serdev_controller_get_drvdata(ctrl);
+	struct tty_struct *tty = serport->tty;
+
+	if (!tty->ops->break_ctl)
+		return -EOPNOTSUPP;
+
+	return tty->ops->break_ctl(tty, break_state);
 }
 
 static const struct serdev_controller_ops ctrl_ops = {
 	.write_buf = ttyport_write_buf,
 	.write_flush = ttyport_write_flush,
-	.write_room = ttyport_write_room,
 	.open = ttyport_open,
 	.close = ttyport_close,
 	.set_flow_control = ttyport_set_flow_control,
@@ -265,21 +259,22 @@ static const struct serdev_controller_ops ctrl_ops = {
 	.wait_until_sent = ttyport_wait_until_sent,
 	.get_tiocm = ttyport_get_tiocm,
 	.set_tiocm = ttyport_set_tiocm,
+	.break_ctl = ttyport_break_ctl,
 };
 
 struct device *serdev_tty_port_register(struct tty_port *port,
+					struct device *host,
 					struct device *parent,
 					struct tty_driver *drv, int idx)
 {
 	struct serdev_controller *ctrl;
 	struct serport *serport;
-	bool platform = false;
 	int ret;
 
 	if (!port || !drv || !parent)
 		return ERR_PTR(-ENODEV);
 
-	ctrl = serdev_controller_alloc(parent, sizeof(struct serport));
+	ctrl = serdev_controller_alloc(host, parent, sizeof(struct serport));
 	if (!ctrl)
 		return ERR_PTR(-ENOMEM);
 	serport = serdev_controller_get_drvdata(ctrl);
@@ -293,28 +288,7 @@ struct device *serdev_tty_port_register(struct tty_port *port,
 	port->client_ops = &client_ops;
 	port->client_data = ctrl;
 
-	/* There is not always a way to bind specific platform devices because
-	 * they may be defined on platforms without DT or ACPI. When dealing
-	 * with a platform devices, do not allow direct binding unless it is
-	 * whitelisted by module parameter. If a platform device is otherwise
-	 * described by DT or ACPI it will still be bound and this check will
-	 * be ignored.
-	 */
-	if (parent->bus == &platform_bus_type) {
-		if (pdev_tty_port) {
-			unsigned long pdev_idx;
-			int tty_len = strlen(drv->name);
-
-			if (!strncmp(pdev_tty_port, drv->name, tty_len)) {
-				if (!kstrtoul(pdev_tty_port + tty_len, 10,
-					     &pdev_idx) && pdev_idx == idx) {
-					platform = true;
-				}
-			}
-		}
-	}
-
-	ret = serdev_controller_add_platform(ctrl, platform);
+	ret = serdev_controller_add(ctrl);
 	if (ret)
 		goto err_reset_data;
 

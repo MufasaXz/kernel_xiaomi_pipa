@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * finite state machine implementation
  *
@@ -6,16 +7,6 @@
  * Thanks to    Jan den Ouden
  *              Fritz Elfert
  * Copyright 2008  by Karsten Keil <kkeil@novell.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #include <linux/kernel.h>
@@ -104,7 +95,7 @@ EXPORT_SYMBOL(mISDN_FsmChangeState);
 static void
 FsmExpireTimer(struct timer_list *t)
 {
-	struct FsmTimer *ft = from_timer(ft, t, tl);
+	struct FsmTimer *ft = timer_container_of(ft, t, tl);
 #if FSM_TIMER_DEBUG
 	if (ft->fi->debug)
 		ft->fi->printdebug(ft->fi, "FsmExpireTimer %lx", (long) ft);
@@ -132,7 +123,7 @@ mISDN_FsmDelTimer(struct FsmTimer *ft, int where)
 		ft->fi->printdebug(ft->fi, "mISDN_FsmDelTimer %lx %d",
 				   (long) ft, where);
 #endif
-	del_timer(&ft->tl);
+	timer_delete(&ft->tl);
 }
 EXPORT_SYMBOL(mISDN_FsmDelTimer);
 
@@ -176,7 +167,7 @@ mISDN_FsmRestartTimer(struct FsmTimer *ft,
 #endif
 
 	if (timer_pending(&ft->tl))
-		del_timer(&ft->tl);
+		timer_delete(&ft->tl);
 	ft->event = event;
 	ft->arg = arg;
 	ft->tl.expires = jiffies + (millisec * HZ) / 1000;

@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * This file is part of UBIFS.
  *
  * Copyright (C) 2006-2008 Nokia Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc., 51
- * Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  *
  * Authors: Adrian Hunter
  *          Artem Bityutskiy (Битюцкий Артём)
@@ -281,7 +269,7 @@ void ubifs_add_to_cat(struct ubifs_info *c, struct ubifs_lprops *lprops,
 			break;
 		/* No more room on heap so make it un-categorized */
 		cat = LPROPS_UNCAT;
-		/* Fall through */
+		fallthrough;
 	case LPROPS_UNCAT:
 		list_add(&lprops->list, &c->uncat_list);
 		break;
@@ -325,7 +313,7 @@ static void ubifs_remove_from_cat(struct ubifs_info *c,
 	case LPROPS_FREEABLE:
 		c->freeable_cnt -= 1;
 		ubifs_assert(c, c->freeable_cnt >= 0);
-		/* Fall through */
+		fallthrough;
 	case LPROPS_UNCAT:
 	case LPROPS_EMPTY:
 	case LPROPS_FRDI_IDX:
@@ -1017,7 +1005,7 @@ out:
  * @c: the UBIFS file-system description object
  * @lp: LEB properties to scan
  * @in_tree: whether the LEB properties are in main memory
- * @lst: lprops statistics to update
+ * @arg: lprops statistics to update
  *
  * This function returns a code that indicates whether the scan should continue
  * (%LPT_SCAN_CONTINUE), whether the LEB properties should be added to the tree
@@ -1026,8 +1014,9 @@ out:
  */
 static int scan_check_cb(struct ubifs_info *c,
 			 const struct ubifs_lprops *lp, int in_tree,
-			 struct ubifs_lp_stats *lst)
+			 void *arg)
 {
+	struct ubifs_lp_stats *lst = arg;
 	struct ubifs_scan_leb *sleb;
 	struct ubifs_scan_node *snod;
 	int cat, lnum = lp->lnum, is_idx = 0, used = 0, free, dirty, ret;
@@ -1281,8 +1270,7 @@ int dbg_check_lprops(struct ubifs_info *c)
 
 	memset(&lst, 0, sizeof(struct ubifs_lp_stats));
 	err = ubifs_lpt_scan_nolock(c, c->main_first, c->leb_cnt - 1,
-				    (ubifs_lpt_scan_callback)scan_check_cb,
-				    &lst);
+				    scan_check_cb, &lst);
 	if (err && err != -ENOSPC)
 		goto out;
 

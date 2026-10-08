@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  drivers/cpufreq/cpufreq_conservative.c
  *
@@ -5,10 +6,6 @@
  *            (C)  2003 Venkatesh Pallipadi <venkatesh.pallipadi@intel.com>.
  *                      Jun Nakajima <jun.nakajima@intel.com>
  *            (C)  2009 Alexander Clouter <alex@digriz.org.uk>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/slab.h>
@@ -114,7 +111,8 @@ static unsigned int cs_dbs_update(struct cpufreq_policy *policy)
 		if (requested_freq > policy->max)
 			requested_freq = policy->max;
 
-		__cpufreq_driver_target(policy, requested_freq, CPUFREQ_RELATION_H);
+		__cpufreq_driver_target(policy, requested_freq,
+					CPUFREQ_RELATION_HE);
 		dbs_info->requested_freq = requested_freq;
 		goto out;
 	}
@@ -137,7 +135,8 @@ static unsigned int cs_dbs_update(struct cpufreq_policy *policy)
 		else
 			requested_freq = policy->min;
 
-		__cpufreq_driver_target(policy, requested_freq, CPUFREQ_RELATION_L);
+		__cpufreq_driver_target(policy, requested_freq,
+					CPUFREQ_RELATION_LE);
 		dbs_info->requested_freq = requested_freq;
 	}
 
@@ -147,65 +146,64 @@ static unsigned int cs_dbs_update(struct cpufreq_policy *policy)
 
 /************************** sysfs interface ************************/
 
-static ssize_t store_sampling_down_factor(struct gov_attr_set *attr_set,
+static ssize_t sampling_down_factor_store(struct gov_attr_set *attr_set,
 					  const char *buf, size_t count)
 {
 	struct dbs_data *dbs_data = to_dbs_data(attr_set);
 	unsigned int input;
 	int ret;
-	ret = sscanf(buf, "%u", &input);
+	ret = kstrtouint(buf, 0, &input);
 
-	if (ret != 1 || input > MAX_SAMPLING_DOWN_FACTOR || input < 1)
+	if (ret || input > MAX_SAMPLING_DOWN_FACTOR || input < 1)
 		return -EINVAL;
 
 	dbs_data->sampling_down_factor = input;
 	return count;
 }
 
-static ssize_t store_up_threshold(struct gov_attr_set *attr_set,
+static ssize_t up_threshold_store(struct gov_attr_set *attr_set,
 				  const char *buf, size_t count)
 {
 	struct dbs_data *dbs_data = to_dbs_data(attr_set);
 	struct cs_dbs_tuners *cs_tuners = dbs_data->tuners;
 	unsigned int input;
 	int ret;
-	ret = sscanf(buf, "%u", &input);
+	ret = kstrtouint(buf, 0, &input);
 
-	if (ret != 1 || input > 100 || input <= cs_tuners->down_threshold)
+	if (ret || input > 100 || input <= cs_tuners->down_threshold)
 		return -EINVAL;
 
 	dbs_data->up_threshold = input;
 	return count;
 }
 
-static ssize_t store_down_threshold(struct gov_attr_set *attr_set,
+static ssize_t down_threshold_store(struct gov_attr_set *attr_set,
 				    const char *buf, size_t count)
 {
 	struct dbs_data *dbs_data = to_dbs_data(attr_set);
 	struct cs_dbs_tuners *cs_tuners = dbs_data->tuners;
 	unsigned int input;
 	int ret;
-	ret = sscanf(buf, "%u", &input);
+	ret = kstrtouint(buf, 0, &input);
 
 	/* cannot be lower than 1 otherwise freq will not fall */
-	if (ret != 1 || input < 1 || input > 100 ||
-			input >= dbs_data->up_threshold)
+	if (ret || input < 1 || input >= dbs_data->up_threshold)
 		return -EINVAL;
 
 	cs_tuners->down_threshold = input;
 	return count;
 }
 
-static ssize_t store_ignore_nice_load(struct gov_attr_set *attr_set,
+static ssize_t ignore_nice_load_store(struct gov_attr_set *attr_set,
 				      const char *buf, size_t count)
 {
 	struct dbs_data *dbs_data = to_dbs_data(attr_set);
 	unsigned int input;
 	int ret;
 
-	ret = sscanf(buf, "%u", &input);
-	if (ret != 1)
-		return -EINVAL;
+	ret = kstrtouint(buf, 0, &input);
+	if (ret)
+		return ret;
 
 	if (input > 1)
 		input = 1;
@@ -221,17 +219,17 @@ static ssize_t store_ignore_nice_load(struct gov_attr_set *attr_set,
 	return count;
 }
 
-static ssize_t store_freq_step(struct gov_attr_set *attr_set, const char *buf,
+static ssize_t freq_step_store(struct gov_attr_set *attr_set, const char *buf,
 			       size_t count)
 {
 	struct dbs_data *dbs_data = to_dbs_data(attr_set);
 	struct cs_dbs_tuners *cs_tuners = dbs_data->tuners;
 	unsigned int input;
 	int ret;
-	ret = sscanf(buf, "%u", &input);
+	ret = kstrtouint(buf, 0, &input);
 
-	if (ret != 1)
-		return -EINVAL;
+	if (ret)
+		return ret;
 
 	if (input > 100)
 		input = 100;
@@ -258,7 +256,7 @@ gov_attr_rw(ignore_nice_load);
 gov_attr_rw(down_threshold);
 gov_attr_rw(freq_step);
 
-static struct attribute *cs_attributes[] = {
+static struct attribute *cs_attrs[] = {
 	&sampling_rate.attr,
 	&sampling_down_factor.attr,
 	&up_threshold.attr,
@@ -267,6 +265,7 @@ static struct attribute *cs_attributes[] = {
 	&freq_step.attr,
 	NULL
 };
+ATTRIBUTE_GROUPS(cs);
 
 /************************** sysfs end ************************/
 
@@ -314,28 +313,30 @@ static void cs_start(struct cpufreq_policy *policy)
 	dbs_info->requested_freq = policy->cur;
 }
 
+static void cs_limits(struct cpufreq_policy *policy)
+{
+	struct cs_policy_dbs_info *dbs_info = to_dbs_info(policy->governor_data);
+
+	/*
+	 * The limits have changed, so may have the current frequency. Reset
+	 * requested_freq to avoid any unintended outcomes due to the mismatch.
+	 */
+	dbs_info->requested_freq = policy->cur;
+}
+
 static struct dbs_governor cs_governor = {
 	.gov = CPUFREQ_DBS_GOVERNOR_INITIALIZER("conservative"),
-	.kobj_type = { .default_attrs = cs_attributes },
+	.kobj_type = { .default_groups = cs_groups },
 	.gov_dbs_update = cs_dbs_update,
 	.alloc = cs_alloc,
 	.free = cs_free,
 	.init = cs_init,
 	.exit = cs_exit,
 	.start = cs_start,
+	.limits = cs_limits,
 };
 
-#define CPU_FREQ_GOV_CONSERVATIVE	(&cs_governor.gov)
-
-static int __init cpufreq_gov_dbs_init(void)
-{
-	return cpufreq_register_governor(CPU_FREQ_GOV_CONSERVATIVE);
-}
-
-static void __exit cpufreq_gov_dbs_exit(void)
-{
-	cpufreq_unregister_governor(CPU_FREQ_GOV_CONSERVATIVE);
-}
+#define CPU_FREQ_GOV_CONSERVATIVE	(cs_governor.gov)
 
 MODULE_AUTHOR("Alexander Clouter <alex@digriz.org.uk>");
 MODULE_DESCRIPTION("'cpufreq_conservative' - A dynamic cpufreq governor for "
@@ -346,11 +347,9 @@ MODULE_LICENSE("GPL");
 #ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_CONSERVATIVE
 struct cpufreq_governor *cpufreq_default_governor(void)
 {
-	return CPU_FREQ_GOV_CONSERVATIVE;
+	return &CPU_FREQ_GOV_CONSERVATIVE;
 }
-
-fs_initcall(cpufreq_gov_dbs_init);
-#else
-module_init(cpufreq_gov_dbs_init);
 #endif
-module_exit(cpufreq_gov_dbs_exit);
+
+cpufreq_governor_init(CPU_FREQ_GOV_CONSERVATIVE);
+cpufreq_governor_exit(CPU_FREQ_GOV_CONSERVATIVE);

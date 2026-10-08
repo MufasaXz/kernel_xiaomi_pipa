@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * IMG Multi-threaded DMA Controller (MDC)
  *
  * Copyright (C) 2009,2012,2013 Imagination Technologies Ltd.
  * Copyright (C) 2014 Google, Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
  */
 
 #include <linux/clk.h>
@@ -20,7 +17,6 @@
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/of_dma.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -889,7 +885,6 @@ static int img_mdc_runtime_resume(struct device *dev)
 static int mdc_dma_probe(struct platform_device *pdev)
 {
 	struct mdc_dma *mdma;
-	struct resource *res;
 	unsigned int i;
 	u32 val;
 	int ret;
@@ -901,8 +896,7 @@ static int mdc_dma_probe(struct platform_device *pdev)
 
 	mdma->soc = of_device_get_match_data(&pdev->dev);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	mdma->regs = devm_ioremap_resource(&pdev->dev, res);
+	mdma->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(mdma->regs))
 		return PTR_ERR(mdma->regs);
 
@@ -1023,7 +1017,7 @@ suspend:
 	return ret;
 }
 
-static int mdc_dma_remove(struct platform_device *pdev)
+static void mdc_dma_remove(struct platform_device *pdev)
 {
 	struct mdc_dma *mdma = platform_get_drvdata(pdev);
 	struct mdc_chan *mchan, *next;
@@ -1043,8 +1037,6 @@ static int mdc_dma_remove(struct platform_device *pdev)
 	pm_runtime_disable(&pdev->dev);
 	if (!pm_runtime_status_suspended(&pdev->dev))
 		img_mdc_runtime_suspend(&pdev->dev);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -1081,7 +1073,7 @@ static struct platform_driver mdc_dma_driver = {
 	.driver = {
 		.name = "img-mdc-dma",
 		.pm = &img_mdc_pm_ops,
-		.of_match_table = of_match_ptr(mdc_dma_of_match),
+		.of_match_table = mdc_dma_of_match,
 	},
 	.probe = mdc_dma_probe,
 	.remove = mdc_dma_remove,

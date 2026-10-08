@@ -1,20 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Backlight driver for Pandora handheld.
  * Pandora uses TWL4030 PWM0 -> TPS61161 combo for control backlight.
  * Based on pwm_bl.c
  *
  * Copyright 2009,2012 Gražvydas Ignotas <notasas@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
 #include <linux/delay.h>
-#include <linux/fb.h>
 #include <linux/backlight.h>
 #include <linux/mfd/twl.h>
 #include <linux/err.h>
@@ -46,7 +42,7 @@ static int pandora_backlight_update_status(struct backlight_device *bl)
 	struct pandora_private *priv = bl_get_data(bl);
 	u8 r;
 
-	if (bl->props.power != FB_BLANK_UNBLANK)
+	if (bl->props.power != BACKLIGHT_POWER_ON)
 		brightness = 0;
 	if (bl->props.state & BL_CORE_FBBLANK)
 		brightness = 0;
@@ -117,10 +113,8 @@ static int pandora_backlight_probe(struct platform_device *pdev)
 	u8 r;
 
 	priv = devm_kmalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
-	if (!priv) {
-		dev_err(&pdev->dev, "failed to allocate driver private data\n");
+	if (!priv)
 		return -ENOMEM;
-	}
 
 	memset(&props, 0, sizeof(props));
 	props.max_brightness = MAX_USER_VALUE;

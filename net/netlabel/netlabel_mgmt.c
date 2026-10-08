@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * NetLabel Management Support
  *
@@ -6,25 +7,10 @@
  * protocols such as CIPSO and RIPSO.
  *
  * Author: Paul Moore <paul@paul-moore.com>
- *
  */
 
 /*
  * (c) Copyright Hewlett-Packard Development Company, L.P., 2006, 2008
- *
- * This program is free software;  you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY;  without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
- * the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program;  if not, see <http://www.gnu.org/licenses/>.
- *
  */
 
 #include <linux/types.h>
@@ -77,7 +63,7 @@ static const struct nla_policy netlbl_mgmt_genl_policy[NLBL_MGMT_A_MAX + 1] = {
  */
 
 /**
- * netlbl_mgmt_add - Handle an ADD message
+ * netlbl_mgmt_add_common - Handle an ADD message
  * @info: the Generic NETLINK info block
  * @audit_info: NetLabel audit information
  *
@@ -110,7 +96,7 @@ static int netlbl_mgmt_add_common(struct genl_info *info,
 			ret_val = -ENOMEM;
 			goto add_free_entry;
 		}
-		nla_strlcpy(entry->domain,
+		nla_strscpy(entry->domain,
 			    info->attrs[NLBL_MGMT_A_DOMAIN], tmp_size);
 	}
 
@@ -121,11 +107,9 @@ static int netlbl_mgmt_add_common(struct genl_info *info,
 
 	switch (entry->def.type) {
 	case NETLBL_NLTYPE_UNLABELED:
-		if (info->attrs[NLBL_MGMT_A_FAMILY])
-			entry->family =
-				nla_get_u16(info->attrs[NLBL_MGMT_A_FAMILY]);
-		else
-			entry->family = AF_UNSPEC;
+		entry->family =
+			nla_get_u16_default(info->attrs[NLBL_MGMT_A_FAMILY],
+					    AF_UNSPEC);
 		break;
 	case NETLBL_NLTYPE_CIPSOV4:
 		if (!info->attrs[NLBL_MGMT_A_CV4DOI])
@@ -316,7 +300,7 @@ static int netlbl_mgmt_listentry(struct sk_buff *skb,
 
 	switch (entry->def.type) {
 	case NETLBL_NLTYPE_ADDRSELECT:
-		nla_a = nla_nest_start(skb, NLBL_MGMT_A_SELECTORLIST);
+		nla_a = nla_nest_start_noflag(skb, NLBL_MGMT_A_SELECTORLIST);
 		if (nla_a == NULL)
 			return -ENOMEM;
 
@@ -324,7 +308,8 @@ static int netlbl_mgmt_listentry(struct sk_buff *skb,
 			struct netlbl_domaddr4_map *map4;
 			struct in_addr addr_struct;
 
-			nla_b = nla_nest_start(skb, NLBL_MGMT_A_ADDRSELECTOR);
+			nla_b = nla_nest_start_noflag(skb,
+						      NLBL_MGMT_A_ADDRSELECTOR);
 			if (nla_b == NULL)
 				return -ENOMEM;
 
@@ -358,7 +343,8 @@ static int netlbl_mgmt_listentry(struct sk_buff *skb,
 		netlbl_af6list_foreach_rcu(iter6, &entry->def.addrsel->list6) {
 			struct netlbl_domaddr6_map *map6;
 
-			nla_b = nla_nest_start(skb, NLBL_MGMT_A_ADDRSELECTOR);
+			nla_b = nla_nest_start_noflag(skb,
+						      NLBL_MGMT_A_ADDRSELECTOR);
 			if (nla_b == NULL)
 				return -ENOMEM;
 
@@ -613,10 +599,7 @@ static int netlbl_mgmt_listdef(struct sk_buff *skb, struct genl_info *info)
 	struct netlbl_dom_map *entry;
 	u16 family;
 
-	if (info->attrs[NLBL_MGMT_A_FAMILY])
-		family = nla_get_u16(info->attrs[NLBL_MGMT_A_FAMILY]);
-	else
-		family = AF_INET;
+	family = nla_get_u16_default(info->attrs[NLBL_MGMT_A_FAMILY], AF_INET);
 
 	ans_skb = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
 	if (ans_skb == NULL)
@@ -770,60 +753,60 @@ version_failure:
  * NetLabel Generic NETLINK Command Definitions
  */
 
-static const struct genl_ops netlbl_mgmt_genl_ops[] = {
+static const struct genl_small_ops netlbl_mgmt_genl_ops[] = {
 	{
 	.cmd = NLBL_MGMT_C_ADD,
+	.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 	.flags = GENL_ADMIN_PERM,
-	.policy = netlbl_mgmt_genl_policy,
 	.doit = netlbl_mgmt_add,
 	.dumpit = NULL,
 	},
 	{
 	.cmd = NLBL_MGMT_C_REMOVE,
+	.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 	.flags = GENL_ADMIN_PERM,
-	.policy = netlbl_mgmt_genl_policy,
 	.doit = netlbl_mgmt_remove,
 	.dumpit = NULL,
 	},
 	{
 	.cmd = NLBL_MGMT_C_LISTALL,
+	.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 	.flags = 0,
-	.policy = netlbl_mgmt_genl_policy,
 	.doit = NULL,
 	.dumpit = netlbl_mgmt_listall,
 	},
 	{
 	.cmd = NLBL_MGMT_C_ADDDEF,
+	.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 	.flags = GENL_ADMIN_PERM,
-	.policy = netlbl_mgmt_genl_policy,
 	.doit = netlbl_mgmt_adddef,
 	.dumpit = NULL,
 	},
 	{
 	.cmd = NLBL_MGMT_C_REMOVEDEF,
+	.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 	.flags = GENL_ADMIN_PERM,
-	.policy = netlbl_mgmt_genl_policy,
 	.doit = netlbl_mgmt_removedef,
 	.dumpit = NULL,
 	},
 	{
 	.cmd = NLBL_MGMT_C_LISTDEF,
+	.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 	.flags = 0,
-	.policy = netlbl_mgmt_genl_policy,
 	.doit = netlbl_mgmt_listdef,
 	.dumpit = NULL,
 	},
 	{
 	.cmd = NLBL_MGMT_C_PROTOCOLS,
+	.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 	.flags = 0,
-	.policy = netlbl_mgmt_genl_policy,
 	.doit = NULL,
 	.dumpit = netlbl_mgmt_protocols,
 	},
 	{
 	.cmd = NLBL_MGMT_C_VERSION,
+	.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 	.flags = 0,
-	.policy = netlbl_mgmt_genl_policy,
 	.doit = netlbl_mgmt_version,
 	.dumpit = NULL,
 	},
@@ -834,9 +817,11 @@ static struct genl_family netlbl_mgmt_gnl_family __ro_after_init = {
 	.name = NETLBL_NLTYPE_MGMT_NAME,
 	.version = NETLBL_PROTO_VERSION,
 	.maxattr = NLBL_MGMT_A_MAX,
+	.policy = netlbl_mgmt_genl_policy,
 	.module = THIS_MODULE,
-	.ops = netlbl_mgmt_genl_ops,
-	.n_ops = ARRAY_SIZE(netlbl_mgmt_genl_ops),
+	.small_ops = netlbl_mgmt_genl_ops,
+	.n_small_ops = ARRAY_SIZE(netlbl_mgmt_genl_ops),
+	.resv_start_op = NLBL_MGMT_C_VERSION + 1,
 };
 
 /*

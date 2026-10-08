@@ -21,10 +21,6 @@ SUBSYS(cpu)
 SUBSYS(cpuacct)
 #endif
 
-#if IS_ENABLED(CONFIG_SCHED_TUNE)
-SUBSYS(schedtune)
-#endif
-
 #if IS_ENABLED(CONFIG_BLK_CGROUP)
 SUBSYS(io)
 #endif
@@ -63,6 +59,14 @@ SUBSYS(pids)
 
 #if IS_ENABLED(CONFIG_CGROUP_RDMA)
 SUBSYS(rdma)
+#endif
+
+#if IS_ENABLED(CONFIG_CGROUP_MISC)
+SUBSYS(misc)
+#endif
+
+#if IS_ENABLED(CONFIG_CGROUP_DMEM)
+SUBSYS(dmem)
 #endif
 
 /*

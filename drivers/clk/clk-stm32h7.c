@@ -463,7 +463,7 @@ static struct clk_hw *clk_register_stm32_timer_ker(struct device *dev,
 		spinlock_t *lock)
 {
 	struct timer_ker *element;
-	struct clk_init_data init = {};
+	struct clk_init_data init;
 	struct clk_hw *hw;
 	int err;
 
@@ -667,7 +667,6 @@ struct stm32_fractional_divider {
 	void __iomem	*mreg;
 	u8		mshift;
 	u8		mwidth;
-	u32		mmask;
 
 	void __iomem	*nreg;
 	u8		nshift;
@@ -845,10 +844,10 @@ static unsigned long odf_divider_recalc_rate(struct clk_hw *hw,
 	return clk_divider_ops.recalc_rate(hw, parent_rate);
 }
 
-static long odf_divider_round_rate(struct clk_hw *hw, unsigned long rate,
-		unsigned long *prate)
+static int odf_divider_determine_rate(struct clk_hw *hw,
+				      struct clk_rate_request *req)
 {
-	return clk_divider_ops.round_rate(hw, rate, prate);
+	return clk_divider_ops.determine_rate(hw, req);
 }
 
 static int odf_divider_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -875,7 +874,7 @@ static int odf_divider_set_rate(struct clk_hw *hw, unsigned long rate,
 
 static const struct clk_ops odf_divider_ops = {
 	.recalc_rate	= odf_divider_recalc_rate,
-	.round_rate	= odf_divider_round_rate,
+	.determine_rate	= odf_divider_determine_rate,
 	.set_rate	= odf_divider_set_rate,
 };
 
@@ -1216,7 +1215,7 @@ static void __init stm32h7_rcc_init(struct device_node *np)
 	/* get RCC base @ from DT */
 	base = of_iomap(np, 0);
 	if (!base) {
-		pr_err("%s: unable to map resource", np->name);
+		pr_err("%pOFn: unable to map resource", np);
 		goto err_free_clks;
 	}
 

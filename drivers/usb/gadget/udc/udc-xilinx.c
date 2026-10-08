@@ -11,16 +11,15 @@
  * USB peripheral controller (at91_udc.c).
  */
 
+#include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/module.h>
-#include <linux/of_address.h>
-#include <linux/of_device.h>
-#include <linux/of_platform.h>
-#include <linux/of_irq.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
 #include <linux/prefetch.h>
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
@@ -171,6 +170,7 @@ struct xusb_ep {
  * @addr: the usb device base address
  * @lock: instance of spinlock
  * @dma_enabled: flag indicating whether the dma is included in the system
+ * @clk: pointer to struct clk
  * @read_fn: function pointer to read device registers
  * @write_fn: function pointer to write to device registers
  */
@@ -188,8 +188,9 @@ struct xusb_udc {
 	void __iomem *addr;
 	spinlock_t lock;
 	bool dma_enabled;
+	struct clk *clk;
 
-	unsigned int (*read_fn)(void __iomem *);
+	unsigned int (*read_fn)(void __iomem *reg);
 	void (*write_fn)(void __iomem *, u32, u32);
 };
 
@@ -633,7 +634,7 @@ top:
 		dev_dbg(udc->dev, "read %s, %d bytes%s req %p %d/%d\n",
 			ep->ep_usb.name, count, is_short ? "/S" : "", req,
 			req->usb_req.actual, req->usb_req.length);
-		bufferspace -= count;
+
 		/* Completion */
 		if ((req->usb_req.actual == req->usb_req.length) || is_short) {
 			if (udc->dma_enabled && req->usb_req.length)
@@ -795,7 +796,7 @@ static int xudc_ep_set_halt(struct usb_ep *_ep, int value)
 }
 
 /**
- * xudc_ep_enable - Enables the given endpoint.
+ * __xudc_ep_enable - Enables the given endpoint.
  * @ep: pointer to the xusb endpoint structure.
  * @desc: pointer to usb endpoint descriptor.
  *
@@ -812,10 +813,10 @@ static int __xudc_ep_enable(struct xusb_ep *ep,
 
 	ep->is_in = ((desc->bEndpointAddress & USB_DIR_IN) != 0);
 	/* Bit 3...0:endpoint number */
-	ep->epnumber = (desc->bEndpointAddress & 0x0f);
+	ep->epnumber = usb_endpoint_num(desc);
 	ep->desc = desc;
 	ep->ep_usb.desc = desc;
-	tmp = desc->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK;
+	tmp = usb_endpoint_type(desc);
 	ep->ep_usb.maxpacket = maxpacket = le16_to_cpu(desc->wMaxPacketSize);
 
 	switch (tmp) {
@@ -847,8 +848,8 @@ static int __xudc_ep_enable(struct xusb_ep *ep,
 		break;
 	}
 
-	ep->buffer0ready = 0;
-	ep->buffer1ready = 0;
+	ep->buffer0ready = false;
+	ep->buffer1ready = false;
 	ep->curbufnum = 0;
 	ep->rambase = rambase[ep->epnumber];
 	xudc_epconfig(ep, udc);
@@ -872,11 +873,11 @@ static int __xudc_ep_enable(struct xusb_ep *ep,
 	if (ep->epnumber && !ep->is_in) {
 		udc->write_fn(udc->addr, XUSB_BUFFREADY_OFFSET,
 			      1 << ep->epnumber);
-		ep->buffer0ready = 1;
+		ep->buffer0ready = true;
 		udc->write_fn(udc->addr, XUSB_BUFFREADY_OFFSET,
 			     (1 << (ep->epnumber +
 			      XUSB_STATUS_EP_BUFF2_SHIFT)));
-		ep->buffer1ready = 1;
+		ep->buffer1ready = true;
 	}
 
 	return 0;
@@ -946,7 +947,7 @@ static int xudc_ep_disable(struct usb_ep *_ep)
 	ep->desc = NULL;
 	ep->ep_usb.desc = NULL;
 
-	dev_dbg(udc->dev, "USB Ep %d disable\n ", ep->epnumber);
+	dev_dbg(udc->dev, "USB Ep %d disable\n", ep->epnumber);
 	/* Disable the endpoint.*/
 	epcfg = udc->read_fn(udc->addr + ep->offset);
 	epcfg &= ~XUSB_EP_CFG_VALID_MASK;
@@ -991,7 +992,7 @@ static void xudc_free_request(struct usb_ep *_ep, struct usb_request *_req)
 }
 
 /**
- * xudc_ep0_queue - Adds the request to endpoint 0 queue.
+ * __xudc_ep0_queue - Adds the request to endpoint 0 queue.
  * @ep0: pointer to the xusb endpoint 0 structure.
  * @req: pointer to the xusb request structure.
  *
@@ -1082,7 +1083,7 @@ static int xudc_ep_queue(struct usb_ep *_ep, struct usb_request *_req,
 	unsigned long flags;
 
 	if (!ep->desc) {
-		dev_dbg(udc->dev, "%s:queing request to disabled %s\n",
+		dev_dbg(udc->dev, "%s: queuing request to disabled %s\n",
 			__func__, ep->name);
 		return -ESHUTDOWN;
 	}
@@ -1137,17 +1138,20 @@ static int xudc_ep_queue(struct usb_ep *_ep, struct usb_request *_req,
 static int xudc_ep_dequeue(struct usb_ep *_ep, struct usb_request *_req)
 {
 	struct xusb_ep *ep	= to_xusb_ep(_ep);
-	struct xusb_req *req	= to_xusb_req(_req);
+	struct xusb_req *req	= NULL;
+	struct xusb_req *iter;
 	struct xusb_udc *udc	= ep->udc;
 	unsigned long flags;
 
 	spin_lock_irqsave(&udc->lock, flags);
 	/* Make sure it's actually queued on this endpoint */
-	list_for_each_entry(req, &ep->queue, queue) {
-		if (&req->usb_req == _req)
-			break;
+	list_for_each_entry(iter, &ep->queue, queue) {
+		if (&iter->usb_req != _req)
+			continue;
+		req = iter;
+		break;
 	}
-	if (&req->usb_req != _req) {
+	if (!req) {
 		spin_unlock_irqrestore(&udc->lock, flags);
 		return -EINVAL;
 	}
@@ -1403,7 +1407,6 @@ err:
 /**
  * xudc_stop - stops the device.
  * @gadget: pointer to the usb gadget structure
- * @driver: pointer to usb gadget driver structure
  *
  * Return: zero always
  */
@@ -1616,13 +1619,13 @@ static void xudc_getstatus(struct xusb_udc *udc)
 	case USB_RECIP_INTERFACE:
 		break;
 	case USB_RECIP_ENDPOINT:
-		epnum = udc->setup.wIndex & USB_ENDPOINT_NUMBER_MASK;
+		epnum = le16_to_cpu(udc->setup.wIndex) & USB_ENDPOINT_NUMBER_MASK;
 		if (epnum >= XUSB_MAX_ENDPOINTS)
 			goto stall;
 		target_ep = &udc->ep[epnum];
 		epcfgreg = udc->read_fn(udc->addr + target_ep->offset);
 		halt = epcfgreg & XUSB_EP_CFG_STALL_MASK;
-		if (udc->setup.wIndex & USB_DIR_IN) {
+		if (le16_to_cpu(udc->setup.wIndex) & USB_DIR_IN) {
 			if (!target_ep->is_in)
 				goto stall;
 		} else {
@@ -1637,7 +1640,7 @@ static void xudc_getstatus(struct xusb_udc *udc)
 	}
 
 	req->usb_req.length = 2;
-	*(u16 *)req->usb_req.buf = cpu_to_le16(status);
+	*(__le16 *)req->usb_req.buf = cpu_to_le16(status);
 	ret = __xudc_ep0_queue(ep0, req);
 	if (ret == 0)
 		return;
@@ -1665,7 +1668,7 @@ static void xudc_set_clear_feature(struct xusb_udc *udc)
 
 	switch (udc->setup.bRequestType) {
 	case USB_RECIP_DEVICE:
-		switch (udc->setup.wValue) {
+		switch (le16_to_cpu(udc->setup.wValue)) {
 		case USB_DEVICE_TEST_MODE:
 			/*
 			 * The Test Mode will be executed
@@ -1685,13 +1688,15 @@ static void xudc_set_clear_feature(struct xusb_udc *udc)
 		break;
 	case USB_RECIP_ENDPOINT:
 		if (!udc->setup.wValue) {
-			endpoint = udc->setup.wIndex & USB_ENDPOINT_NUMBER_MASK;
+			endpoint = le16_to_cpu(udc->setup.wIndex) &
+					       USB_ENDPOINT_NUMBER_MASK;
 			if (endpoint >= XUSB_MAX_ENDPOINTS) {
 				xudc_ep0_stall(udc);
 				return;
 			}
 			target_ep = &udc->ep[endpoint];
-			outinbit = udc->setup.wIndex & USB_ENDPOINT_DIR_MASK;
+			outinbit = le16_to_cpu(udc->setup.wIndex) &
+					       USB_ENDPOINT_DIR_MASK;
 			outinbit = outinbit >> 7;
 
 			/* Make sure direction matches.*/
@@ -1743,6 +1748,7 @@ static void xudc_set_clear_feature(struct xusb_udc *udc)
  * Process setup packet and delegate to gadget layer.
  */
 static void xudc_handle_setup(struct xusb_udc *udc)
+	__must_hold(&udc->lock)
 {
 	struct xusb_ep *ep0 = &udc->ep[0];
 	struct usb_ctrlrequest setup;
@@ -1753,9 +1759,9 @@ static void xudc_handle_setup(struct xusb_udc *udc)
 	memcpy_toio((void __iomem *)&setup, ep0rambase, 8);
 
 	udc->setup = setup;
-	udc->setup.wValue = cpu_to_le16(setup.wValue);
-	udc->setup.wIndex = cpu_to_le16(setup.wIndex);
-	udc->setup.wLength = cpu_to_le16(setup.wLength);
+	udc->setup.wValue = cpu_to_le16((u16 __force)setup.wValue);
+	udc->setup.wIndex = cpu_to_le16((u16 __force)setup.wIndex);
+	udc->setup.wLength = cpu_to_le16((u16 __force)setup.wLength);
 
 	/* Clear previous requests */
 	xudc_nuke(ep0, -ECONNRESET);
@@ -1867,7 +1873,7 @@ static void xudc_ep0_in(struct xusb_udc *udc)
 	u16 count = 0;
 	u16 length;
 	u8 *ep0rambase;
-	u8 test_mode = udc->setup.wIndex >> 8;
+	u8 test_mode = le16_to_cpu(udc->setup.wIndex) >> 8;
 
 	req = list_first_entry(&ep0->queue, struct xusb_req, queue);
 	bytes_to_tx = req->usb_req.length - req->usb_req.actual;
@@ -1878,12 +1884,12 @@ static void xudc_ep0_in(struct xusb_udc *udc)
 		case USB_REQ_SET_ADDRESS:
 			/* Set the address of the device.*/
 			udc->write_fn(udc->addr, XUSB_ADDRESS_OFFSET,
-				      udc->setup.wValue);
+				      le16_to_cpu(udc->setup.wValue));
 			break;
 		case USB_REQ_SET_FEATURE:
 			if (udc->setup.bRequestType ==
 					USB_RECIP_DEVICE) {
-				if (udc->setup.wValue ==
+				if (le16_to_cpu(udc->setup.wValue) ==
 						USB_DEVICE_TEST_MODE)
 					udc->write_fn(udc->addr,
 						      XUSB_TESTMODE_OFFSET,
@@ -1964,7 +1970,7 @@ static void xudc_nonctrl_ep_handler(struct xusb_udc *udc, u8 epnum,
 	if (intrstatus & (XUSB_STATUS_EP0_BUFF1_COMP_MASK << epnum))
 		ep->buffer0ready = 0;
 	if (intrstatus & (XUSB_STATUS_EP0_BUFF2_COMP_MASK << epnum))
-		ep->buffer1ready = 0;
+		ep->buffer1ready = false;
 
 	if (list_empty(&ep->queue))
 		return;
@@ -2078,16 +2084,13 @@ static int xudc_probe(struct platform_device *pdev)
 	udc->req->usb_req.buf = buff;
 
 	/* Map the registers */
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	udc->addr = devm_ioremap_resource(&pdev->dev, res);
+	udc->addr = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
 	if (IS_ERR(udc->addr))
 		return PTR_ERR(udc->addr);
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		dev_err(&pdev->dev, "unable to get irq\n");
+	if (irq < 0)
 		return irq;
-	}
 	ret = devm_request_irq(&pdev->dev, irq, xudc_irq, 0,
 			       dev_name(&pdev->dev), udc);
 	if (ret < 0) {
@@ -2104,14 +2107,35 @@ static int xudc_probe(struct platform_device *pdev)
 	udc->gadget.ep0 = &udc->ep[XUSB_EP_NUMBER_ZERO].ep_usb;
 	udc->gadget.name = driver_name;
 
+	udc->clk = devm_clk_get(&pdev->dev, "s_axi_aclk");
+	if (IS_ERR(udc->clk)) {
+		if (PTR_ERR(udc->clk) != -ENOENT) {
+			ret = PTR_ERR(udc->clk);
+			goto fail;
+		}
+
+		/*
+		 * Clock framework support is optional, continue on,
+		 * anyways if we don't find a matching clock
+		 */
+		dev_warn(&pdev->dev, "s_axi_aclk clock property is not found\n");
+		udc->clk = NULL;
+	}
+
+	ret = clk_prepare_enable(udc->clk);
+	if (ret) {
+		dev_err(&pdev->dev, "Unable to enable clock.\n");
+		return ret;
+	}
+
 	spin_lock_init(&udc->lock);
 
 	/* Check for IP endianness */
 	udc->write_fn = xudc_write32_be;
 	udc->read_fn = xudc_read32_be;
-	udc->write_fn(udc->addr, XUSB_TESTMODE_OFFSET, TEST_J);
+	udc->write_fn(udc->addr, XUSB_TESTMODE_OFFSET, USB_TEST_J);
 	if ((udc->read_fn(udc->addr + XUSB_TESTMODE_OFFSET))
-			!= TEST_J) {
+			!= USB_TEST_J) {
 		udc->write_fn = xudc_write32;
 		udc->read_fn = xudc_read32;
 	}
@@ -2124,7 +2148,7 @@ static int xudc_probe(struct platform_device *pdev)
 
 	ret = usb_add_gadget_udc(&pdev->dev, &udc->gadget);
 	if (ret)
-		goto fail;
+		goto err_disable_unprepare_clk;
 
 	udc->dev = &udc->gadget.dev;
 
@@ -2143,6 +2167,9 @@ static int xudc_probe(struct platform_device *pdev)
 		 udc->dma_enabled ? "with DMA" : "without DMA");
 
 	return 0;
+
+err_disable_unprepare_clk:
+	clk_disable_unprepare(udc->clk);
 fail:
 	dev_err(&pdev->dev, "probe failed, %d\n", ret);
 	return ret;
@@ -2151,17 +2178,69 @@ fail:
 /**
  * xudc_remove - Releases the resources allocated during the initialization.
  * @pdev: pointer to the platform device structure.
- *
- * Return: 0 always
  */
-static int xudc_remove(struct platform_device *pdev)
+static void xudc_remove(struct platform_device *pdev)
 {
 	struct xusb_udc *udc = platform_get_drvdata(pdev);
 
 	usb_del_gadget_udc(&udc->gadget);
+	clk_disable_unprepare(udc->clk);
+}
+
+#ifdef CONFIG_PM_SLEEP
+static int xudc_suspend(struct device *dev)
+{
+	struct xusb_udc *udc;
+	u32 crtlreg;
+	unsigned long flags;
+
+	udc = dev_get_drvdata(dev);
+
+	spin_lock_irqsave(&udc->lock, flags);
+
+	crtlreg = udc->read_fn(udc->addr + XUSB_CONTROL_OFFSET);
+	crtlreg &= ~XUSB_CONTROL_USB_READY_MASK;
+
+	udc->write_fn(udc->addr, XUSB_CONTROL_OFFSET, crtlreg);
+
+	spin_unlock_irqrestore(&udc->lock, flags);
+	if (udc->driver && udc->driver->suspend)
+		udc->driver->suspend(&udc->gadget);
+
+	clk_disable(udc->clk);
 
 	return 0;
 }
+
+static int xudc_resume(struct device *dev)
+{
+	struct xusb_udc *udc;
+	u32 crtlreg;
+	unsigned long flags;
+	int ret;
+
+	udc = dev_get_drvdata(dev);
+
+	ret = clk_enable(udc->clk);
+	if (ret < 0)
+		return ret;
+
+	spin_lock_irqsave(&udc->lock, flags);
+
+	crtlreg = udc->read_fn(udc->addr + XUSB_CONTROL_OFFSET);
+	crtlreg |= XUSB_CONTROL_USB_READY_MASK;
+
+	udc->write_fn(udc->addr, XUSB_CONTROL_OFFSET, crtlreg);
+
+	spin_unlock_irqrestore(&udc->lock, flags);
+
+	return 0;
+}
+#endif /* CONFIG_PM_SLEEP */
+
+static const struct dev_pm_ops xudc_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(xudc_suspend, xudc_resume)
+};
 
 /* Match table for of_platform binding */
 static const struct of_device_id usb_of_match[] = {
@@ -2174,6 +2253,7 @@ static struct platform_driver xudc_driver = {
 	.driver = {
 		.name = driver_name,
 		.of_match_table = usb_of_match,
+		.pm	= &xudc_pm_ops,
 	},
 	.probe = xudc_probe,
 	.remove = xudc_remove,

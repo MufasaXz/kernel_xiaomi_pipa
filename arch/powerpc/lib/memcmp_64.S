@@ -1,14 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Author: Anton Blanchard <anton@au.ibm.com>
  * Copyright 2015 IBM Corporation.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
+#include <linux/export.h>
 #include <asm/ppc_asm.h>
-#include <asm/export.h>
 #include <asm/ppc-opcode.h>
 
 #define off8	r6
@@ -48,7 +44,7 @@
 	std     r5,-STACKFRAMESIZE+STK_REG(R29)(r1); \
 	std     r0,16(r1); \
 	stdu    r1,-STACKFRAMESIZE(r1); \
-	bl      enter_vmx_ops; \
+	bl      CFUNC(enter_vmx_ops); \
 	cmpwi   cr1,r3,0; \
 	ld      r0,STACKFRAMESIZE+16(r1); \
 	ld      r3,STK_REG(R31)(r1); \
@@ -64,7 +60,7 @@
 	std     r5,-STACKFRAMESIZE+STK_REG(R29)(r1); \
 	std     r0,16(r1); \
 	stdu    r1,-STACKFRAMESIZE(r1); \
-	bl      exit_vmx_ops; \
+	bl      CFUNC(exit_vmx_ops); \
 	ld      r0,STACKFRAMESIZE+16(r1); \
 	ld      r3,STK_REG(R31)(r1); \
 	ld      r4,STK_REG(R30)(r1); \

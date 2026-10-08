@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2015 - 2016 Red Hat, Inc
  * Copyright (c) 2011, 2012 Synaptics Incorporated
  * Copyright (c) 2011 Unixphere
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
@@ -287,8 +284,7 @@ static const struct rmi_transport_ops rmi_smb_ops = {
 	.reset		= rmi_smb_reset,
 };
 
-static int rmi_smb_probe(struct i2c_client *client,
-			 const struct i2c_device_id *id)
+static int rmi_smb_probe(struct i2c_client *client)
 {
 	struct rmi_device_platform_data *pdata = dev_get_platdata(&client->dev);
 	struct rmi_smb_xport *rmi_smb;
@@ -347,16 +343,14 @@ static int rmi_smb_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int rmi_smb_remove(struct i2c_client *client)
+static void rmi_smb_remove(struct i2c_client *client)
 {
 	struct rmi_smb_xport *rmi_smb = i2c_get_clientdata(client);
 
 	rmi_unregister_transport_device(&rmi_smb->xport);
-
-	return 0;
 }
 
-static int __maybe_unused rmi_smb_suspend(struct device *dev)
+static int rmi_smb_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct rmi_smb_xport *rmi_smb = i2c_get_clientdata(client);
@@ -369,7 +363,7 @@ static int __maybe_unused rmi_smb_suspend(struct device *dev)
 	return ret;
 }
 
-static int __maybe_unused rmi_smb_runtime_suspend(struct device *dev)
+static int rmi_smb_runtime_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct rmi_smb_xport *rmi_smb = i2c_get_clientdata(client);
@@ -382,7 +376,7 @@ static int __maybe_unused rmi_smb_runtime_suspend(struct device *dev)
 	return ret;
 }
 
-static int __maybe_unused rmi_smb_resume(struct device *dev)
+static int rmi_smb_resume(struct device *dev)
 {
 	struct i2c_client *client = container_of(dev, struct i2c_client, dev);
 	struct rmi_smb_xport *rmi_smb = i2c_get_clientdata(client);
@@ -400,7 +394,7 @@ static int __maybe_unused rmi_smb_resume(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused rmi_smb_runtime_resume(struct device *dev)
+static int rmi_smb_runtime_resume(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct rmi_smb_xport *rmi_smb = i2c_get_clientdata(client);
@@ -414,13 +408,12 @@ static int __maybe_unused rmi_smb_runtime_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops rmi_smb_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(rmi_smb_suspend, rmi_smb_resume)
-	SET_RUNTIME_PM_OPS(rmi_smb_runtime_suspend, rmi_smb_runtime_resume,
-			   NULL)
+	SYSTEM_SLEEP_PM_OPS(rmi_smb_suspend, rmi_smb_resume)
+	RUNTIME_PM_OPS(rmi_smb_runtime_suspend, rmi_smb_runtime_resume, NULL)
 };
 
 static const struct i2c_device_id rmi_id[] = {
-	{ "rmi4_smbus", 0 },
+	{ "rmi4_smbus" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rmi_id);
@@ -428,7 +421,7 @@ MODULE_DEVICE_TABLE(i2c, rmi_id);
 static struct i2c_driver rmi_smb_driver = {
 	.driver = {
 		.name	= "rmi4_smbus",
-		.pm	= &rmi_smb_pm,
+		.pm	= pm_ptr(&rmi_smb_pm),
 	},
 	.id_table	= rmi_id,
 	.probe		= rmi_smb_probe,

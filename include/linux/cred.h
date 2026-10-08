@@ -1,12 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Credentials management - see Documentation/security/credentials.rst
  *
  * Copyright (C) 2008 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public Licence
- * as published by the Free Software Foundation; either version
- * 2 of the Licence, or (at your option) any later version.
  */
 
 #ifndef _LINUX_CRED_H
@@ -16,6 +12,7 @@
 #include <linux/init.h>
 #include <linux/key.h>
 #include <linux/atomic.h>
+#include <linux/refcount.h>
 #include <linux/uidgid.h>
 #include <linux/sched.h>
 #include <linux/sched/user.h>
@@ -27,9 +24,9 @@ struct inode;
  * COW Supplementary groups list
  */
 struct group_info {
-	atomic_t	usage;
+	refcount_t	usage;
 	int		ngroups;
-	kgid_t		gid[0];
+	kgid_t		gid[];
 } __randomize_layout;
 
 /**
@@ -43,7 +40,7 @@ struct group_info {
  */
 static inline struct group_info *get_group_info(struct group_info *gi)
 {
-	atomic_inc(&gi->usage);
+	refcount_inc(&gi->usage);
 	return gi;
 }
 
@@ -53,11 +50,10 @@ static inline struct group_info *get_group_info(struct group_info *gi)
  */
 #define put_group_info(group_info)			\
 do {							\
-	if (atomic_dec_and_test(&(group_info)->usage))	\
+	if (refcount_dec_and_test(&(group_info)->usage))	\
 		groups_free(group_info);		\
 } while (0)
 
-extern struct group_info init_groups;
 #ifdef CONFIG_MULTIUSER
 extern struct group_info *groups_alloc(int);
 extern void groups_free(struct group_info *);
@@ -113,14 +109,7 @@ static inline int groups_search(const struct group_info *group_info, kgid_t grp)
  * same context as task->real_cred.
  */
 struct cred {
-	atomic_t	usage;
-#ifdef CONFIG_DEBUG_CREDENTIALS
-	atomic_t	subscribers;	/* number of processes subscribed */
-	void		*put_addr;
-	unsigned	magic;
-#define CRED_MAGIC	0x43736564
-#define CRED_MAGIC_DEAD	0x44656144
-#endif
+	atomic_long_t	usage;
 	kuid_t		uid;		/* real UID of the task */
 	kgid_t		gid;		/* real GID of the task */
 	kuid_t		suid;		/* saved UID of the task */
@@ -138,16 +127,17 @@ struct cred {
 #ifdef CONFIG_KEYS
 	unsigned char	jit_keyring;	/* default keyring to attach requested
 					 * keys to */
-	struct key __rcu *session_keyring; /* keyring inherited over fork */
+	struct key	*session_keyring; /* keyring inherited over fork */
 	struct key	*process_keyring; /* keyring private to this process */
 	struct key	*thread_keyring; /* keyring private to this thread */
 	struct key	*request_key_auth; /* assumed request_key authority */
 #endif
 #ifdef CONFIG_SECURITY
-	void		*security;	/* subjective LSM security */
+	void		*security;	/* LSM security */
 #endif
 	struct user_struct *user;	/* real user ID subscription */
 	struct user_namespace *user_ns; /* user_ns the caps and keyrings are relative to. */
+	struct ucounts *ucounts;
 	struct group_info *group_info;	/* supplementary groups for euid/fsgid */
 	/* RCU deletion */
 	union {
@@ -158,61 +148,20 @@ struct cred {
 
 extern void __put_cred(struct cred *);
 extern void exit_creds(struct task_struct *);
-extern int copy_creds(struct task_struct *, unsigned long);
+extern int copy_creds(struct task_struct *, u64);
 extern const struct cred *get_task_cred(struct task_struct *);
 extern struct cred *cred_alloc_blank(void);
 extern struct cred *prepare_creds(void);
 extern struct cred *prepare_exec_creds(void);
 extern int commit_creds(struct cred *);
 extern void abort_creds(struct cred *);
-extern const struct cred *override_creds(const struct cred *);
-extern void revert_creds(const struct cred *);
 extern struct cred *prepare_kernel_cred(struct task_struct *);
-extern int change_create_files_as(struct cred *, struct inode *);
 extern int set_security_override(struct cred *, u32);
 extern int set_security_override_from_ctx(struct cred *, const char *);
 extern int set_create_files_as(struct cred *, struct inode *);
+extern int cred_fscmp(const struct cred *, const struct cred *);
 extern void __init cred_init(void);
-
-/*
- * check for validity of credentials
- */
-#ifdef CONFIG_DEBUG_CREDENTIALS
-extern void __invalid_creds(const struct cred *, const char *, unsigned);
-extern void __validate_process_creds(struct task_struct *,
-				     const char *, unsigned);
-
-extern bool creds_are_invalid(const struct cred *cred);
-
-static inline void __validate_creds(const struct cred *cred,
-				    const char *file, unsigned line)
-{
-	if (unlikely(creds_are_invalid(cred)))
-		__invalid_creds(cred, file, line);
-}
-
-#define validate_creds(cred)				\
-do {							\
-	__validate_creds((cred), __FILE__, __LINE__);	\
-} while(0)
-
-#define validate_process_creds()				\
-do {								\
-	__validate_process_creds(current, __FILE__, __LINE__);	\
-} while(0)
-
-extern void validate_creds_for_do_exit(struct task_struct *);
-#else
-static inline void validate_creds(const struct cred *cred)
-{
-}
-static inline void validate_creds_for_do_exit(struct task_struct *tsk)
-{
-}
-static inline void validate_process_creds(void)
-{
-}
-#endif
+extern int set_cred_ucounts(struct cred *);
 
 static inline bool cap_ambient_invariant_ok(const struct cred *cred)
 {
@@ -221,25 +170,23 @@ static inline bool cap_ambient_invariant_ok(const struct cred *cred)
 					  cred->cap_inheritable));
 }
 
-/**
- * get_new_cred - Get a reference on a new set of credentials
- * @cred: The new credentials to reference
- *
- * Get a reference on the specified set of new credentials.  The caller must
- * release the reference.
- */
-static inline struct cred *get_new_cred(struct cred *cred)
+static inline const struct cred *override_creds(const struct cred *override_cred)
 {
-	atomic_inc(&cred->usage);
-	return cred;
+	return rcu_replace_pointer(current->cred, override_cred, 1);
+}
+
+static inline const struct cred *revert_creds(const struct cred *revert_cred)
+{
+	return rcu_replace_pointer(current->cred, revert_cred, 1);
 }
 
 /**
- * get_cred - Get a reference on a set of credentials
+ * get_cred_many - Get references on a set of credentials
  * @cred: The credentials to reference
+ * @nr: Number of references to acquire
  *
- * Get a reference on the specified set of credentials.  The caller must
- * release the reference.  If %NULL is passed, it is returned with no action.
+ * Get references on the specified set of credentials.  The caller must release
+ * all acquired reference.  If %NULL is passed, it is returned with no action.
  *
  * This is used to deal with a committed set of credentials.  Although the
  * pointer is const, this will temporarily discard the const and increment the
@@ -247,19 +194,45 @@ static inline struct cred *get_new_cred(struct cred *cred)
  * accidental alteration of a set of credentials that should be considered
  * immutable.
  */
-static inline const struct cred *get_cred(const struct cred *cred)
+static inline const struct cred *get_cred_many(const struct cred *cred, int nr)
 {
 	struct cred *nonconst_cred = (struct cred *) cred;
 	if (!cred)
 		return cred;
-	validate_creds(cred);
 	nonconst_cred->non_rcu = 0;
-	return get_new_cred(nonconst_cred);
+	atomic_long_add(nr, &nonconst_cred->usage);
+	return cred;
+}
+
+/*
+ * get_cred - Get a reference on a set of credentials
+ * @cred: The credentials to reference
+ *
+ * Get a reference on the specified set of credentials.  The caller must
+ * release the reference.  If %NULL is passed, it is returned with no action.
+ *
+ * This is used to deal with a committed set of credentials.
+ */
+static inline const struct cred *get_cred(const struct cred *cred)
+{
+	return get_cred_many(cred, 1);
+}
+
+static inline const struct cred *get_cred_rcu(const struct cred *cred)
+{
+	struct cred *nonconst_cred = (struct cred *) cred;
+	if (!cred)
+		return NULL;
+	if (!atomic_long_inc_not_zero(&nonconst_cred->usage))
+		return NULL;
+	nonconst_cred->non_rcu = 0;
+	return cred;
 }
 
 /**
  * put_cred - Release a reference to a set of credentials
  * @cred: The credentials to release
+ * @nr: Number of references to release
  *
  * Release a reference to a set of credentials, deleting them when the last ref
  * is released.  If %NULL is passed, nothing is done.
@@ -268,16 +241,29 @@ static inline const struct cred *get_cred(const struct cred *cred)
  * on task_struct are attached by const pointers to prevent accidental
  * alteration of otherwise immutable credential sets.
  */
-static inline void put_cred(const struct cred *_cred)
+static inline void put_cred_many(const struct cred *_cred, int nr)
 {
 	struct cred *cred = (struct cred *) _cred;
 
 	if (cred) {
-		validate_creds(cred);
-		if (atomic_dec_and_test(&(cred)->usage))
+		if (atomic_long_sub_and_test(nr, &cred->usage))
 			__put_cred(cred);
 	}
 }
+
+/*
+ * put_cred - Release a reference to a set of credentials
+ * @cred: The credentials to release
+ *
+ * Release a reference to a set of credentials, deleting them when the last ref
+ * is released.  If %NULL is passed, nothing is done.
+ */
+static inline void put_cred(const struct cred *cred)
+{
+	put_cred_many(cred, 1);
+}
+
+DEFINE_FREE(put_cred, struct cred *, if (!IS_ERR_OR_NULL(_T)) put_cred(_T))
 
 /**
  * current_cred - Access the current task's subjective credentials
@@ -361,6 +347,7 @@ static inline void put_cred(const struct cred *_cred)
 
 #define task_uid(task)		(task_cred_xxx((task), uid))
 #define task_euid(task)		(task_cred_xxx((task), euid))
+#define task_ucounts(task)	(task_cred_xxx((task), ucounts))
 
 #define current_cred_xxx(xxx)			\
 ({						\
@@ -377,7 +364,7 @@ static inline void put_cred(const struct cred *_cred)
 #define current_fsgid() 	(current_cred_xxx(fsgid))
 #define current_cap()		(current_cred_xxx(cap_effective))
 #define current_user()		(current_cred_xxx(user))
-#define current_security()	(current_cred_xxx(security))
+#define current_ucounts()	(current_cred_xxx(ucounts))
 
 extern struct user_namespace init_user_ns;
 #ifdef CONFIG_USER_NS

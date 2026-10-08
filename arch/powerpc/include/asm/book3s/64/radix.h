@@ -4,7 +4,7 @@
 
 #include <asm/asm-const.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #include <asm/cmpxchg.h>
 #endif
 
@@ -14,7 +14,7 @@
 #include <asm/book3s/64/radix-4k.h>
 #endif
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #include <asm/book3s/64/tlbflush-radix.h>
 #include <asm/cpu_has_feature.h>
 #endif
@@ -30,11 +30,16 @@
 /* Don't have anything in the reserved bits and leaf bits */
 #define RADIX_PMD_BAD_BITS		0x60000000000000e0UL
 #define RADIX_PUD_BAD_BITS		0x60000000000000e0UL
-#define RADIX_PGD_BAD_BITS		0x60000000000000e0UL
+#define RADIX_P4D_BAD_BITS		0x60000000000000e0UL
 
 #define RADIX_PMD_SHIFT		(PAGE_SHIFT + RADIX_PTE_INDEX_SIZE)
 #define RADIX_PUD_SHIFT		(RADIX_PMD_SHIFT + RADIX_PMD_INDEX_SIZE)
 #define RADIX_PGD_SHIFT		(RADIX_PUD_SHIFT + RADIX_PUD_INDEX_SIZE)
+
+#define R_PTRS_PER_PTE		(1 << RADIX_PTE_INDEX_SIZE)
+#define R_PTRS_PER_PMD		(1 << RADIX_PMD_INDEX_SIZE)
+#define R_PTRS_PER_PUD		(1 << RADIX_PUD_INDEX_SIZE)
+
 /*
  * Size of EA range mapped by our pagetables.
  */
@@ -68,23 +73,21 @@
  *
  *
  * 3rd quadrant expanded:
- * +------------------------------+
+ * +------------------------------+  Highest address (0xc010000000000000)
+ * +------------------------------+  KASAN shadow end (0xc00fc00000000000)
  * |                              |
  * |                              |
+ * +------------------------------+  Kernel vmemmap end/shadow start (0xc00e000000000000)
  * |                              |
- * +------------------------------+  Kernel IO map end (0xc010000000000000)
+ * |           512TB		  |
  * |                              |
+ * +------------------------------+  Kernel IO map end/vmemap start
  * |                              |
- * |      1/2 of virtual map      |
+ * |           512TB		  |
  * |                              |
+ * +------------------------------+  Kernel vmap end/ IO map start
  * |                              |
- * +------------------------------+  Kernel IO map start
- * |                              |
- * |      1/4 of virtual map      |
- * |                              |
- * +------------------------------+  Kernel vmemap start
- * |                              |
- * |     1/4 of virtual map       |
+ * |           512TB		  |
  * |                              |
  * +------------------------------+  Kernel virt start (0xc008000000000000)
  * |                              |
@@ -93,26 +96,43 @@
  * +------------------------------+  Kernel linear (0xc.....)
  */
 
-#define RADIX_KERN_VIRT_START ASM_CONST(0xc008000000000000)
-#define RADIX_KERN_VIRT_SIZE  ASM_CONST(0x0008000000000000)
+/* For the sizes of the shadow area, see kasan.h */
 
 /*
- * The vmalloc space starts at the beginning of that region, and
- * occupies a quarter of it on radix config.
- * (we keep a quarter for the virtual memmap)
+ * If we store section details in page->flags we can't increase the MAX_PHYSMEM_BITS
+ * if we increase SECTIONS_WIDTH we will not store node details in page->flags and
+ * page_to_nid does a page->section->node lookup
+ * Hence only increase for VMEMMAP. Further depending on SPARSEMEM_EXTREME reduce
+ * memory requirements with large number of sections.
+ * 51 bits is the max physical real address on POWER9
  */
+
+#if defined(CONFIG_SPARSEMEM_VMEMMAP) && defined(CONFIG_SPARSEMEM_EXTREME)
+#define R_MAX_PHYSMEM_BITS	51
+#else
+#define R_MAX_PHYSMEM_BITS	46
+#endif
+
+#define RADIX_KERN_VIRT_START	ASM_CONST(0xc008000000000000)
+/*
+ * 49 =  MAX_EA_BITS_PER_CONTEXT (hash specific). To make sure we pick
+ * the same value as hash.
+ */
+#define RADIX_KERN_MAP_SIZE	(1UL << 49)
+
 #define RADIX_VMALLOC_START	RADIX_KERN_VIRT_START
-#define RADIX_VMALLOC_SIZE	(RADIX_KERN_VIRT_SIZE >> 2)
+#define RADIX_VMALLOC_SIZE	RADIX_KERN_MAP_SIZE
 #define RADIX_VMALLOC_END	(RADIX_VMALLOC_START + RADIX_VMALLOC_SIZE)
-/*
- * Defines the address of the vmemap area, in its own region on
- * hash table CPUs.
- */
-#define RADIX_VMEMMAP_BASE		(RADIX_VMALLOC_END)
 
-#define RADIX_KERN_IO_START	(RADIX_KERN_VIRT_START + (RADIX_KERN_VIRT_SIZE >> 1))
+#define RADIX_KERN_IO_START	RADIX_VMALLOC_END
+#define RADIX_KERN_IO_SIZE	RADIX_KERN_MAP_SIZE
+#define RADIX_KERN_IO_END	(RADIX_KERN_IO_START + RADIX_KERN_IO_SIZE)
 
-#ifndef __ASSEMBLY__
+#define RADIX_VMEMMAP_START	RADIX_KERN_IO_END
+#define RADIX_VMEMMAP_SIZE	RADIX_KERN_MAP_SIZE
+#define RADIX_VMEMMAP_END	(RADIX_VMEMMAP_START + RADIX_VMEMMAP_SIZE)
+
+#ifndef __ASSEMBLER__
 #define RADIX_PTE_TABLE_SIZE	(sizeof(pte_t) << RADIX_PTE_INDEX_SIZE)
 #define RADIX_PMD_TABLE_SIZE	(sizeof(pmd_t) << RADIX_PMD_INDEX_SIZE)
 #define RADIX_PUD_TABLE_SIZE	(sizeof(pud_t) << RADIX_PUD_INDEX_SIZE)
@@ -126,6 +146,10 @@ extern void radix__mark_initmem_nx(void);
 extern void radix__ptep_set_access_flags(struct vm_area_struct *vma, pte_t *ptep,
 					 pte_t entry, unsigned long address,
 					 int psize);
+
+extern void radix__ptep_modify_prot_commit(struct vm_area_struct *vma,
+					   unsigned long addr, pte_t *ptep,
+					   pte_t old_pte, pte_t pte);
 
 static inline unsigned long __radix_pte_update(pte_t *ptep, unsigned long clr,
 					       unsigned long set)
@@ -226,17 +250,21 @@ static inline int radix__pud_bad(pud_t pud)
 	return !!(pud_val(pud) & RADIX_PUD_BAD_BITS);
 }
 
-
-static inline int radix__pgd_bad(pgd_t pgd)
+static inline int radix__pud_same(pud_t pud_a, pud_t pud_b)
 {
-	return !!(pgd_val(pgd) & RADIX_PGD_BAD_BITS);
+	return ((pud_raw(pud_a) ^ pud_raw(pud_b)) == 0);
+}
+
+static inline int radix__p4d_bad(p4d_t p4d)
+{
+	return !!(p4d_val(p4d) & RADIX_P4D_BAD_BITS);
 }
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 
 static inline int radix__pmd_trans_huge(pmd_t pmd)
 {
-	return (pmd_val(pmd) & (_PAGE_PTE | _PAGE_DEVMAP)) == _PAGE_PTE;
+	return (pmd_val(pmd) & _PAGE_PTE) == _PAGE_PTE;
 }
 
 static inline pmd_t radix__pmd_mkhuge(pmd_t pmd)
@@ -244,9 +272,22 @@ static inline pmd_t radix__pmd_mkhuge(pmd_t pmd)
 	return __pmd(pmd_val(pmd) | _PAGE_PTE);
 }
 
+static inline int radix__pud_trans_huge(pud_t pud)
+{
+	return (pud_val(pud) & _PAGE_PTE) == _PAGE_PTE;
+}
+
+static inline pud_t radix__pud_mkhuge(pud_t pud)
+{
+	return __pud(pud_val(pud) | _PAGE_PTE);
+}
+
 extern unsigned long radix__pmd_hugepage_update(struct mm_struct *mm, unsigned long addr,
 					  pmd_t *pmdp, unsigned long clr,
 					  unsigned long set);
+extern unsigned long radix__pud_hugepage_update(struct mm_struct *mm, unsigned long addr,
+						pud_t *pudp, unsigned long clr,
+						unsigned long set);
 extern pmd_t radix__pmdp_collapse_flush(struct vm_area_struct *vma,
 				  unsigned long address, pmd_t *pmdp);
 extern void radix__pgtable_trans_huge_deposit(struct mm_struct *mm, pmd_t *pmdp,
@@ -254,17 +295,35 @@ extern void radix__pgtable_trans_huge_deposit(struct mm_struct *mm, pmd_t *pmdp,
 extern pgtable_t radix__pgtable_trans_huge_withdraw(struct mm_struct *mm, pmd_t *pmdp);
 extern pmd_t radix__pmdp_huge_get_and_clear(struct mm_struct *mm,
 				      unsigned long addr, pmd_t *pmdp);
-extern int radix__has_transparent_hugepage(void);
-#endif
+pud_t radix__pudp_huge_get_and_clear(struct mm_struct *mm,
+				     unsigned long addr, pud_t *pudp);
 
-static inline pmd_t radix__pmd_mkdevmap(pmd_t pmd)
+static inline int radix__has_transparent_hugepage(void)
 {
-	return __pmd(pmd_val(pmd) | (_PAGE_PTE | _PAGE_DEVMAP));
+	/* For radix 2M at PMD level means thp */
+	if (mmu_psize_defs[MMU_PAGE_2M].shift == PMD_SHIFT)
+		return 1;
+	return 0;
 }
 
+static inline int radix__has_transparent_pud_hugepage(void)
+{
+	/* For radix 1G at PUD level means pud hugepage support */
+	if (mmu_psize_defs[MMU_PAGE_1G].shift == PUD_SHIFT)
+		return 1;
+	return 0;
+}
+#endif
+
+struct vmem_altmap;
+struct dev_pagemap;
 extern int __meminit radix__vmemmap_create_mapping(unsigned long start,
 					     unsigned long page_size,
 					     unsigned long phys);
+int __meminit radix__vmemmap_populate(unsigned long start, unsigned long end,
+				      int node, struct vmem_altmap *altmap);
+void __ref radix__vmemmap_free(unsigned long start, unsigned long end,
+			       struct vmem_altmap *altmap);
 extern void radix__vmemmap_remove_mapping(unsigned long start,
 				    unsigned long page_size);
 
@@ -288,8 +347,20 @@ static inline unsigned long radix__get_tree_size(void)
 }
 
 #ifdef CONFIG_MEMORY_HOTPLUG
-int radix__create_section_mapping(unsigned long start, unsigned long end, int nid);
+int radix__create_section_mapping(unsigned long start, unsigned long end,
+				  int nid, pgprot_t prot);
 int radix__remove_section_mapping(unsigned long start, unsigned long end);
 #endif /* CONFIG_MEMORY_HOTPLUG */
-#endif /* __ASSEMBLY__ */
+
+#ifdef CONFIG_ARCH_WANT_OPTIMIZE_DAX_VMEMMAP
+#define vmemmap_can_optimize vmemmap_can_optimize
+bool vmemmap_can_optimize(struct vmem_altmap *altmap, struct dev_pagemap *pgmap);
+#endif
+
+#define vmemmap_populate_compound_pages vmemmap_populate_compound_pages
+int __meminit vmemmap_populate_compound_pages(unsigned long start_pfn,
+					      unsigned long start,
+					      unsigned long end, int node,
+					      struct dev_pagemap *pgmap);
+#endif /* __ASSEMBLER__ */
 #endif

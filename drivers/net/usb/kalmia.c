@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * USB network interface driver for Samsung Kalmia based LTE USB modem like the
  * Samsung GT-B3730 and GT-B3710.
@@ -7,11 +8,6 @@
  * Sponsored by Quicklink Video Distribution Services Ltd.
  *
  * Based on the cdc_eem module.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/module.h>
@@ -136,10 +132,17 @@ kalmia_bind(struct usbnet *dev, struct usb_interface *intf)
 {
 	int status;
 	u8 ethernet_addr[ETH_ALEN];
+	static const u8 ep_addr[] = {
+		1 | USB_DIR_IN,
+		2 | USB_DIR_OUT,
+		0};
 
 	/* Don't bind to AT command interface */
 	if (intf->cur_altsetting->desc.bInterfaceClass != USB_CLASS_VENDOR_SPEC)
 		return -EINVAL;
+
+	if (!usb_check_bulk_endpoints(intf, ep_addr))
+		return -ENODEV;
 
 	dev->in = usb_rcvbulkpipe(dev->udev, 0x81 & USB_ENDPOINT_NUMBER_MASK);
 	dev->out = usb_sndbulkpipe(dev->udev, 0x02 & USB_ENDPOINT_NUMBER_MASK);
@@ -153,7 +156,7 @@ kalmia_bind(struct usbnet *dev, struct usb_interface *intf)
 	if (status)
 		return status;
 
-	memcpy(dev->net->dev_addr, ethernet_addr, ETH_ALEN);
+	eth_hw_addr_set(dev->net, ethernet_addr);
 
 	return status;
 }

@@ -1,21 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * posix-clock.h - support for dynamic clock devices
  *
  * Copyright (C) 2010 OMICRON electronics GmbH
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 #ifndef _LINUX_POSIX_CLOCK_H_
 #define _LINUX_POSIX_CLOCK_H_
@@ -27,6 +14,7 @@
 #include <linux/rwsem.h>
 
 struct posix_clock;
+struct posix_clock_context;
 
 /**
  * struct posix_clock_operations - functional interface to the clock
@@ -51,7 +39,7 @@ struct posix_clock;
 struct posix_clock_operations {
 	struct module *owner;
 
-	int  (*clock_adjtime)(struct posix_clock *pc, struct timex *tx);
+	int  (*clock_adjtime)(struct posix_clock *pc, struct __kernel_timex *tx);
 
 	int  (*clock_gettime)(struct posix_clock *pc, struct timespec64 *ts);
 
@@ -63,18 +51,18 @@ struct posix_clock_operations {
 	/*
 	 * Optional character device methods:
 	 */
-	long    (*ioctl)   (struct posix_clock *pc,
-			    unsigned int cmd, unsigned long arg);
+	long (*ioctl)(struct posix_clock_context *pccontext, unsigned int cmd,
+		      unsigned long arg);
 
-	int     (*open)    (struct posix_clock *pc, fmode_t f_mode);
+	int (*open)(struct posix_clock_context *pccontext, fmode_t f_mode);
 
-	__poll_t (*poll)   (struct posix_clock *pc,
-			    struct file *file, poll_table *wait);
+	__poll_t (*poll)(struct posix_clock_context *pccontext, struct file *file,
+			 poll_table *wait);
 
-	int     (*release) (struct posix_clock *pc);
+	int (*release)(struct posix_clock_context *pccontext);
 
-	ssize_t (*read)    (struct posix_clock *pc,
-			    uint flags, char __user *buf, size_t cnt);
+	ssize_t (*read)(struct posix_clock_context *pccontext, uint flags,
+			char __user *buf, size_t cnt);
 };
 
 /**
@@ -101,6 +89,28 @@ struct posix_clock {
 	struct device *dev;
 	struct rw_semaphore rwsem;
 	bool zombie;
+};
+
+/**
+ * struct posix_clock_context - represents clock file operations context
+ *
+ * @clk:              Pointer to the clock
+ * @fp:               Pointer to the file used to open the clock
+ * @private_clkdata:  Pointer to user data
+ *
+ * Drivers should use struct posix_clock_context during specific character
+ * device file operation methods to access the posix clock. In particular,
+ * the file pointer can be used to verify correct access mode for ioctl()
+ * calls.
+ *
+ * Drivers can store a private data structure during the open operation
+ * if they have specific information that is required in other file
+ * operations.
+ */
+struct posix_clock_context {
+	struct posix_clock *clk;
+	struct file *fp;
+	void *private_clkdata;
 };
 
 /**

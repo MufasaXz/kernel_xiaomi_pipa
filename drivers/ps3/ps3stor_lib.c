@@ -1,25 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * PS3 Storage Library
  *
  * Copyright (C) 2007 Sony Computer Entertainment Inc.
  * Copyright 2007 Sony Corp.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published
- * by the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
 #include <linux/dma-mapping.h>
 #include <linux/module.h>
+#include <linux/string_choices.h>
 
 #include <asm/lv1call.h>
 #include <asm/ps3stor.h>
@@ -277,7 +266,7 @@ u64 ps3stor_read_write_sectors(struct ps3_storage_device *dev, u64 lpar,
 			       u64 start_sector, u64 sectors, int write)
 {
 	unsigned int region_id = dev->regions[dev->region_idx].id;
-	const char *op = write ? "write" : "read";
+	const char *op = str_write_read(write);
 	int res;
 
 	dev_dbg(&dev->sbd.core, "%s:%u: %s %llu sectors starting at %llu\n",

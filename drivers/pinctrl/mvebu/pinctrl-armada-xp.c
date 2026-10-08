@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Marvell Armada XP pinctrl driver based on mvebu pinctrl core
  *
  * Copyright (C) 2012 Marvell
  *
  * Thomas Petazzoni <thomas.petazzoni@free-electrons.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * This file supports the three variants of Armada XP SoCs that are
  * available: mv78230, mv78260 and mv78460. From a pin muxing
@@ -23,8 +19,8 @@
 #include <linux/platform_device.h>
 #include <linux/clk.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/pinctrl/pinctrl.h>
+#include <linux/property.h>
 #include <linux/bitops.h>
 
 #include "pinctrl-mvebu.h"
@@ -572,14 +568,9 @@ static int armada_xp_pinctrl_resume(struct platform_device *pdev)
 static int armada_xp_pinctrl_probe(struct platform_device *pdev)
 {
 	struct mvebu_pinctrl_soc_info *soc = &armada_xp_pinctrl_info;
-	const struct of_device_id *match =
-		of_match_device(armada_xp_pinctrl_of_match, &pdev->dev);
 	int nregs;
 
-	if (!match)
-		return -ENODEV;
-
-	soc->variant = (unsigned) match->data & 0xff;
+	soc->variant = (unsigned)device_get_match_data(&pdev->dev) & 0xff;
 
 	switch (soc->variant) {
 	case V_MV78230:

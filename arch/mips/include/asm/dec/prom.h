@@ -1,14 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *	include/asm-mips/dec/prom.h
  *
  *	DECstation PROM interface.
  *
  *	Copyright (C) 2002  Maciej W. Rozycki
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
  *
  *	Based on arch/mips/dec/prom/prom.h by the Anonymous.
  */
@@ -164,6 +160,5 @@ extern void prom_identify_arch(u32);
 extern void prom_init_cmdline(s32, s32 *, u32);
 
 extern void register_prom_console(void);
-extern void unregister_prom_console(void);
 
 #endif /* _ASM_DEC_PROM_H */

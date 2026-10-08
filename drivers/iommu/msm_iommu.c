@@ -1,23 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA.
+ * Author: Stepan Moskovchenko <stepanm@codeaurora.org>
  */
 
 #define pr_fmt(fmt)	KBUILD_MODNAME ": " fmt
 #include <linux/kernel.h>
-#include <linux/module.h>
+#include <linux/init.h>
 #include <linux/platform_device.h>
 #include <linux/errno.h>
 #include <linux/io.h>
@@ -29,10 +18,9 @@
 #include <linux/iommu.h>
 #include <linux/clk.h>
 #include <linux/err.h>
-#include <linux/of_iommu.h>
 
 #include <asm/cacheflush.h>
-#include <asm/sizes.h>
+#include <linux/sizes.h>
 
 #include "msm_iommu_hw-8xxx.h"
 #include "msm_iommu.h"
@@ -45,7 +33,7 @@ __asm__ __volatile__ (							\
 /* bitmap of the page sizes currently supported */
 #define MSM_IOMMU_PGSIZES	(SZ_4K | SZ_64K | SZ_1M | SZ_16M)
 
-DEFINE_SPINLOCK(msm_iommu_lock);
+static DEFINE_SPINLOCK(msm_iommu_lock);
 static LIST_HEAD(qcom_iommu_devices);
 static struct iommu_ops msm_iommu_ops;
 
@@ -179,20 +167,22 @@ fail:
 	return;
 }
 
-static void __flush_iotlb_sync(void *cookie)
+static void __flush_iotlb_walk(unsigned long iova, size_t size,
+			       size_t granule, void *cookie)
 {
-	/*
-	 * Nothing is needed here, the barrier to guarantee
-	 * completion of the tlb sync operation is implicitly
-	 * taken care when the iommu client does a writel before
-	 * kick starting the other master.
-	 */
+	__flush_iotlb_range(iova, size, granule, false, cookie);
 }
 
-static const struct iommu_gather_ops msm_iommu_gather_ops = {
+static void __flush_iotlb_page(struct iommu_iotlb_gather *gather,
+			       unsigned long iova, size_t granule, void *cookie)
+{
+	__flush_iotlb_range(iova, granule, granule, true, cookie);
+}
+
+static const struct iommu_flush_ops msm_iommu_flush_ops = {
 	.tlb_flush_all = __flush_iotlb,
-	.tlb_add_flush = __flush_iotlb_range,
-	.tlb_sync = __flush_iotlb_sync,
+	.tlb_flush_walk = __flush_iotlb_walk,
+	.tlb_add_page = __flush_iotlb_page,
 };
 
 static int msm_iommu_alloc_ctx(unsigned long *map, int start, int end)
@@ -281,8 +271,8 @@ static void __program_context(void __iomem *base, int ctx,
 	SET_V2PCFG(base, ctx, 0x3);
 
 	SET_TTBCR(base, ctx, priv->cfg.arm_v7s_cfg.tcr);
-	SET_TTBR0(base, ctx, priv->cfg.arm_v7s_cfg.ttbr[0]);
-	SET_TTBR1(base, ctx, priv->cfg.arm_v7s_cfg.ttbr[1]);
+	SET_TTBR0(base, ctx, priv->cfg.arm_v7s_cfg.ttbr);
+	SET_TTBR1(base, ctx, 0);
 
 	/* Set prrr and nmrr */
 	SET_PRRR(base, ctx, priv->cfg.arm_v7s_cfg.prrr);
@@ -312,18 +302,17 @@ static void __program_context(void __iomem *base, int ctx,
 	SET_M(base, ctx, 1);
 }
 
-static struct iommu_domain *msm_iommu_domain_alloc(unsigned type)
+static struct iommu_domain *msm_iommu_domain_alloc_paging(struct device *dev)
 {
 	struct msm_priv *priv;
-
-	if (type != IOMMU_DOMAIN_UNMANAGED)
-		return NULL;
 
 	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		goto fail_nomem;
 
 	INIT_LIST_HEAD(&priv->list_attached);
+
+	priv->domain.pgsize_bitmap = MSM_IOMMU_PGSIZES;
 
 	priv->domain.geometry.aperture_start = 0;
 	priv->domain.geometry.aperture_end   = (1ULL << 32) - 1;
@@ -352,11 +341,10 @@ static int msm_iommu_domain_config(struct msm_priv *priv)
 	spin_lock_init(&priv->pgtlock);
 
 	priv->cfg = (struct io_pgtable_cfg) {
-		.quirks = IO_PGTABLE_QUIRK_TLBI_ON_MAP,
-		.pgsize_bitmap = msm_iommu_ops.pgsize_bitmap,
+		.pgsize_bitmap = priv->domain.pgsize_bitmap,
 		.ias = 32,
 		.oas = 32,
-		.tlb = &msm_iommu_gather_ops,
+		.tlb = &msm_iommu_flush_ops,
 		.iommu_dev = priv->dev,
 	};
 
@@ -365,8 +353,6 @@ static int msm_iommu_domain_config(struct msm_priv *priv)
 		dev_err(priv->dev, "Failed to allocate pgtable\n");
 		return -EINVAL;
 	}
-
-	msm_iommu_ops.pgsize_bitmap = priv->cfg.pgsize_bitmap;
 
 	return 0;
 }
@@ -390,31 +376,7 @@ static struct msm_iommu_dev *find_iommu_for_dev(struct device *dev)
 	return ret;
 }
 
-static int msm_iommu_add_device(struct device *dev)
-{
-	struct msm_iommu_dev *iommu;
-	struct iommu_group *group;
-	unsigned long flags;
-
-	spin_lock_irqsave(&msm_iommu_lock, flags);
-	iommu = find_iommu_for_dev(dev);
-	spin_unlock_irqrestore(&msm_iommu_lock, flags);
-
-	if (iommu)
-		iommu_device_link(&iommu->iommu, dev);
-	else
-		return -ENODEV;
-
-	group = iommu_group_get_for_dev(dev);
-	if (IS_ERR(group))
-		return PTR_ERR(group);
-
-	iommu_group_put(group);
-
-	return 0;
-}
-
-static void msm_iommu_remove_device(struct device *dev)
+static struct iommu_device *msm_iommu_probe_device(struct device *dev)
 {
 	struct msm_iommu_dev *iommu;
 	unsigned long flags;
@@ -423,10 +385,10 @@ static void msm_iommu_remove_device(struct device *dev)
 	iommu = find_iommu_for_dev(dev);
 	spin_unlock_irqrestore(&msm_iommu_lock, flags);
 
-	if (iommu)
-		iommu_device_unlink(&iommu->iommu, dev);
+	if (!iommu)
+		return ERR_PTR(-ENODEV);
 
-	iommu_group_remove_device(dev);
+	return &iommu->iommu;
 }
 
 static int msm_iommu_attach_dev(struct iommu_domain *domain, struct device *dev)
@@ -459,10 +421,10 @@ static int msm_iommu_attach_dev(struct iommu_domain *domain, struct device *dev)
 				master->num =
 					msm_iommu_alloc_ctx(iommu->context_map,
 							    0, iommu->ncb);
-					if (IS_ERR_VALUE(master->num)) {
-						ret = -ENODEV;
-						goto fail;
-					}
+				if (IS_ERR_VALUE(master->num)) {
+					ret = -ENODEV;
+					goto fail;
+				}
 				config_mids(iommu, master);
 				__program_context(iommu->base, master->num,
 						  priv);
@@ -478,15 +440,20 @@ fail:
 	return ret;
 }
 
-static void msm_iommu_detach_dev(struct iommu_domain *domain,
-				 struct device *dev)
+static int msm_iommu_identity_attach(struct iommu_domain *identity_domain,
+				     struct device *dev)
 {
-	struct msm_priv *priv = to_msm_priv(domain);
+	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
+	struct msm_priv *priv;
 	unsigned long flags;
 	struct msm_iommu_dev *iommu;
 	struct msm_iommu_ctx_dev *master;
-	int ret;
+	int ret = 0;
 
+	if (domain == identity_domain || !domain)
+		return 0;
+
+	priv = to_msm_priv(domain);
 	free_io_pgtable_ops(priv->iop);
 
 	spin_lock_irqsave(&msm_iommu_lock, flags);
@@ -503,33 +470,56 @@ static void msm_iommu_detach_dev(struct iommu_domain *domain,
 	}
 fail:
 	spin_unlock_irqrestore(&msm_iommu_lock, flags);
+	return ret;
 }
 
+static struct iommu_domain_ops msm_iommu_identity_ops = {
+	.attach_dev = msm_iommu_identity_attach,
+};
+
+static struct iommu_domain msm_iommu_identity_domain = {
+	.type = IOMMU_DOMAIN_IDENTITY,
+	.ops = &msm_iommu_identity_ops,
+};
+
 static int msm_iommu_map(struct iommu_domain *domain, unsigned long iova,
-			 phys_addr_t pa, size_t len, int prot)
+			 phys_addr_t pa, size_t pgsize, size_t pgcount,
+			 int prot, gfp_t gfp, size_t *mapped)
 {
 	struct msm_priv *priv = to_msm_priv(domain);
 	unsigned long flags;
 	int ret;
 
 	spin_lock_irqsave(&priv->pgtlock, flags);
-	ret = priv->iop->map(priv->iop, iova, pa, len, prot);
+	ret = priv->iop->map_pages(priv->iop, iova, pa, pgsize, pgcount, prot,
+				   GFP_ATOMIC, mapped);
 	spin_unlock_irqrestore(&priv->pgtlock, flags);
 
 	return ret;
 }
 
+static int msm_iommu_sync_map(struct iommu_domain *domain, unsigned long iova,
+			      size_t size)
+{
+	struct msm_priv *priv = to_msm_priv(domain);
+
+	__flush_iotlb_range(iova, size, SZ_4K, false, priv);
+	return 0;
+}
+
 static size_t msm_iommu_unmap(struct iommu_domain *domain, unsigned long iova,
-			      size_t len)
+			      size_t pgsize, size_t pgcount,
+			      struct iommu_iotlb_gather *gather)
 {
 	struct msm_priv *priv = to_msm_priv(domain);
 	unsigned long flags;
+	size_t ret;
 
 	spin_lock_irqsave(&priv->pgtlock, flags);
-	len = priv->iop->unmap(priv->iop, iova, len);
+	ret = priv->iop->unmap_pages(priv->iop, iova, pgsize, pgcount, gather);
 	spin_unlock_irqrestore(&priv->pgtlock, flags);
 
-	return len;
+	return ret;
 }
 
 static phys_addr_t msm_iommu_iova_to_phys(struct iommu_domain *domain,
@@ -581,11 +571,6 @@ fail:
 	return ret;
 }
 
-static bool msm_iommu_capable(enum iommu_cap cap)
-{
-	return false;
-}
-
 static void print_ctx_regs(void __iomem *base, int ctx)
 {
 	unsigned int fsr = GET_FSR(base, ctx);
@@ -611,32 +596,37 @@ static void print_ctx_regs(void __iomem *base, int ctx)
 	       GET_SCTLR(base, ctx), GET_ACTLR(base, ctx));
 }
 
-static void insert_iommu_master(struct device *dev,
+static int insert_iommu_master(struct device *dev,
 				struct msm_iommu_dev **iommu,
-				struct of_phandle_args *spec)
+				const struct of_phandle_args *spec)
 {
-	struct msm_iommu_ctx_dev *master = dev->archdata.iommu;
+	struct msm_iommu_ctx_dev *master = dev_iommu_priv_get(dev);
 	int sid;
 
 	if (list_empty(&(*iommu)->ctx_list)) {
 		master = kzalloc(sizeof(*master), GFP_ATOMIC);
+		if (!master) {
+			dev_err(dev, "Failed to allocate iommu_master\n");
+			return -ENOMEM;
+		}
 		master->of_node = dev->of_node;
 		list_add(&master->list, &(*iommu)->ctx_list);
-		dev->archdata.iommu = master;
+		dev_iommu_priv_set(dev, master);
 	}
 
 	for (sid = 0; sid < master->num_mids; sid++)
 		if (master->mids[sid] == spec->args[0]) {
-			dev_warn(dev, "Stream ID 0x%hx repeated; ignoring\n",
+			dev_warn(dev, "Stream ID 0x%x repeated; ignoring\n",
 				 sid);
-			return;
+			return 0;
 		}
 
 	master->mids[master->num_mids++] = spec->args[0];
+	return 0;
 }
 
 static int qcom_iommu_of_xlate(struct device *dev,
-			       struct of_phandle_args *spec)
+			       const struct of_phandle_args *spec)
 {
 	struct msm_iommu_dev *iommu = NULL, *iter;
 	unsigned long flags;
@@ -655,7 +645,7 @@ static int qcom_iommu_of_xlate(struct device *dev,
 		goto fail;
 	}
 
-	insert_iommu_master(dev, &iommu, spec);
+	ret = insert_iommu_master(dev, &iommu, spec);
 fail:
 	spin_unlock_irqrestore(&msm_iommu_lock, flags);
 
@@ -698,19 +688,26 @@ fail:
 }
 
 static struct iommu_ops msm_iommu_ops = {
-	.capable = msm_iommu_capable,
-	.domain_alloc = msm_iommu_domain_alloc,
-	.domain_free = msm_iommu_domain_free,
-	.attach_dev = msm_iommu_attach_dev,
-	.detach_dev = msm_iommu_detach_dev,
-	.map = msm_iommu_map,
-	.unmap = msm_iommu_unmap,
-	.iova_to_phys = msm_iommu_iova_to_phys,
-	.add_device = msm_iommu_add_device,
-	.remove_device = msm_iommu_remove_device,
+	.identity_domain = &msm_iommu_identity_domain,
+	.domain_alloc_paging = msm_iommu_domain_alloc_paging,
+	.probe_device = msm_iommu_probe_device,
 	.device_group = generic_device_group,
-	.pgsize_bitmap = MSM_IOMMU_PGSIZES,
 	.of_xlate = qcom_iommu_of_xlate,
+	.default_domain_ops = &(const struct iommu_domain_ops) {
+		.attach_dev	= msm_iommu_attach_dev,
+		.map_pages	= msm_iommu_map,
+		.unmap_pages	= msm_iommu_unmap,
+		/*
+		 * Nothing is needed here, the barrier to guarantee
+		 * completion of the tlb sync operation is implicitly
+		 * taken care when the iommu client does a writel before
+		 * kick starting the other master.
+		 */
+		.iotlb_sync	= NULL,
+		.iotlb_sync_map	= msm_iommu_sync_map,
+		.iova_to_phys	= msm_iommu_iova_to_phys,
+		.free		= msm_iommu_domain_free,
+	}
 };
 
 static int msm_iommu_probe(struct platform_device *pdev)
@@ -727,52 +724,32 @@ static int msm_iommu_probe(struct platform_device *pdev)
 	iommu->dev = &pdev->dev;
 	INIT_LIST_HEAD(&iommu->ctx_list);
 
-	iommu->pclk = devm_clk_get(iommu->dev, "smmu_pclk");
-	if (IS_ERR(iommu->pclk)) {
-		dev_err(iommu->dev, "could not get smmu_pclk\n");
-		return PTR_ERR(iommu->pclk);
-	}
+	iommu->pclk = devm_clk_get_prepared(iommu->dev, "smmu_pclk");
+	if (IS_ERR(iommu->pclk))
+		return dev_err_probe(iommu->dev, PTR_ERR(iommu->pclk),
+				     "could not get smmu_pclk\n");
 
-	ret = clk_prepare(iommu->pclk);
-	if (ret) {
-		dev_err(iommu->dev, "could not prepare smmu_pclk\n");
-		return ret;
-	}
-
-	iommu->clk = devm_clk_get(iommu->dev, "iommu_clk");
-	if (IS_ERR(iommu->clk)) {
-		dev_err(iommu->dev, "could not get iommu_clk\n");
-		clk_unprepare(iommu->pclk);
-		return PTR_ERR(iommu->clk);
-	}
-
-	ret = clk_prepare(iommu->clk);
-	if (ret) {
-		dev_err(iommu->dev, "could not prepare iommu_clk\n");
-		clk_unprepare(iommu->pclk);
-		return ret;
-	}
+	iommu->clk = devm_clk_get_prepared(iommu->dev, "iommu_clk");
+	if (IS_ERR(iommu->clk))
+		return dev_err_probe(iommu->dev, PTR_ERR(iommu->clk),
+				     "could not get iommu_clk\n");
 
 	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	iommu->base = devm_ioremap_resource(iommu->dev, r);
 	if (IS_ERR(iommu->base)) {
-		dev_err(iommu->dev, "could not get iommu base\n");
-		ret = PTR_ERR(iommu->base);
-		goto fail;
+		ret = dev_err_probe(iommu->dev, PTR_ERR(iommu->base), "could not get iommu base\n");
+		return ret;
 	}
 	ioaddr = r->start;
 
 	iommu->irq = platform_get_irq(pdev, 0);
-	if (iommu->irq < 0) {
-		dev_err(iommu->dev, "could not get iommu irq\n");
-		ret = -ENODEV;
-		goto fail;
-	}
+	if (iommu->irq < 0)
+		return -ENODEV;
 
 	ret = of_property_read_u32(iommu->dev->of_node, "qcom,ncb", &val);
 	if (ret) {
 		dev_err(iommu->dev, "could not get ncb\n");
-		goto fail;
+		return ret;
 	}
 	iommu->ncb = val;
 
@@ -787,8 +764,7 @@ static int msm_iommu_probe(struct platform_device *pdev)
 
 	if (!par) {
 		pr_err("Invalid PAR value detected\n");
-		ret = -ENODEV;
-		goto fail;
+		return -ENODEV;
 	}
 
 	ret = devm_request_threaded_irq(iommu->dev, iommu->irq, NULL,
@@ -798,7 +774,7 @@ static int msm_iommu_probe(struct platform_device *pdev)
 					iommu);
 	if (ret) {
 		pr_err("Request IRQ %d failed with ret=%d\n", iommu->irq, ret);
-		goto fail;
+		return ret;
 	}
 
 	list_add(&iommu->dev_node, &qcom_iommu_devices);
@@ -807,27 +783,18 @@ static int msm_iommu_probe(struct platform_device *pdev)
 				     "msm-smmu.%pa", &ioaddr);
 	if (ret) {
 		pr_err("Could not add msm-smmu at %pa to sysfs\n", &ioaddr);
-		goto fail;
+		return ret;
 	}
 
-	iommu_device_set_ops(&iommu->iommu, &msm_iommu_ops);
-	iommu_device_set_fwnode(&iommu->iommu, &pdev->dev.of_node->fwnode);
-
-	ret = iommu_device_register(&iommu->iommu);
+	ret = iommu_device_register(&iommu->iommu, &msm_iommu_ops, &pdev->dev);
 	if (ret) {
 		pr_err("Could not register msm-smmu at %pa\n", &ioaddr);
-		goto fail;
+		return ret;
 	}
-
-	bus_set_iommu(&platform_bus_type, &msm_iommu_ops);
 
 	pr_info("device mapped at %p, irq %d with %d ctx banks\n",
 		iommu->base, iommu->irq, iommu->ncb);
 
-	return ret;
-fail:
-	clk_unprepare(iommu->clk);
-	clk_unprepare(iommu->pclk);
 	return ret;
 }
 
@@ -836,42 +803,11 @@ static const struct of_device_id msm_iommu_dt_match[] = {
 	{}
 };
 
-static int msm_iommu_remove(struct platform_device *pdev)
-{
-	struct msm_iommu_dev *iommu = platform_get_drvdata(pdev);
-
-	clk_unprepare(iommu->clk);
-	clk_unprepare(iommu->pclk);
-	return 0;
-}
-
 static struct platform_driver msm_iommu_driver = {
 	.driver = {
 		.name	= "msm_iommu",
 		.of_match_table = msm_iommu_dt_match,
 	},
 	.probe		= msm_iommu_probe,
-	.remove		= msm_iommu_remove,
 };
-
-static int __init msm_iommu_driver_init(void)
-{
-	int ret;
-
-	ret = platform_driver_register(&msm_iommu_driver);
-	if (ret != 0)
-		pr_err("Failed to register IOMMU driver\n");
-
-	return ret;
-}
-
-static void __exit msm_iommu_driver_exit(void)
-{
-	platform_driver_unregister(&msm_iommu_driver);
-}
-
-subsys_initcall(msm_iommu_driver_init);
-module_exit(msm_iommu_driver_exit);
-
-MODULE_LICENSE("GPL v2");
-MODULE_AUTHOR("Stepan Moskovchenko <stepanm@codeaurora.org>");
+builtin_platform_driver(msm_iommu_driver);

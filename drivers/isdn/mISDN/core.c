@@ -1,15 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright 2008  by Karsten Keil <kkeil@novell.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #include <linux/slab.h>
@@ -23,6 +14,7 @@
 static u_int debug;
 
 MODULE_AUTHOR("Karsten Keil");
+MODULE_DESCRIPTION("Modular ISDN core driver");
 MODULE_LICENSE("GPL");
 module_param(debug, uint, S_IRUGO | S_IWUSR);
 
@@ -148,9 +140,9 @@ static struct attribute *mISDN_attrs[] = {
 };
 ATTRIBUTE_GROUPS(mISDN);
 
-static int mISDN_uevent(struct device *dev, struct kobj_uevent_env *env)
+static int mISDN_uevent(const struct device *dev, struct kobj_uevent_env *env)
 {
-	struct mISDNdevice *mdev = dev_to_mISDN(dev);
+	const struct mISDNdevice *mdev = dev_to_mISDN(dev);
 
 	if (!mdev)
 		return 0;
@@ -161,18 +153,11 @@ static int mISDN_uevent(struct device *dev, struct kobj_uevent_env *env)
 	return 0;
 }
 
-static void mISDN_class_release(struct class *cls)
-{
-	/* do nothing, it's static */
-}
-
 static struct class mISDN_class = {
 	.name = "mISDN",
-	.owner = THIS_MODULE,
 	.dev_uevent = mISDN_uevent,
 	.dev_groups = mISDN_groups,
 	.dev_release = mISDN_dev_release,
-	.class_release = mISDN_class_release,
 };
 
 static int
@@ -307,20 +292,6 @@ get_Bprotocol4mask(u_int m)
 		}
 	read_unlock(&bp_lock);
 	return NULL;
-}
-
-struct Bprotocol *
-get_Bprotocol4id(u_int id)
-{
-	u_int	m;
-
-	if (id < ISDN_P_B_START || id > 63) {
-		printk(KERN_WARNING "%s id not in range  %d\n",
-		       __func__, id);
-		return NULL;
-	}
-	m = 1 << (id & ISDN_P_B_MASK);
-	return get_Bprotocol4mask(m);
 }
 
 int

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* SCTP kernel implementation
  * (C) Copyright IBM Corp. 2001, 2004
  * Copyright (c) 1999-2000 Cisco, Inc.
@@ -8,22 +9,6 @@
  * This is part of the SCTP Linux Kernel Implementation.
  *
  * These are the state functions for the state machine.
- *
- * This SCTP implementation is free software;
- * you can redistribute it and/or modify it under the terms of
- * the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This SCTP implementation is distributed in the hope that it
- * will be useful, but WITHOUT ANY WARRANTY; without even the implied
- *                 ************************
- * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
@@ -45,7 +30,7 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <crypto/algapi.h>
+#include <crypto/utils.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/ip.h>
@@ -54,6 +39,7 @@
 #include <linux/inet.h>
 #include <linux/slab.h>
 #include <net/sock.h>
+#include <net/proto_memory.h>
 #include <net/inet_ecn.h>
 #include <linux/skbuff.h>
 #include <net/sctp/sctp.h>
@@ -97,6 +83,13 @@ static enum sctp_disposition sctp_sf_shut_8_4_5(
 					void *arg,
 					struct sctp_cmd_seq *commands);
 static enum sctp_disposition sctp_sf_tabort_8_4_8(
+					struct net *net,
+					const struct sctp_endpoint *ep,
+					const struct sctp_association *asoc,
+					const union sctp_subtype type,
+					void *arg,
+					struct sctp_cmd_seq *commands);
+static enum sctp_disposition sctp_sf_new_encap_port(
 					struct net *net,
 					const struct sctp_endpoint *ep,
 					const struct sctp_association *asoc,
@@ -335,11 +328,6 @@ enum sctp_disposition sctp_sf_do_5_1B_init(struct net *net,
 	struct sctp_packet *packet;
 	int len;
 
-	/* Update socket peer label if first association. */
-	if (security_sctp_assoc_request((struct sctp_endpoint *)ep,
-					chunk->skb))
-		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
-
 	/* 6.10 Bundling
 	 * An endpoint MUST NOT bundle INIT, INIT ACK or
 	 * SHUTDOWN COMPLETE with any other chunks.
@@ -376,7 +364,7 @@ enum sctp_disposition sctp_sf_do_5_1B_init(struct net *net,
 
 	/* If the INIT is coming toward a closing socket, we'll send back
 	 * and ABORT.  Essentially, this catches the race of INIT being
-	 * backloged to the socket at the same time as the user isses close().
+	 * backloged to the socket at the same time as the user issues close().
 	 * Since the socket and all its associations are going away, we
 	 * can treat this OOTB
 	 */
@@ -423,6 +411,12 @@ enum sctp_disposition sctp_sf_do_5_1B_init(struct net *net,
 	new_asoc = sctp_make_temp_asoc(ep, chunk, GFP_ATOMIC);
 	if (!new_asoc)
 		goto nomem;
+
+	/* Update socket peer label if first association. */
+	if (security_sctp_assoc_request(new_asoc, chunk->skb)) {
+		sctp_association_free(new_asoc);
+		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
+	}
 
 	if (sctp_assoc_set_bind_addr_from_ep(new_asoc,
 					     sctp_scope(sctp_source(chunk)),
@@ -609,6 +603,11 @@ enum sctp_disposition sctp_sf_do_5_1C_ack(struct net *net,
 	sctp_add_cmd_sf(commands, SCTP_CMD_PEER_INIT,
 			SCTP_PEER_INIT(initchunk));
 
+	/* SCTP-AUTH: generate the association shared keys so that
+	 * we can potentially sign the COOKIE-ECHO.
+	 */
+	sctp_add_cmd_sf(commands, SCTP_CMD_ASSOC_SHKEY, SCTP_NULL());
+
 	/* Reset init error count upon receipt of INIT-ACK.  */
 	sctp_add_cmd_sf(commands, SCTP_CMD_INIT_COUNTER_RESET, SCTP_NULL());
 
@@ -622,11 +621,6 @@ enum sctp_disposition sctp_sf_do_5_1C_ack(struct net *net,
 			SCTP_TO(SCTP_EVENT_TIMEOUT_T1_COOKIE));
 	sctp_add_cmd_sf(commands, SCTP_CMD_NEW_STATE,
 			SCTP_STATE(SCTP_STATE_COOKIE_ECHOED));
-
-	/* SCTP-AUTH: genereate the assocition shared keys so that
-	 * we can potentially signe the COOKIE-ECHO.
-	 */
-	sctp_add_cmd_sf(commands, SCTP_CMD_ASSOC_SHKEY, SCTP_NULL());
 
 	/* 5.1 C) "A" shall then send the State Cookie received in the
 	 * INIT ACK chunk in a COOKIE ECHO chunk, ...
@@ -789,6 +783,10 @@ enum sctp_disposition sctp_sf_do_5_1D_ce(struct net *net,
 		}
 	}
 
+	if (security_sctp_assoc_request(new_asoc, chunk->head_skb ?: chunk->skb)) {
+		sctp_association_free(new_asoc);
+		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
+	}
 
 	/* Delay state machine commands until later.
 	 *
@@ -798,15 +796,14 @@ enum sctp_disposition sctp_sf_do_5_1D_ce(struct net *net,
 	/* This is a brand-new association, so these are not yet side
 	 * effects--it is safe to run them here.
 	 */
-	peer_init = &chunk->subh.cookie_hdr->c.peer_init[0];
-
+	peer_init = (struct sctp_init_chunk *)(chunk->subh.cookie_hdr + 1);
 	if (!sctp_process_init(new_asoc, chunk,
 			       &chunk->subh.cookie_hdr->c.peer_addr,
 			       peer_init, GFP_ATOMIC))
 		goto nomem_init;
 
 	/* SCTP-AUTH:  Now that we've populate required fields in
-	 * sctp_process_init, set up the assocaition shared keys as
+	 * sctp_process_init, set up the association shared keys as
 	 * necessary so that we can potentially authenticate the ACK
 	 */
 	error = sctp_auth_asoc_init_active_key(new_asoc, GFP_ATOMIC);
@@ -857,7 +854,7 @@ enum sctp_disposition sctp_sf_do_5_1D_ce(struct net *net,
 
 	/* Add all the state machine commands now since we've created
 	 * everything.  This way we don't introduce memory corruptions
-	 * during side-effect processing and correclty count established
+	 * during side-effect processing and correctly count established
 	 * associations.
 	 */
 	sctp_add_cmd_sf(commands, SCTP_CMD_NEW_ASOC, SCTP_ASOC(new_asoc));
@@ -935,6 +932,11 @@ enum sctp_disposition sctp_sf_do_5_1E_ca(struct net *net,
 	if (!sctp_vtag_verify(chunk, asoc))
 		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
 
+	/* Set peer label for connection. */
+	if (security_sctp_assoc_established((struct sctp_association *)asoc,
+					    chunk->head_skb ?: chunk->skb))
+		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
+
 	/* Verify that the chunk length for the COOKIE-ACK is OK.
 	 * If we don't do this, any bundled chunks may be junked.
 	 */
@@ -943,15 +945,12 @@ enum sctp_disposition sctp_sf_do_5_1E_ca(struct net *net,
 						  commands);
 
 	/* Reset init error count upon receipt of COOKIE-ACK,
-	 * to avoid problems with the managemement of this
+	 * to avoid problems with the management of this
 	 * counter in stale cookie situations when a transition back
 	 * from the COOKIE-ECHOED state to the COOKIE-WAIT
 	 * state is performed.
 	 */
 	sctp_add_cmd_sf(commands, SCTP_CMD_INIT_COUNTER_RESET, SCTP_NULL());
-
-	/* Set peer label for connection. */
-	security_inet_conn_established(ep->base.sk, chunk->skb);
 
 	/* RFC 2960 5.1 Normal Establishment of an Association
 	 *
@@ -1024,7 +1023,7 @@ static enum sctp_disposition sctp_sf_heartbeat(
 	struct sctp_chunk *reply;
 
 	/* Send a heartbeat to our peer.  */
-	reply = sctp_make_heartbeat(asoc, transport);
+	reply = sctp_make_heartbeat(asoc, transport, 0);
 	if (!reply)
 		return SCTP_DISPOSITION_NOMEM;
 
@@ -1111,6 +1110,31 @@ enum sctp_disposition sctp_sf_send_reconf(struct net *net,
 	sctp_add_cmd_sf(commands, SCTP_CMD_REPLY,
 			SCTP_CHUNK(asoc->strreset_chunk));
 	sctp_add_cmd_sf(commands, SCTP_CMD_STRIKE, SCTP_TRANSPORT(transport));
+
+	return SCTP_DISPOSITION_CONSUME;
+}
+
+/* send hb chunk with padding for PLPMUTD.  */
+enum sctp_disposition sctp_sf_send_probe(struct net *net,
+					 const struct sctp_endpoint *ep,
+					 const struct sctp_association *asoc,
+					 const union sctp_subtype type,
+					 void *arg,
+					 struct sctp_cmd_seq *commands)
+{
+	struct sctp_transport *transport = (struct sctp_transport *)arg;
+	struct sctp_chunk *reply;
+
+	if (!sctp_transport_pl_enabled(transport))
+		return SCTP_DISPOSITION_CONSUME;
+
+	sctp_transport_pl_send(transport);
+	reply = sctp_make_heartbeat(asoc, transport, transport->pl.probe_size);
+	if (!reply)
+		return SCTP_DISPOSITION_NOMEM;
+	sctp_add_cmd_sf(commands, SCTP_CMD_REPLY, SCTP_CHUNK(reply));
+	sctp_add_cmd_sf(commands, SCTP_CMD_PROBE_TIMER_UPDATE,
+			SCTP_TRANSPORT(transport));
 
 	return SCTP_DISPOSITION_CONSUME;
 }
@@ -1263,6 +1287,17 @@ enum sctp_disposition sctp_sf_backbeat_8_3(struct net *net,
 	if (hbinfo->hb_nonce != link->hb_nonce)
 		return SCTP_DISPOSITION_DISCARD;
 
+	if (hbinfo->probe_size) {
+		if (hbinfo->probe_size != link->pl.probe_size ||
+		    !sctp_transport_pl_enabled(link))
+			return SCTP_DISPOSITION_DISCARD;
+
+		if (sctp_transport_pl_recv(link))
+			return SCTP_DISPOSITION_CONSUME;
+
+		return sctp_sf_send_probe(net, ep, asoc, type, link, commands);
+	}
+
 	max_interval = link->hbinterval + link->rto;
 
 	/* Check if the timestamp looks valid.  */
@@ -1304,7 +1339,7 @@ static int sctp_sf_send_restart_abort(struct net *net, union sctp_addr *ssa,
 	 * throughout the code today.
 	 */
 	errhdr = (struct sctp_errhdr *)buffer;
-	addrparm = (union sctp_addr_param *)errhdr->variable;
+	addrparm = (union sctp_addr_param *)(errhdr + 1);
 
 	/* Copy into a parm format. */
 	len = af->to_addr_param(ssa, addrparm);
@@ -1357,7 +1392,7 @@ static int sctp_sf_check_restart_addrs(const struct sctp_association *new_asoc,
 				       struct sctp_chunk *init,
 				       struct sctp_cmd_seq *commands)
 {
-	struct net *net = sock_net(new_asoc->base.sk);
+	struct net *net = new_asoc->base.net;
 	struct sctp_transport *new_addr;
 	int ret = 1;
 
@@ -1472,7 +1507,7 @@ static char sctp_tietags_compare(struct sctp_association *new_asoc,
 	return 'E';
 }
 
-/* Common helper routine for both duplicate and simulataneous INIT
+/* Common helper routine for both duplicate and simultaneous INIT
  * chunk handling.
  */
 static enum sctp_disposition sctp_sf_do_unexpected_init(
@@ -1489,11 +1524,6 @@ static enum sctp_disposition sctp_sf_do_unexpected_init(
 	enum sctp_disposition retval;
 	struct sctp_packet *packet;
 	int len;
-
-	/* Update socket peer label if first association. */
-	if (security_sctp_assoc_request((struct sctp_endpoint *)ep,
-					chunk->skb))
-		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
 
 	/* 6.10 Bundling
 	 * An endpoint MUST NOT bundle INIT, INIT ACK or
@@ -1516,6 +1546,9 @@ static enum sctp_disposition sctp_sf_do_unexpected_init(
 	 */
 	if (chunk->sctp_hdr->vtag != 0)
 		return sctp_sf_tabort_8_4_8(net, ep, asoc, type, arg, commands);
+
+	if (SCTP_INPUT_CB(chunk->skb)->encap_port != chunk->transport->encap_port)
+		return sctp_sf_new_encap_port(net, ep, asoc, type, arg, commands);
 
 	/* Grab the INIT header.  */
 	chunk->subh.init_hdr = (struct sctp_inithdr *)chunk->skb->data;
@@ -1563,6 +1596,12 @@ static enum sctp_disposition sctp_sf_do_unexpected_init(
 	new_asoc = sctp_make_temp_asoc(ep, chunk, GFP_ATOMIC);
 	if (!new_asoc)
 		goto nomem;
+
+	/* Update socket peer label if first association. */
+	if (security_sctp_assoc_request(new_asoc, chunk->skb)) {
+		sctp_association_free(new_asoc);
+		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
+	}
 
 	if (sctp_assoc_set_bind_addr_from_ep(new_asoc,
 				sctp_scope(sctp_source(chunk)), GFP_ATOMIC) < 0)
@@ -1698,7 +1737,7 @@ enum sctp_disposition sctp_sf_do_5_2_1_siminit(
 					void *arg,
 					struct sctp_cmd_seq *commands)
 {
-	/* Call helper to do the real work for both simulataneous and
+	/* Call helper to do the real work for both simultaneous and
 	 * duplicate INIT chunk handling.
 	 */
 	return sctp_sf_do_unexpected_init(net, ep, asoc, type, arg, commands);
@@ -1753,7 +1792,7 @@ enum sctp_disposition sctp_sf_do_5_2_2_dupinit(
 					void *arg,
 					struct sctp_cmd_seq *commands)
 {
-	/* Call helper to do the real work for both simulataneous and
+	/* Call helper to do the real work for both simultaneous and
 	 * duplicate INIT chunk handling.
 	 */
 	return sctp_sf_do_unexpected_init(net, ep, asoc, type, arg, commands);
@@ -1786,6 +1825,30 @@ enum sctp_disposition sctp_sf_do_5_2_3_initack(
 		return sctp_sf_discard_chunk(net, ep, asoc, type, arg, commands);
 }
 
+static int sctp_sf_do_assoc_update(struct sctp_association *asoc,
+				   struct sctp_association *new,
+				   struct sctp_cmd_seq *cmds)
+{
+	struct net *net = asoc->base.net;
+	struct sctp_chunk *abort;
+
+	if (!sctp_assoc_update(asoc, new))
+		return 0;
+
+	abort = sctp_make_abort(asoc, NULL, sizeof(struct sctp_errhdr));
+	if (abort) {
+		sctp_init_cause(abort, SCTP_ERROR_RSRC_LOW, 0);
+		sctp_add_cmd_sf(cmds, SCTP_CMD_REPLY, SCTP_CHUNK(abort));
+	}
+	sctp_add_cmd_sf(cmds, SCTP_CMD_SET_SK_ERR, SCTP_ERROR(ECONNABORTED));
+	sctp_add_cmd_sf(cmds, SCTP_CMD_ASSOC_FAILED,
+			SCTP_PERR(SCTP_ERROR_RSRC_LOW));
+	SCTP_INC_STATS(net, SCTP_MIB_ABORTEDS);
+	SCTP_DEC_STATS(net, SCTP_MIB_CURRESTAB);
+
+	return -ENOMEM;
+}
+
 /* Unexpected COOKIE-ECHO handler for peer restart (Table 2, action 'A')
  *
  * Section 5.2.4
@@ -1808,8 +1871,7 @@ static enum sctp_disposition sctp_sf_do_dupcook_a(
 	/* new_asoc is a brand-new association, so these are not yet
 	 * side effects--it is safe to run them here.
 	 */
-	peer_init = &chunk->subh.cookie_hdr->c.peer_init[0];
-
+	peer_init = (struct sctp_init_chunk *)(chunk->subh.cookie_hdr + 1);
 	if (!sctp_process_init(new_asoc, chunk, sctp_source(chunk), peer_init,
 			       GFP_ATOMIC))
 		goto nomem;
@@ -1866,21 +1928,8 @@ static enum sctp_disposition sctp_sf_do_dupcook_a(
 	sctp_add_cmd_sf(commands, SCTP_CMD_PURGE_ASCONF_QUEUE, SCTP_NULL());
 
 	/* Update the content of current association. */
-	if (sctp_assoc_update((struct sctp_association *)asoc, new_asoc)) {
-		struct sctp_chunk *abort;
-
-		abort = sctp_make_abort(asoc, NULL, sizeof(struct sctp_errhdr));
-		if (abort) {
-			sctp_init_cause(abort, SCTP_ERROR_RSRC_LOW, 0);
-			sctp_add_cmd_sf(commands, SCTP_CMD_REPLY, SCTP_CHUNK(abort));
-		}
-		sctp_add_cmd_sf(commands, SCTP_CMD_SET_SK_ERR, SCTP_ERROR(ECONNABORTED));
-		sctp_add_cmd_sf(commands, SCTP_CMD_ASSOC_FAILED,
-				SCTP_PERR(SCTP_ERROR_RSRC_LOW));
-		SCTP_INC_STATS(net, SCTP_MIB_ABORTEDS);
-		SCTP_DEC_STATS(net, SCTP_MIB_CURRESTAB);
+	if (sctp_sf_do_assoc_update((struct sctp_association *)asoc, new_asoc, commands))
 		goto nomem;
-	}
 
 	repl = sctp_make_cookie_ack(asoc, chunk);
 	if (!repl)
@@ -1942,7 +1991,7 @@ static enum sctp_disposition sctp_sf_do_dupcook_b(
 	/* new_asoc is a brand-new association, so these are not yet
 	 * side effects--it is safe to run them here.
 	 */
-	peer_init = &chunk->subh.cookie_hdr->c.peer_init[0];
+	peer_init = (struct sctp_init_chunk *)(chunk->subh.cookie_hdr + 1);
 	if (!sctp_process_init(new_asoc, chunk, sctp_source(chunk), peer_init,
 			       GFP_ATOMIC))
 		goto nomem;
@@ -1953,15 +2002,17 @@ static enum sctp_disposition sctp_sf_do_dupcook_b(
 	if (!sctp_auth_chunk_verify(net, chunk, new_asoc))
 		return SCTP_DISPOSITION_DISCARD;
 
-	/* Update the content of current association.  */
-	sctp_add_cmd_sf(commands, SCTP_CMD_UPDATE_ASSOC, SCTP_ASOC(new_asoc));
 	sctp_add_cmd_sf(commands, SCTP_CMD_NEW_STATE,
 			SCTP_STATE(SCTP_STATE_ESTABLISHED));
 	if (asoc->state < SCTP_STATE_ESTABLISHED)
 		SCTP_INC_STATS(net, SCTP_MIB_CURRESTAB);
 	sctp_add_cmd_sf(commands, SCTP_CMD_HB_TIMERS_START, SCTP_NULL());
 
-	repl = sctp_make_cookie_ack(new_asoc, chunk);
+	/* Update the content of current association.  */
+	if (sctp_sf_do_assoc_update((struct sctp_association *)asoc, new_asoc, commands))
+		goto nomem;
+
+	repl = sctp_make_cookie_ack(asoc, chunk);
 	if (!repl)
 		goto nomem;
 
@@ -2211,13 +2262,6 @@ enum sctp_disposition sctp_sf_do_5_2_4_dupcook(
 		}
 	}
 
-	/* Update socket peer label if first association. */
-	if (security_sctp_assoc_request((struct sctp_endpoint *)ep,
-					chunk->skb)) {
-		sctp_association_free(new_asoc);
-		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
-	}
-
 	/* Set temp so that it won't be added into hashtable */
 	new_asoc->temp = 1;
 
@@ -2225,6 +2269,22 @@ enum sctp_disposition sctp_sf_do_5_2_4_dupcook(
 	 * current association.
 	 */
 	action = sctp_tietags_compare(new_asoc, asoc);
+
+	/* In cases C and E the association doesn't enter the ESTABLISHED
+	 * state, so there is no need to call security_sctp_assoc_request().
+	 */
+	switch (action) {
+	case 'A': /* Association restart. */
+	case 'B': /* Collision case B. */
+	case 'D': /* Collision case D. */
+		/* Update socket peer label if first association. */
+		if (security_sctp_assoc_request((struct sctp_association *)asoc,
+						chunk->head_skb ?: chunk->skb)) {
+			sctp_association_free(new_asoc);
+			return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
+		}
+		break;
+	}
 
 	switch (action) {
 	case 'A': /* Association restart. */
@@ -2252,11 +2312,11 @@ enum sctp_disposition sctp_sf_do_5_2_4_dupcook(
 		break;
 	}
 
-	/* Delete the tempory new association. */
+	/* Delete the temporary new association. */
 	sctp_add_cmd_sf(commands, SCTP_CMD_SET_ASOC, SCTP_ASOC(new_asoc));
 	sctp_add_cmd_sf(commands, SCTP_CMD_DELETE_TCB, SCTP_NULL());
 
-	/* Restore association pointer to provide SCTP command interpeter
+	/* Restore association pointer to provide SCTP command interpreter
 	 * with a valid context in case it needs to manipulate
 	 * the queues */
 	sctp_add_cmd_sf(commands, SCTP_CMD_SET_ASOC,
@@ -2950,7 +3010,7 @@ __sctp_sf_do_9_2_reshutack(struct net *net, const struct sctp_endpoint *ep,
 						  commands);
 
 	/* Since we are not going to really process this INIT, there
-	 * is no point in verifying chunk boundries.  Just generate
+	 * is no point in verifying chunk boundaries.  Just generate
 	 * the SHUTDOWN ACK.
 	 */
 	reply = sctp_make_shutdown_ack(asoc, chunk);
@@ -3353,8 +3413,6 @@ enum sctp_disposition sctp_sf_eat_sack_6_2(struct net *net,
 	struct sctp_sackhdr *sackh;
 	__u32 ctsn;
 
-	trace_sctp_probe(ep, asoc, chunk);
-
 	if (!sctp_vtag_verify(chunk, asoc))
 		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
 
@@ -3371,6 +3429,15 @@ enum sctp_disposition sctp_sf_eat_sack_6_2(struct net *net,
 	chunk->subh.sack_hdr = sackh;
 	ctsn = ntohl(sackh->cum_tsn_ack);
 
+	/* If Cumulative TSN Ack beyond the max tsn currently
+	 * send, terminating the association and respond to the
+	 * sender with an ABORT.
+	 */
+	if (TSN_lte(asoc->next_tsn, ctsn))
+		return sctp_sf_violation_ctsn(net, ep, asoc, type, arg, commands);
+
+	trace_sctp_probe(ep, asoc, chunk);
+
 	/* i) If Cumulative TSN Ack is less than the Cumulative TSN
 	 *     Ack Point, then drop the SACK.  Since Cumulative TSN
 	 *     Ack is monotonically increasing, a SACK whose
@@ -3383,13 +3450,6 @@ enum sctp_disposition sctp_sf_eat_sack_6_2(struct net *net,
 
 		return SCTP_DISPOSITION_DISCARD;
 	}
-
-	/* If Cumulative TSN Ack beyond the max tsn currently
-	 * send, terminating the association and respond to the
-	 * sender with an ABORT.
-	 */
-	if (!TSN_lt(ctsn, asoc->next_tsn))
-		return sctp_sf_violation_ctsn(net, ep, asoc, type, arg, commands);
 
 	/* Return this SACK for further processing.  */
 	sctp_add_cmd_sf(commands, SCTP_CMD_PROCESS_SACK, SCTP_CHUNK(chunk));
@@ -3448,6 +3508,45 @@ static enum sctp_disposition sctp_sf_tabort_8_4_8(
 		packet->vtag = ntohl(chunk->sctp_hdr->vtag);
 
 	/* Set the skb to the belonging sock for accounting.  */
+	abort->skb->sk = ep->base.sk;
+
+	sctp_packet_append_chunk(packet, abort);
+
+	sctp_add_cmd_sf(commands, SCTP_CMD_SEND_PKT, SCTP_PACKET(packet));
+
+	SCTP_INC_STATS(net, SCTP_MIB_OUTCTRLCHUNKS);
+
+	sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
+	return SCTP_DISPOSITION_CONSUME;
+}
+
+/* Handling of SCTP Packets Containing an INIT Chunk Matching an
+ * Existing Associations when the UDP encap port is incorrect.
+ *
+ * From Section 4 at draft-tuexen-tsvwg-sctp-udp-encaps-cons-03.
+ */
+static enum sctp_disposition sctp_sf_new_encap_port(
+					struct net *net,
+					const struct sctp_endpoint *ep,
+					const struct sctp_association *asoc,
+					const union sctp_subtype type,
+					void *arg,
+					struct sctp_cmd_seq *commands)
+{
+	struct sctp_packet *packet = NULL;
+	struct sctp_chunk *chunk = arg;
+	struct sctp_chunk *abort;
+
+	packet = sctp_ootb_pkt_new(net, asoc, chunk);
+	if (!packet)
+		return SCTP_DISPOSITION_NOMEM;
+
+	abort = sctp_make_new_encap_port(asoc, chunk);
+	if (!abort) {
+		sctp_ootb_pkt_free(packet);
+		return SCTP_DISPOSITION_NOMEM;
+	}
+
 	abort->skb->sk = ep->base.sk;
 
 	sctp_packet_append_chunk(packet, abort);
@@ -3541,7 +3640,7 @@ enum sctp_disposition sctp_sf_do_9_2_final(struct net *net,
 		goto nomem_chunk;
 
 	/* Do all the commands now (after allocation), so that we
-	 * have consistent state if memory allocation failes
+	 * have consistent state if memory allocation fails
 	 */
 	sctp_add_cmd_sf(commands, SCTP_CMD_EVENT_ULP, SCTP_ULPEVENT(ev));
 
@@ -3725,7 +3824,7 @@ static enum sctp_disposition sctp_sf_shut_8_4_5(
 	SCTP_INC_STATS(net, SCTP_MIB_OUTCTRLCHUNKS);
 
 	/* We need to discard the rest of the packet to prevent
-	 * potential bomming attacks from additional bundled chunks.
+	 * potential boomming attacks from additional bundled chunks.
 	 * This is documented in SCTP Threats ID.
 	 */
 	return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
@@ -3800,7 +3899,8 @@ enum sctp_disposition sctp_sf_do_asconf(struct net *net,
 	 * is received unauthenticated it MUST be silently discarded as
 	 * described in [I-D.ietf-tsvwg-sctp-auth].
 	 */
-	if (!net->sctp.addip_noauth && !chunk->auth)
+	if (!asoc->peer.asconf_capable ||
+	    (!net->sctp.addip_noauth && !chunk->auth))
 		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
 
 	hdr = (struct sctp_addiphdr *)chunk->skb->data;
@@ -3942,7 +4042,8 @@ enum sctp_disposition sctp_sf_do_asconf_ack(struct net *net,
 	 * is received unauthenticated it MUST be silently discarded as
 	 * described in [I-D.ietf-tsvwg-sctp-auth].
 	 */
-	if (!net->sctp.addip_noauth && !asconf_ack->auth)
+	if (!asoc->peer.asconf_capable ||
+	    (!net->sctp.addip_noauth && !asconf_ack->auth))
 		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
 
 	addip_hdr = (struct sctp_addiphdr *)asconf_ack->skb->data;
@@ -3954,7 +4055,7 @@ enum sctp_disposition sctp_sf_do_asconf_ack(struct net *net,
 			   (void *)err_param, commands);
 
 	if (last_asconf) {
-		addip_hdr = (struct sctp_addiphdr *)last_asconf->subh.addip_hdr;
+		addip_hdr = last_asconf->subh.addip_hdr;
 		sent_serial = ntohl(addip_hdr->serial);
 	} else {
 		sent_serial = asoc->addip_serial - 1;
@@ -4052,7 +4153,7 @@ enum sctp_disposition sctp_sf_do_reconf(struct net *net,
 						  (void *)err_param, commands);
 
 	hdr = (struct sctp_reconf_chunk *)chunk->chunk_hdr;
-	sctp_walk_params(param, hdr, params) {
+	sctp_walk_params(param, hdr) {
 		struct sctp_chunk *reply = NULL;
 		struct sctp_ulpevent *ev = NULL;
 
@@ -4234,7 +4335,7 @@ gen_shutdown:
 }
 
 /*
- * SCTP-AUTH Section 6.3 Receiving authenticated chukns
+ * SCTP-AUTH Section 6.3 Receiving authenticated chunks
  *
  *    The receiver MUST use the HMAC algorithm indicated in the HMAC
  *    Identifier field.  If this algorithm was not specified by the
@@ -4262,7 +4363,7 @@ static enum sctp_ierror sctp_sf_authenticate(
 	struct sctp_shared_key *sh_key = NULL;
 	struct sctp_authhdr *auth_hdr;
 	__u8 *save_digest, *digest;
-	struct sctp_hmac *hmac;
+	const struct sctp_hmac *hmac;
 	unsigned int sig_len;
 	__u16 key_id;
 
@@ -4303,7 +4404,7 @@ static enum sctp_ierror sctp_sf_authenticate(
 	 *  3. Compute the new digest
 	 *  4. Compare saved and new digests.
 	 */
-	digest = auth_hdr->hmac;
+	digest = (u8 *)(auth_hdr + 1);
 	skb_pull(chunk->skb, sig_len);
 
 	save_digest = kmemdup(digest, sig_len, GFP_ATOMIC);
@@ -4371,7 +4472,7 @@ enum sctp_disposition sctp_sf_eat_auth(struct net *net,
 			sctp_add_cmd_sf(commands, SCTP_CMD_REPLY,
 					SCTP_CHUNK(err_chunk));
 		}
-		/* Fall Through */
+		fallthrough;
 	case SCTP_IERROR_AUTH_BAD_KEYID:
 	case SCTP_IERROR_BAD_SIG:
 		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
@@ -4795,7 +4896,7 @@ static enum sctp_disposition sctp_sf_violation_ctsn(
 
 /* Handle protocol violation of an invalid chunk bundling.  For example,
  * when we have an association and we receive bundled INIT-ACK, or
- * SHUDOWN-COMPLETE, our peer is clearly violationg the "MUST NOT bundle"
+ * SHUTDOWN-COMPLETE, our peer is clearly violating the "MUST NOT bundle"
  * statement from the specs.  Additionally, there might be an attacker
  * on the path and we may not want to continue this communication.
  */
@@ -4808,9 +4909,6 @@ static enum sctp_disposition sctp_sf_violation_chunk(
 					struct sctp_cmd_seq *commands)
 {
 	static const char err_str[] = "The following chunk violates protocol:";
-
-	if (!asoc)
-		return sctp_sf_violation(net, ep, asoc, type, arg, commands);
 
 	return sctp_sf_abort_violation(net, ep, asoc, arg, commands, err_str,
 				       sizeof(err_str));
@@ -5191,7 +5289,7 @@ enum sctp_disposition sctp_sf_cookie_wait_prm_shutdown(
  * Inputs
  * (endpoint, asoc)
  *
- * The RFC does not explcitly address this issue, but is the route through the
+ * The RFC does not explicitly address this issue, but is the route through the
  * state table when someone issues a shutdown while in COOKIE_ECHOED state.
  *
  * Outputs
@@ -5915,7 +6013,7 @@ enum sctp_disposition sctp_sf_t1_cookie_timer_expire(
 /* RFC2960 9.2 If the timer expires, the endpoint must re-send the SHUTDOWN
  * with the updated last sequential TSN received from its peer.
  *
- * An endpoint should limit the number of retransmissions of the
+ * An endpoint should limit the number of retransmission of the
  * SHUTDOWN chunk to the protocol parameter 'Association.Max.Retrans'.
  * If this threshold is exceeded the endpoint should destroy the TCB and
  * MUST report the peer endpoint unreachable to the upper layer (and
@@ -5993,7 +6091,7 @@ nomem:
 }
 
 /*
- * ADDIP Section 4.1 ASCONF CHunk Procedures
+ * ADDIP Section 4.1 ASCONF Chunk Procedures
  * If the T4 RTO timer expires the endpoint should do B1 to B5
  */
 enum sctp_disposition sctp_sf_t4_timer_expire(
@@ -6331,6 +6429,8 @@ static struct sctp_packet *sctp_ootb_pkt_new(
 	if (!transport)
 		goto nomem;
 
+	transport->encap_port = SCTP_INPUT_CB(chunk->skb)->encap_port;
+
 	/* Cache a route for the transport with the chunk's destination as
 	 * the source address.
 	 */
@@ -6423,7 +6523,7 @@ static int sctp_eat_data(const struct sctp_association *asoc,
 		chunk->ecn_ce_done = 1;
 
 		if (af->is_ce(sctp_gso_headskb(chunk->skb))) {
-			/* Do real work as sideffect. */
+			/* Do real work as side effect. */
 			sctp_add_cmd_sf(commands, SCTP_CMD_ECN_CE,
 					SCTP_U32(tsn));
 		}
@@ -6495,13 +6595,13 @@ static int sctp_eat_data(const struct sctp_association *asoc,
 	 * in sctp_ulpevent_make_rcvmsg will drop the frame if we grow our
 	 * memory usage too much
 	 */
-	if (*sk->sk_prot_creator->memory_pressure) {
+	if (sk_under_memory_pressure(sk)) {
 		if (sctp_tsnmap_has_gap(map) &&
 		    (sctp_tsnmap_get_ctsn(map) + 1) == tsn) {
 			pr_debug("%s: under pressure, reneging for tsn:%u\n",
 				 __func__, tsn);
 			deliver = SCTP_CMD_RENEGE;
-		 }
+		}
 	}
 
 	/*

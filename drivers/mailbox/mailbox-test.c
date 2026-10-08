@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2015 ST Microelectronics
  *
  * Author: Lee Jones <lee.jones@linaro.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/debugfs.h>
@@ -21,6 +17,7 @@
 #include <linux/platform_device.h>
 #include <linux/poll.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/uaccess.h>
 #include <linux/sched/signal.h>
 
@@ -32,7 +29,6 @@
 				 (MBOX_MAX_MSG_LEN / MBOX_BYTES_PER_LINE))
 
 static bool mbox_data_ready;
-static struct dentry *root_debugfs_dir;
 
 struct mbox_test_device {
 	struct device		*dev;
@@ -47,6 +43,7 @@ struct mbox_test_device {
 	struct mutex		mutex;
 	wait_queue_head_t	waitq;
 	struct fasync_struct	*async_queue;
+	struct dentry		*root_debugfs_dir;
 };
 
 static ssize_t mbox_test_signal_write(struct file *filp,
@@ -270,16 +267,16 @@ static int mbox_test_add_debugfs(struct platform_device *pdev,
 	if (!debugfs_initialized())
 		return 0;
 
-	root_debugfs_dir = debugfs_create_dir("mailbox", NULL);
-	if (!root_debugfs_dir) {
+	tdev->root_debugfs_dir = debugfs_create_dir(dev_name(&pdev->dev), NULL);
+	if (IS_ERR(tdev->root_debugfs_dir)) {
 		dev_err(&pdev->dev, "Failed to create Mailbox debugfs\n");
 		return -EINVAL;
 	}
 
-	debugfs_create_file("message", 0600, root_debugfs_dir,
+	debugfs_create_file("message", 0600, tdev->root_debugfs_dir,
 			    tdev, &mbox_test_message_ops);
 
-	debugfs_create_file("signal", 0200, root_debugfs_dir,
+	debugfs_create_file("signal", 0200, tdev->root_debugfs_dir,
 			    tdev, &mbox_test_signal_ops);
 
 	return 0;
@@ -370,8 +367,7 @@ static int mbox_test_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	/* It's okay for MMIO to be NULL */
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	tdev->tx_mmio = devm_ioremap_resource(&pdev->dev, res);
+	tdev->tx_mmio = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
 	if (PTR_ERR(tdev->tx_mmio) == -EBUSY) {
 		/* if reserved area in SRAM, try just ioremap */
 		size = resource_size(res);
@@ -381,8 +377,7 @@ static int mbox_test_probe(struct platform_device *pdev)
 	}
 
 	/* If specified, second reg entry is Rx MMIO */
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-	tdev->rx_mmio = devm_ioremap_resource(&pdev->dev, res);
+	tdev->rx_mmio = devm_platform_get_and_ioremap_resource(pdev, 1, &res);
 	if (PTR_ERR(tdev->rx_mmio) == -EBUSY) {
 		size = resource_size(res);
 		tdev->rx_mmio = devm_ioremap(&pdev->dev, res->start, size);
@@ -393,7 +388,7 @@ static int mbox_test_probe(struct platform_device *pdev)
 	tdev->tx_channel = mbox_test_request_channel(pdev, "tx");
 	tdev->rx_channel = mbox_test_request_channel(pdev, "rx");
 
-	if (!tdev->tx_channel && !tdev->rx_channel)
+	if (IS_ERR_OR_NULL(tdev->tx_channel) && IS_ERR_OR_NULL(tdev->rx_channel))
 		return -EPROBE_DEFER;
 
 	/* If Rx is not specified but has Rx MMIO, then Rx = Tx */
@@ -423,18 +418,16 @@ static int mbox_test_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int mbox_test_remove(struct platform_device *pdev)
+static void mbox_test_remove(struct platform_device *pdev)
 {
 	struct mbox_test_device *tdev = platform_get_drvdata(pdev);
 
-	debugfs_remove_recursive(root_debugfs_dir);
+	debugfs_remove_recursive(tdev->root_debugfs_dir);
 
 	if (tdev->tx_channel)
 		mbox_free_channel(tdev->tx_channel);
 	if (tdev->rx_channel)
 		mbox_free_channel(tdev->rx_channel);
-
-	return 0;
 }
 
 static const struct of_device_id mbox_test_match[] = {
@@ -448,7 +441,7 @@ static struct platform_driver mbox_test_driver = {
 		.name = "mailbox_test",
 		.of_match_table = mbox_test_match,
 	},
-	.probe  = mbox_test_probe,
+	.probe = mbox_test_probe,
 	.remove = mbox_test_remove,
 };
 module_platform_driver(mbox_test_driver);

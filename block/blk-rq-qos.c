@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0
+
 #include "blk-rq-qos.h"
 
 /*
@@ -8,16 +10,10 @@ static bool atomic_inc_below(atomic_t *v, unsigned int below)
 {
 	unsigned int cur = atomic_read(v);
 
-	for (;;) {
-		unsigned int old;
-
+	do {
 		if (cur >= below)
 			return false;
-		old = atomic_cmpxchg(v, cur, cur + 1);
-		if (old == cur)
-			break;
-		cur = old;
-	}
+	} while (!atomic_try_cmpxchg(v, &cur, cur + 1));
 
 	return true;
 }
@@ -27,75 +23,85 @@ bool rq_wait_inc_below(struct rq_wait *rq_wait, unsigned int limit)
 	return atomic_inc_below(&rq_wait->inflight, limit);
 }
 
-void rq_qos_cleanup(struct request_queue *q, struct bio *bio)
+void __rq_qos_cleanup(struct rq_qos *rqos, struct bio *bio)
 {
-	struct rq_qos *rqos;
-
-	for (rqos = q->rq_qos; rqos; rqos = rqos->next) {
+	do {
 		if (rqos->ops->cleanup)
 			rqos->ops->cleanup(rqos, bio);
-	}
+		rqos = rqos->next;
+	} while (rqos);
 }
 
-void rq_qos_done(struct request_queue *q, struct request *rq)
+void __rq_qos_done(struct rq_qos *rqos, struct request *rq)
 {
-	struct rq_qos *rqos;
-
-	for (rqos = q->rq_qos; rqos; rqos = rqos->next) {
+	do {
 		if (rqos->ops->done)
 			rqos->ops->done(rqos, rq);
-	}
+		rqos = rqos->next;
+	} while (rqos);
 }
 
-void rq_qos_issue(struct request_queue *q, struct request *rq)
+void __rq_qos_issue(struct rq_qos *rqos, struct request *rq)
 {
-	struct rq_qos *rqos;
-
-	for(rqos = q->rq_qos; rqos; rqos = rqos->next) {
+	do {
 		if (rqos->ops->issue)
 			rqos->ops->issue(rqos, rq);
-	}
+		rqos = rqos->next;
+	} while (rqos);
 }
 
-void rq_qos_requeue(struct request_queue *q, struct request *rq)
+void __rq_qos_requeue(struct rq_qos *rqos, struct request *rq)
 {
-	struct rq_qos *rqos;
-
-	for(rqos = q->rq_qos; rqos; rqos = rqos->next) {
+	do {
 		if (rqos->ops->requeue)
 			rqos->ops->requeue(rqos, rq);
-	}
+		rqos = rqos->next;
+	} while (rqos);
 }
 
-void rq_qos_throttle(struct request_queue *q, struct bio *bio,
-		     spinlock_t *lock)
+void __rq_qos_throttle(struct rq_qos *rqos, struct bio *bio)
 {
-	struct rq_qos *rqos;
-
-	for(rqos = q->rq_qos; rqos; rqos = rqos->next) {
+	do {
 		if (rqos->ops->throttle)
-			rqos->ops->throttle(rqos, bio, lock);
-	}
+			rqos->ops->throttle(rqos, bio);
+		rqos = rqos->next;
+	} while (rqos);
 }
 
-void rq_qos_track(struct request_queue *q, struct request *rq, struct bio *bio)
+void __rq_qos_track(struct rq_qos *rqos, struct request *rq, struct bio *bio)
 {
-	struct rq_qos *rqos;
-
-	for(rqos = q->rq_qos; rqos; rqos = rqos->next) {
+	do {
 		if (rqos->ops->track)
 			rqos->ops->track(rqos, rq, bio);
-	}
+		rqos = rqos->next;
+	} while (rqos);
 }
 
-void rq_qos_done_bio(struct request_queue *q, struct bio *bio)
+void __rq_qos_merge(struct rq_qos *rqos, struct request *rq, struct bio *bio)
 {
-	struct rq_qos *rqos;
+	do {
+		if (rqos->ops->merge)
+			rqos->ops->merge(rqos, rq, bio);
+		rqos = rqos->next;
+	} while (rqos);
+}
 
-	for(rqos = q->rq_qos; rqos; rqos = rqos->next) {
+void __rq_qos_done_bio(struct rq_qos *rqos, struct bio *bio)
+{
+	do {
 		if (rqos->ops->done_bio)
 			rqos->ops->done_bio(rqos, bio);
-	}
+		rqos = rqos->next;
+	} while (rqos);
+}
+
+void __rq_qos_queue_depth_changed(struct rq_qos *rqos)
+{
+	do {
+		if (rqos->ops->queue_depth_changed)
+			rqos->ops->queue_depth_changed(rqos);
+		rqos = rqos->next;
+	} while (rqos);
 }
 
 /*
@@ -188,11 +194,192 @@ bool rq_depth_scale_down(struct rq_depth *rqd, bool hard_throttle)
 	return true;
 }
 
+struct rq_qos_wait_data {
+	struct wait_queue_entry wq;
+	struct rq_wait *rqw;
+	acquire_inflight_cb_t *cb;
+	void *private_data;
+	bool got_token;
+};
+
+static int rq_qos_wake_function(struct wait_queue_entry *curr,
+				unsigned int mode, int wake_flags, void *key)
+{
+	struct rq_qos_wait_data *data = container_of(curr,
+						     struct rq_qos_wait_data,
+						     wq);
+
+	/*
+	 * If we fail to get a budget, return -1 to interrupt the wake up loop
+	 * in __wake_up_common.
+	 */
+	if (!data->cb(data->rqw, data->private_data))
+		return -1;
+
+	data->got_token = true;
+	/*
+	 * autoremove_wake_function() removes the wait entry only when it
+	 * actually changed the task state. We want the wait always removed.
+	 * Remove explicitly and use default_wake_function().
+	 */
+	default_wake_function(curr, mode, wake_flags, key);
+	/*
+	 * Note that the order of operations is important as finish_wait()
+	 * tests whether @curr is removed without grabbing the lock. This
+	 * should be the last thing to do to make sure we will not have a
+	 * UAF access to @data. And the semantics of memory barrier in it
+	 * also make sure the waiter will see the latest @data->got_token
+	 * once list_empty_careful() in finish_wait() returns true.
+	 */
+	list_del_init_careful(&curr->entry);
+	return 1;
+}
+
+/**
+ * rq_qos_wait - throttle on a rqw if we need to
+ * @rqw: rqw to throttle on
+ * @private_data: caller provided specific data
+ * @acquire_inflight_cb: inc the rqw->inflight counter if we can
+ * @cleanup_cb: the callback to cleanup in case we race with a waker
+ *
+ * This provides a uniform place for the rq_qos users to do their throttling.
+ * Since you can end up with a lot of things sleeping at once, this manages the
+ * waking up based on the resources available.  The acquire_inflight_cb should
+ * inc the rqw->inflight if we have the ability to do so, or return false if not
+ * and then we will sleep until the room becomes available.
+ *
+ * cleanup_cb is in case that we race with a waker and need to cleanup the
+ * inflight count accordingly.
+ */
+void rq_qos_wait(struct rq_wait *rqw, void *private_data,
+		 acquire_inflight_cb_t *acquire_inflight_cb,
+		 cleanup_cb_t *cleanup_cb)
+{
+	struct rq_qos_wait_data data = {
+		.rqw		= rqw,
+		.cb		= acquire_inflight_cb,
+		.private_data	= private_data,
+		.got_token	= false,
+	};
+	bool first_waiter;
+
+	/*
+	 * If there are no waiters in the waiting queue, try to increase the
+	 * inflight counter if we can. Otherwise, prepare for adding ourselves
+	 * to the waiting queue.
+	 */
+	if (!waitqueue_active(&rqw->wait) && acquire_inflight_cb(rqw, private_data))
+		return;
+
+	init_wait_func(&data.wq, rq_qos_wake_function);
+	first_waiter = prepare_to_wait_exclusive(&rqw->wait, &data.wq,
+						 TASK_UNINTERRUPTIBLE);
+	/*
+	 * Make sure there is at least one inflight process; otherwise, waiters
+	 * will never be woken up. Since there may be no inflight process before
+	 * adding ourselves to the waiting queue above, we need to try to
+	 * increase the inflight counter for ourselves. And it is sufficient to
+	 * guarantee that at least the first waiter to enter the waiting queue
+	 * will re-check the waiting condition before going to sleep, thus
+	 * ensuring forward progress.
+	 */
+	if (!data.got_token && first_waiter && acquire_inflight_cb(rqw, private_data)) {
+		finish_wait(&rqw->wait, &data.wq);
+		/*
+		 * We raced with rq_qos_wake_function() getting a token,
+		 * which means we now have two. Put our local token
+		 * and wake anyone else potentially waiting for one.
+		 *
+		 * Enough memory barrier in list_empty_careful() in
+		 * finish_wait() is paired with list_del_init_careful()
+		 * in rq_qos_wake_function() to make sure we will see
+		 * the latest @data->got_token.
+		 */
+		if (data.got_token)
+			cleanup_cb(rqw, private_data);
+		return;
+	}
+
+	/* we are now relying on the waker to increase our inflight counter. */
+	do {
+		if (data.got_token)
+			break;
+		io_schedule();
+		set_current_state(TASK_UNINTERRUPTIBLE);
+	} while (1);
+	finish_wait(&rqw->wait, &data.wq);
+}
+
 void rq_qos_exit(struct request_queue *q)
 {
+	mutex_lock(&q->rq_qos_mutex);
 	while (q->rq_qos) {
 		struct rq_qos *rqos = q->rq_qos;
 		q->rq_qos = rqos->next;
 		rqos->ops->exit(rqos);
 	}
+	blk_queue_flag_clear(QUEUE_FLAG_QOS_ENABLED, q);
+	mutex_unlock(&q->rq_qos_mutex);
+}
+
+int rq_qos_add(struct rq_qos *rqos, struct gendisk *disk, enum rq_qos_id id,
+		const struct rq_qos_ops *ops)
+{
+	struct request_queue *q = disk->queue;
+	unsigned int memflags;
+
+	lockdep_assert_held(&q->rq_qos_mutex);
+
+	rqos->disk = disk;
+	rqos->id = id;
+	rqos->ops = ops;
+
+	/*
+	 * No IO can be in-flight when adding rqos, so freeze queue, which
+	 * is fine since we only support rq_qos for blk-mq queue.
+	 */
+	memflags = blk_mq_freeze_queue(q);
+
+	if (rq_qos_id(q, rqos->id))
+		goto ebusy;
+	rqos->next = q->rq_qos;
+	q->rq_qos = rqos;
+	blk_queue_flag_set(QUEUE_FLAG_QOS_ENABLED, q);
+
+	blk_mq_unfreeze_queue(q, memflags);
+
+	if (rqos->ops->debugfs_attrs) {
+		mutex_lock(&q->debugfs_mutex);
+		blk_mq_debugfs_register_rqos(rqos);
+		mutex_unlock(&q->debugfs_mutex);
+	}
+
+	return 0;
+ebusy:
+	blk_mq_unfreeze_queue(q, memflags);
+	return -EBUSY;
+}
+
+void rq_qos_del(struct rq_qos *rqos)
+{
+	struct request_queue *q = rqos->disk->queue;
+	struct rq_qos **cur;
+	unsigned int memflags;
+
+	lockdep_assert_held(&q->rq_qos_mutex);
+
+	memflags = blk_mq_freeze_queue(q);
+	for (cur = &q->rq_qos; *cur; cur = &(*cur)->next) {
+		if (*cur == rqos) {
+			*cur = rqos->next;
+			break;
+		}
+	}
+	if (!q->rq_qos)
+		blk_queue_flag_clear(QUEUE_FLAG_QOS_ENABLED, q);
+	blk_mq_unfreeze_queue(q, memflags);
+
+	mutex_lock(&q->debugfs_mutex);
+	blk_mq_debugfs_unregister_rqos(rqos);
+	mutex_unlock(&q->debugfs_mutex);
 }

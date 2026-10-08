@@ -47,6 +47,8 @@
 #include <linux/spinlock.h>
 #include <net/devlink.h>
 #include <linux/rwsem.h>
+#include <linux/auxiliary_bus.h>
+#include <linux/notifier.h>
 
 #include <linux/mlx4/device.h>
 #include <linux/mlx4/driver.h>
@@ -603,6 +605,7 @@ struct mlx4_mfunc_master_ctx {
 	struct mlx4_slave_event_eq slave_eq;
 	struct mutex		gen_eqe_mutex[MLX4_MFUNC_MAX];
 	struct mlx4_qos_manager qos_ctl[MLX4_MAX_PORTS + 1];
+	u32			next_slave; /* mlx4_master_comm_channel */
 };
 
 struct mlx4_mfunc {
@@ -861,6 +864,11 @@ struct mlx4_steer {
 	struct list_head steer_entries[MLX4_NUM_STEERS];
 };
 
+struct mlx4_port_map {
+	u8	port1;
+	u8	port2;
+};
+
 enum {
 	MLX4_PCI_DEV_IS_VF		= 1 << 0,
 	MLX4_PCI_DEV_FORCE_SENSE_PORT	= 1 << 1,
@@ -874,9 +882,9 @@ enum {
 struct mlx4_priv {
 	struct mlx4_dev		dev;
 
-	struct list_head	dev_list;
-	struct list_head	ctx_list;
-	spinlock_t		ctx_lock;
+	struct mlx4_adev	**adev;
+	int			adev_idx;
+	struct atomic_notifier_head event_nh;
 
 	int			pci_dev_data;
 	int                     removed;
@@ -1043,12 +1051,14 @@ int mlx4_catas_init(struct mlx4_dev *dev);
 void mlx4_catas_end(struct mlx4_dev *dev);
 int mlx4_crdump_init(struct mlx4_dev *dev);
 void mlx4_crdump_end(struct mlx4_dev *dev);
-int mlx4_restart_one(struct pci_dev *pdev, bool reload,
-		     struct devlink *devlink);
+int mlx4_restart_one(struct pci_dev *pdev);
+
+int mlx4_adev_init(struct mlx4_dev *dev);
+void mlx4_adev_cleanup(struct mlx4_dev *dev);
 int mlx4_register_device(struct mlx4_dev *dev);
 void mlx4_unregister_device(struct mlx4_dev *dev);
 void mlx4_dispatch_event(struct mlx4_dev *dev, enum mlx4_dev_event type,
-			 unsigned long param);
+			 void *param);
 
 struct mlx4_dev_cap;
 struct mlx4_init_hca_param;
@@ -1218,7 +1228,7 @@ void mlx4_cmd_use_polling(struct mlx4_dev *dev);
 int mlx4_comm_cmd(struct mlx4_dev *dev, u8 cmd, u16 param,
 		  u16 op, unsigned long timeout);
 
-void mlx4_cq_tasklet_cb(unsigned long data);
+void mlx4_cq_tasklet_cb(struct tasklet_struct *t);
 void mlx4_cq_completion(struct mlx4_dev *dev, u32 cqn);
 void mlx4_cq_event(struct mlx4_dev *dev, u32 cqn, int event_type);
 
@@ -1467,12 +1477,6 @@ void mlx4_zone_allocator_destroy(struct mlx4_zone_allocator *zone_alloc);
  */
 u32 mlx4_zone_alloc_entries(struct mlx4_zone_allocator *zones, u32 uid, int count,
 			    int align, u32 skip_mask, u32 *puid);
-
-/* Free <count> objects, start from <obj> of the uid <uid> from zone_allocator
- * <zones>.
- */
-u32 mlx4_zone_free_entries(struct mlx4_zone_allocator *zones,
-			   u32 uid, u32 obj, u32 count);
 
 /* If <zones> was allocated with MLX4_ZONE_ALLOC_FLAGS_NO_OVERLAP, instead of
  * specifying the uid when freeing an object, zone allocator could figure it by

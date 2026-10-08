@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
  * Copyright 2006-2013 Solarflare Communications Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation, incorporated herein by reference.
  */
 
 #include <linux/bitops.h>
@@ -1051,10 +1048,10 @@ ef4_farch_handle_rx_event(struct ef4_channel *channel, const ef4_qword_t *event)
 		switch (rx_ev_hdr_type) {
 		case FSE_CZ_RX_EV_HDR_TYPE_IPV4V6_TCP:
 			flags |= EF4_RX_PKT_TCP;
-			/* fall through */
+			fallthrough;
 		case FSE_CZ_RX_EV_HDR_TYPE_IPV4V6_UDP:
 			flags |= EF4_RX_PKT_CSUMMED;
-			/* fall through */
+			fallthrough;
 		case FSE_CZ_RX_EV_HDR_TYPE_IPV4V6_OTHER:
 		case FSE_AZ_RX_EV_HDR_TYPE_OTHER:
 			break;
@@ -1312,7 +1309,7 @@ int ef4_farch_ev_process(struct ef4_channel *channel, int budget)
 			if (efx->type->handle_global_event &&
 			    efx->type->handle_global_event(channel, &event))
 				break;
-			/* else fall through */
+			fallthrough;
 		default:
 			netif_err(channel->efx, hw, channel->efx->net_dev,
 				  "channel %d unknown event type %d (data "
@@ -1632,28 +1629,6 @@ void ef4_farch_rx_push_indir_table(struct ef4_nic *efx)
 			   FR_BZ_RX_INDIRECTION_TBL +
 			   FR_BZ_RX_INDIRECTION_TBL_STEP * i);
 	}
-}
-
-/* Looks at available SRAM resources and works out how many queues we
- * can support, and where things like descriptor caches should live.
- *
- * SRAM is split up as follows:
- * 0                          buftbl entries for channels
- * efx->vf_buftbl_base        buftbl entries for SR-IOV
- * efx->rx_dc_base            RX descriptor caches
- * efx->tx_dc_base            TX descriptor caches
- */
-void ef4_farch_dimension_resources(struct ef4_nic *efx, unsigned sram_lim_qw)
-{
-	unsigned vi_count;
-
-	/* Account for the buffer table entries backing the datapath channels
-	 * and the descriptor caches for those channels.
-	 */
-	vi_count = max(efx->n_channels, efx->n_tx_channels * EF4_TXQ_TYPES);
-
-	efx->tx_dc_base = sram_lim_qw - vi_count * TX_DC_ENTRIES;
-	efx->rx_dc_base = efx->tx_dc_base - vi_count * RX_DC_ENTRIES;
 }
 
 u32 ef4_farch_fpga_ver(struct ef4_nic *efx)
@@ -1981,7 +1956,7 @@ ef4_farch_filter_from_gen_spec(struct ef4_farch_filter_spec *spec,
 	      EF4_FILTER_MATCH_LOC_HOST | EF4_FILTER_MATCH_LOC_PORT |
 	      EF4_FILTER_MATCH_REM_HOST | EF4_FILTER_MATCH_REM_PORT):
 		is_full = true;
-		/* fall through */
+		fallthrough;
 	case (EF4_FILTER_MATCH_ETHER_TYPE | EF4_FILTER_MATCH_IP_PROTO |
 	      EF4_FILTER_MATCH_LOC_HOST | EF4_FILTER_MATCH_LOC_PORT): {
 		__be32 rhost, host1, host2;
@@ -2032,7 +2007,7 @@ ef4_farch_filter_from_gen_spec(struct ef4_farch_filter_spec *spec,
 
 	case EF4_FILTER_MATCH_LOC_MAC | EF4_FILTER_MATCH_OUTER_VID:
 		is_full = true;
-		/* fall through */
+		fallthrough;
 	case EF4_FILTER_MATCH_LOC_MAC:
 		spec->type = (is_full ? EF4_FARCH_FILTER_MAC_FULL :
 			      EF4_FARCH_FILTER_MAC_WILD);
@@ -2079,7 +2054,7 @@ ef4_farch_filter_to_gen_spec(struct ef4_filter_spec *gen_spec,
 	case EF4_FARCH_FILTER_TCP_FULL:
 	case EF4_FARCH_FILTER_UDP_FULL:
 		is_full = true;
-		/* fall through */
+		fallthrough;
 	case EF4_FARCH_FILTER_TCP_WILD:
 	case EF4_FARCH_FILTER_UDP_WILD: {
 		__be32 host1, host2;
@@ -2123,7 +2098,7 @@ ef4_farch_filter_to_gen_spec(struct ef4_filter_spec *gen_spec,
 
 	case EF4_FARCH_FILTER_MAC_FULL:
 		is_full = true;
-		/* fall through */
+		fallthrough;
 	case EF4_FARCH_FILTER_MAC_WILD:
 		gen_spec->match_flags = EF4_FILTER_MATCH_LOC_MAC;
 		if (is_full)
@@ -2714,7 +2689,7 @@ void ef4_farch_filter_table_remove(struct ef4_nic *efx)
 	enum ef4_farch_filter_table_id table_id;
 
 	for (table_id = 0; table_id < EF4_FARCH_FILTER_TABLE_COUNT; table_id++) {
-		kfree(state->table[table_id].used_bitmap);
+		bitmap_free(state->table[table_id].used_bitmap);
 		vfree(state->table[table_id].spec);
 	}
 	kfree(state);
@@ -2743,9 +2718,7 @@ int ef4_farch_filter_table_probe(struct ef4_nic *efx)
 		table = &state->table[table_id];
 		if (table->size == 0)
 			continue;
-		table->used_bitmap = kcalloc(BITS_TO_LONGS(table->size),
-					     sizeof(unsigned long),
-					     GFP_KERNEL);
+		table->used_bitmap = bitmap_zalloc(table->size, GFP_KERNEL);
 		if (!table->used_bitmap)
 			goto fail;
 		table->spec = vzalloc(array_size(sizeof(*table->spec),

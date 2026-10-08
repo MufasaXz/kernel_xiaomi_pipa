@@ -1,35 +1,5 @@
-/*
- * Copyright (C) 2016-2018 Netronome Systems, Inc.
- *
- * This software is dual licensed under the GNU General License Version 2,
- * June 1991 as shown in the file COPYING in the top-level directory of this
- * source tree or the BSD 2-Clause License provided below.  You have the
- * option to license this software under the complete terms of either license.
- *
- * The BSD 2-Clause License:
- *
- *     Redistribution and use in source and binary forms, with or
- *     without modification, are permitted provided that the following
- *     conditions are met:
- *
- *      1. Redistributions of source code must retain the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer.
- *
- *      2. Redistributions in binary form must reproduce the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer in the documentation and/or other materials
- *         provided with the distribution.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/* Copyright (C) 2016-2018 Netronome Systems, Inc. */
 
 /*
  * nfp_net_offload.c
@@ -52,6 +22,7 @@
 #include <net/tc_act/tc_mirred.h>
 
 #include "main.h"
+#include "../ccm.h"
 #include "../nfp_app.h"
 #include "../nfp_net_ctrl.h"
 #include "../nfp_net.h"
@@ -197,8 +168,9 @@ nfp_prog_prepare(struct nfp_prog *nfp_prog, const struct bpf_insn *prog,
 
 		list_add_tail(&meta->l, &nfp_prog->insns);
 	}
+	nfp_prog->n_insns = cnt;
 
-	nfp_bpf_jit_prepare(nfp_prog, cnt);
+	nfp_bpf_jit_prepare(nfp_prog);
 
 	return 0;
 }
@@ -206,6 +178,8 @@ nfp_prog_prepare(struct nfp_prog *nfp_prog, const struct bpf_insn *prog,
 static void nfp_prog_free(struct nfp_prog *nfp_prog)
 {
 	struct nfp_insn_meta *meta, *tmp;
+
+	kfree(nfp_prog->subprog);
 
 	list_for_each_entry_safe(meta, tmp, &nfp_prog->insns, l) {
 		list_del(&meta->l);
@@ -246,17 +220,12 @@ static int nfp_bpf_translate(struct bpf_prog *prog)
 {
 	struct nfp_net *nn = netdev_priv(prog->aux->offload->netdev);
 	struct nfp_prog *nfp_prog = prog->aux->offload->dev_priv;
-	unsigned int stack_size;
 	unsigned int max_instr;
 	int err;
 
-	stack_size = nn_readb(nn, NFP_NET_CFG_BPF_STACK_SZ) * 64;
-	if (prog->aux->stack_depth > stack_size) {
-		nn_info(nn, "stack too large: program %dB > FW stack %dB\n",
-			prog->aux->stack_depth, stack_size);
-		return -EOPNOTSUPP;
-	}
-	nfp_prog->stack_depth = round_up(prog->aux->stack_depth, 4);
+	/* We depend on dead code elimination succeeding */
+	if (prog->aux->offload->opt_failed)
+		return -EINVAL;
 
 	max_instr = nn_readw(nn, NFP_NET_CFG_BPF_MAX_LEN);
 	nfp_prog->__prog_alloc_len = max_instr * sizeof(u64);
@@ -420,6 +389,7 @@ nfp_bpf_map_alloc(struct nfp_app_bpf *bpf, struct bpf_offloaded_map *offmap)
 	offmap->dev_priv = nfp_map;
 	nfp_map->offmap = offmap;
 	nfp_map->bpf = bpf;
+	spin_lock_init(&nfp_map->cache_lock);
 
 	res = nfp_bpf_ctrl_alloc_map(bpf, &offmap->map);
 	if (res < 0) {
@@ -442,6 +412,8 @@ nfp_bpf_map_free(struct nfp_app_bpf *bpf, struct bpf_offloaded_map *offmap)
 	struct nfp_bpf_map *nfp_map = offmap->dev_priv;
 
 	nfp_bpf_ctrl_free_map(bpf, nfp_map);
+	dev_consume_skb_any(nfp_map->cache);
+	WARN_ON_ONCE(nfp_map->cache_blockers);
 	list_del_init(&nfp_map->l);
 	bpf->map_elems_in_use -= offmap->map.max_entries;
 	bpf->maps_in_use--;
@@ -489,12 +461,12 @@ int nfp_bpf_event_output(struct nfp_app_bpf *bpf, const void *data,
 	if (size_add(pkt_size, data_size) > INT_MAX ||
 	    len < sizeof(struct cmsg_bpf_event) + pkt_size + data_size)
 		return -EINVAL;
-	if (cbe->hdr.ver != CMSG_MAP_ABI_VERSION)
+	if (cbe->hdr.ver != NFP_CCM_ABI_VERSION)
 		return -EINVAL;
 
 	rcu_read_lock();
-	record = rhashtable_lookup_fast(&bpf->maps_neutral, &map_id,
-					nfp_bpf_maps_neutral_params);
+	record = rhashtable_lookup(&bpf->maps_neutral, &map_id,
+				   nfp_bpf_maps_neutral_params);
 	if (!record || map_id_full > U32_MAX) {
 		rcu_read_unlock();
 		cmsg_warn(bpf, "perf event: map id %lld (0x%llx) not recognized, dropping event\n",
@@ -510,19 +482,41 @@ int nfp_bpf_event_output(struct nfp_app_bpf *bpf, const void *data,
 	return 0;
 }
 
+bool nfp_bpf_offload_check_mtu(struct nfp_net *nn, struct bpf_prog *prog,
+			       unsigned int mtu)
+{
+	unsigned int fw_mtu, pkt_off;
+
+	fw_mtu = nn_readb(nn, NFP_NET_CFG_BPF_INL_MTU) * 64 - 32;
+	pkt_off = min(prog->aux->max_pkt_offset, mtu);
+
+	return fw_mtu < pkt_off;
+}
+
 static int
 nfp_net_bpf_load(struct nfp_net *nn, struct bpf_prog *prog,
 		 struct netlink_ext_ack *extack)
 {
 	struct nfp_prog *nfp_prog = prog->aux->offload->dev_priv;
-	unsigned int max_mtu;
+	unsigned int max_stack, max_prog_len;
 	dma_addr_t dma_addr;
 	void *img;
 	int err;
 
-	max_mtu = nn_readb(nn, NFP_NET_CFG_BPF_INL_MTU) * 64 - 32;
-	if (max_mtu < nn->dp.netdev->mtu) {
-		NL_SET_ERR_MSG_MOD(extack, "BPF offload not supported with MTU larger than HW packet split boundary");
+	if (nfp_bpf_offload_check_mtu(nn, prog, nn->dp.netdev->mtu)) {
+		NL_SET_ERR_MSG_MOD(extack, "BPF offload not supported with potential packet access beyond HW packet split boundary");
+		return -EOPNOTSUPP;
+	}
+
+	max_stack = nn_readb(nn, NFP_NET_CFG_BPF_STACK_SZ) * 64;
+	if (nfp_prog->stack_size > max_stack) {
+		NL_SET_ERR_MSG_MOD(extack, "stack too large");
+		return -EOPNOTSUPP;
+	}
+
+	max_prog_len = nn_readw(nn, NFP_NET_CFG_BPF_MAX_LEN);
+	if (nfp_prog->prog_len > max_prog_len) {
+		NL_SET_ERR_MSG_MOD(extack, "program too long");
 		return -EOPNOTSUPP;
 	}
 
@@ -616,6 +610,10 @@ int nfp_net_bpf_offload(struct nfp_net *nn, struct bpf_prog *prog,
 }
 
 const struct bpf_prog_offload_ops nfp_bpf_dev_ops = {
+	.insn_hook	= nfp_verify_insn,
+	.finalize	= nfp_bpf_finalize,
+	.replace_insn	= nfp_bpf_opt_replace_insn,
+	.remove_insns	= nfp_bpf_opt_remove_insns,
 	.prepare	= nfp_bpf_verifier_prep,
 	.translate	= nfp_bpf_translate,
 	.destroy	= nfp_bpf_destroy,

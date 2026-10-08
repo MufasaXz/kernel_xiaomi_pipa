@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
 
  * l1oip.c  low level driver for tunneling layer 1 over IP
@@ -5,21 +6,6 @@
  * NOTE: It is not compatible with TDMoIP nor "ISDN over IP".
  *
  * Author	Andreas Eversberg (jolly@eversberg.eu)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  */
 
 /* module parameters:
@@ -214,7 +200,7 @@
 
  The complete socket opening and closing is done by a thread.
  When the thread opened a socket, the hc->socket descriptor is set. Whenever a
- packet shall be sent to the socket, the hc->socket must be checked wheter not
+ packet shall be sent to the socket, the hc->socket must be checked whether not
  NULL. To prevent change in socket descriptor, the hc->socket_lock must be used.
  To change the socket, a recall of l1oip_socket_open() will safely kill the
  socket process and create a new one.
@@ -243,8 +229,8 @@
 static const char *l1oip_revision = "2.00";
 
 static int l1oip_cnt;
-static spinlock_t l1oip_lock;
-static struct list_head l1oip_ilist;
+static DEFINE_SPINLOCK(l1oip_lock);
+static LIST_HEAD(l1oip_ilist);
 
 #define MAX_CARDS	16
 static u_int type[MAX_CARDS];
@@ -259,6 +245,7 @@ static int debug;
 static int ulaw;
 
 MODULE_AUTHOR("Andreas Eversberg");
+MODULE_DESCRIPTION("mISDN driver for tunneling layer 1 over IP");
 MODULE_LICENSE("GPL");
 module_param_array(type, uint, NULL, S_IRUGO | S_IWUSR);
 module_param_array(codec, uint, NULL, S_IRUGO | S_IWUSR);
@@ -720,8 +707,7 @@ l1oip_socket_thread(void *data)
 		printk(KERN_DEBUG "%s: socket created and open\n",
 		       __func__);
 	while (!signal_pending(current)) {
-		iov_iter_kvec(&msg.msg_iter, READ | ITER_KVEC, &iov, 1,
-				recvbuf_size);
+		iov_iter_kvec(&msg.msg_iter, ITER_DEST, &iov, 1, recvbuf_size);
 		recvlen = sock_recvmsg(socket, &msg, 0);
 		if (recvlen > 0) {
 			l1oip_socket_parse(hc, &sin_rx, recvbuf, recvlen);
@@ -836,7 +822,7 @@ l1oip_send_bh(struct work_struct *work)
 static void
 l1oip_keepalive(struct timer_list *t)
 {
-	struct l1oip *hc = from_timer(hc, t, keep_tl);
+	struct l1oip *hc = timer_container_of(hc, t, keep_tl);
 
 	schedule_work(&hc->workq);
 }
@@ -844,8 +830,8 @@ l1oip_keepalive(struct timer_list *t)
 static void
 l1oip_timeout(struct timer_list *t)
 {
-	struct l1oip			*hc = from_timer(hc, t,
-								  timeout_tl);
+	struct l1oip			*hc = timer_container_of(hc, t,
+								     timeout_tl);
 	struct dchannel		*dch = hc->chan[hc->d_idx].dch;
 
 	if (debug & DEBUG_L1OIP_MSG)
@@ -1251,8 +1237,8 @@ release_card(struct l1oip *hc)
 
 	hc->shutdown = true;
 
-	del_timer_sync(&hc->keep_tl);
-	del_timer_sync(&hc->timeout_tl);
+	timer_shutdown_sync(&hc->keep_tl);
+	timer_shutdown_sync(&hc->timeout_tl);
 
 	cancel_work_sync(&hc->workq);
 
@@ -1270,8 +1256,7 @@ release_card(struct l1oip *hc)
 			mISDN_freebchannel(hc->chan[ch].bch);
 			kfree(hc->chan[ch].bch);
 #ifdef REORDER_DEBUG
-			if (hc->chan[ch].disorder_skb)
-				dev_kfree_skb(hc->chan[ch].disorder_skb);
+			dev_kfree_skb(hc->chan[ch].disorder_skb);
 #endif
 		}
 	}
@@ -1456,9 +1441,6 @@ l1oip_init(void)
 
 	printk(KERN_INFO "mISDN: Layer-1-over-IP driver Rev. %s\n",
 	       l1oip_revision);
-
-	INIT_LIST_HEAD(&l1oip_ilist);
-	spin_lock_init(&l1oip_lock);
 
 	if (l1oip_4bit_alloc(ulaw))
 		return -ENOMEM;

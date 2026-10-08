@@ -95,8 +95,8 @@ int vpe_run(struct vpe *v)
 	 * We don't pass the memsize here, so VPE programs need to be
 	 * compiled with DFLT_STACK_SIZE and DFLT_HEAP_SIZE defined.
 	 */
-	mttgpr(7, 0);
-	mttgpr(6, v->ntcs);
+	mttgpr($7, 0);
+	mttgpr($6, v->ntcs);
 
 	/* set up VPE1 */
 	/*
@@ -316,7 +316,6 @@ static void vpe_device_release(struct device *cd)
 
 static struct class vpe_class = {
 	.name = "vpe",
-	.owner = THIS_MODULE,
 	.dev_release = vpe_device_release,
 	.dev_groups = vpe_groups,
 };
@@ -363,8 +362,8 @@ int __init vpe_module_init(void)
 	}
 
 	device_initialize(&vpe_device);
-	vpe_device.class	= &vpe_class,
-	vpe_device.parent	= NULL,
+	vpe_device.class	= &vpe_class;
+	vpe_device.parent	= NULL;
 	dev_set_name(&vpe_device, "vpe1");
 	vpe_device.devt = MKDEV(major, VPE_MODULE_MINOR);
 	err = device_add(&vpe_device);

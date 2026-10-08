@@ -12,8 +12,8 @@
 #include <linux/mmc/mmc.h>
 #include <linux/scatterlist.h>
 #include <linux/workqueue.h>
+#include <linux/greybus.h>
 
-#include "greybus.h"
 #include "gbphy.h"
 
 struct gb_sdio_host {
@@ -32,7 +32,6 @@ struct gb_sdio_host {
 	bool			card_present;
 	bool			read_only;
 };
-
 
 #define GB_SDIO_RSP_R1_R5_R6_R7	(GB_SDIO_RSP_PRESENT | GB_SDIO_RSP_CRC | \
 				 GB_SDIO_RSP_OPCODE)
@@ -67,7 +66,6 @@ static void _gb_sdio_set_host_caps(struct gb_sdio_host *host, u32 r)
 		((r & GB_SDIO_CAP_8_BIT_DATA) ? MMC_CAP_8_BIT_DATA : 0) |
 		((r & GB_SDIO_CAP_MMC_HS) ? MMC_CAP_MMC_HIGHSPEED : 0) |
 		((r & GB_SDIO_CAP_SD_HS) ? MMC_CAP_SD_HIGHSPEED : 0) |
-		((r & GB_SDIO_CAP_ERASE) ? MMC_CAP_ERASE : 0) |
 		((r & GB_SDIO_CAP_1_2V_DDR) ? MMC_CAP_1_2V_DDR : 0) |
 		((r & GB_SDIO_CAP_1_8V_DDR) ? MMC_CAP_1_8V_DDR : 0) |
 		((r & GB_SDIO_CAP_POWER_OFF_CARD) ? MMC_CAP_POWER_OFF_CARD : 0) |
@@ -275,7 +273,7 @@ static int _gb_sdio_send(struct gb_sdio_host *host, struct mmc_data *data,
 		return -ENOMEM;
 
 	request = operation->request->payload;
-	request->data_flags = (data->flags >> 8);
+	request->data_flags = data->flags >> 8;
 	request->data_blocks = cpu_to_le16(nblocks);
 	request->data_blksz = cpu_to_le16(data->blksz);
 
@@ -329,7 +327,7 @@ static int _gb_sdio_recv(struct gb_sdio_host *host, struct mmc_data *data,
 		return -ENOMEM;
 
 	request = operation->request->payload;
-	request->data_flags = (data->flags >> 8);
+	request->data_flags = data->flags >> 8;
 	request->data_blocks = cpu_to_le16(nblocks);
 	request->data_blksz = cpu_to_le16(data->blksz);
 
@@ -606,9 +604,9 @@ static void gb_mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		vdd = 1 << (ios->vdd - GB_SDIO_VDD_SHIFT);
 	request.vdd = cpu_to_le32(vdd);
 
-	request.bus_mode = (ios->bus_mode == MMC_BUSMODE_OPENDRAIN ?
+	request.bus_mode = ios->bus_mode == MMC_BUSMODE_OPENDRAIN ?
 			    GB_SDIO_BUSMODE_OPENDRAIN :
-			    GB_SDIO_BUSMODE_PUSHPULL);
+			    GB_SDIO_BUSMODE_PUSHPULL;
 
 	switch (ios->power_mode) {
 	case MMC_POWER_OFF:
@@ -860,7 +858,6 @@ static void gb_sdio_remove(struct gbphy_device *gbphy_dev)
 	gb_connection_set_data(connection, NULL);
 	mutex_unlock(&host->lock);
 
-	flush_workqueue(host->mrq_workqueue);
 	destroy_workqueue(host->mrq_workqueue);
 	gb_connection_disable_rx(connection);
 	mmc_remove_host(mmc);
@@ -883,4 +880,5 @@ static struct gbphy_driver sdio_driver = {
 };
 
 module_gbphy_driver(sdio_driver);
+MODULE_DESCRIPTION("SD/MMC Greybus driver");
 MODULE_LICENSE("GPL v2");

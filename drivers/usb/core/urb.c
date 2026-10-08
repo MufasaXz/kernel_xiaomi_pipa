@@ -8,6 +8,7 @@
 #include <linux/bitops.h>
 #include <linux/slab.h>
 #include <linux/log2.h>
+#include <linux/kmsan.h>
 #include <linux/usb.h>
 #include <linux/wait.h>
 #include <linux/usb/hcd.h>
@@ -71,9 +72,8 @@ struct urb *usb_alloc_urb(int iso_packets, gfp_t mem_flags)
 {
 	struct urb *urb;
 
-	urb = kmalloc(sizeof(struct urb) +
-		iso_packets * sizeof(struct usb_iso_packet_descriptor),
-		mem_flags);
+	urb = kmalloc(struct_size(urb, iso_frame_desc, iso_packets),
+		      mem_flags);
 	if (!urb)
 		return NULL;
 	usb_init_urb(urb);
@@ -193,6 +193,28 @@ static const int pipetypes[4] = {
 };
 
 /**
+ * usb_pipe_type_check - sanity check of a specific pipe for a usb device
+ * @dev: struct usb_device to be checked
+ * @pipe: pipe to check
+ *
+ * This performs a light-weight sanity check for the endpoint in the
+ * given usb device.  It returns 0 if the pipe is valid for the specific usb
+ * device, otherwise a negative error code.
+ */
+int usb_pipe_type_check(struct usb_device *dev, unsigned int pipe)
+{
+	const struct usb_host_endpoint *ep;
+
+	ep = usb_pipe_endpoint(dev, pipe);
+	if (!ep)
+		return -EINVAL;
+	if (usb_pipetype(pipe) != pipetypes[usb_endpoint_type(&ep->desc)])
+		return -EINVAL;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(usb_pipe_type_check);
+
+/**
  * usb_urb_ep_type_check - sanity check of endpoint in the given urb
  * @urb: urb to be checked
  *
@@ -202,14 +224,7 @@ static const int pipetypes[4] = {
  */
 int usb_urb_ep_type_check(const struct urb *urb)
 {
-	const struct usb_host_endpoint *ep;
-
-	ep = usb_pipe_endpoint(urb->dev, urb->pipe);
-	if (!ep)
-		return -EINVAL;
-	if (usb_pipetype(urb->pipe) != pipetypes[usb_endpoint_type(&ep->desc)])
-		return -EINVAL;
-	return 0;
+	return usb_pipe_type_check(urb->dev, urb->pipe);
 }
 EXPORT_SYMBOL_GPL(usb_urb_ep_type_check);
 
@@ -357,11 +372,12 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 	struct usb_host_endpoint	*ep;
 	int				is_out;
 	unsigned int			allowed;
+	bool				is_eusb2_isoch_double;
 
 	if (!urb || !urb->complete)
 		return -EINVAL;
 	if (urb->hcpriv) {
-		WARN_ONCE(1, "URB %pK submitted while active\n", urb);
+		WARN_ONCE(1, "URB %p submitted while active\n", urb);
 		return -EBUSY;
 	}
 
@@ -393,6 +409,15 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 			return -ENOEXEC;
 		is_out = !(setup->bRequestType & USB_DIR_IN) ||
 				!setup->wLength;
+		dev_WARN_ONCE(&dev->dev, (usb_pipeout(urb->pipe) != is_out),
+				"BOGUS control dir, pipe %x doesn't match bRequestType %x\n",
+				urb->pipe, setup->bRequestType);
+		if (le16_to_cpu(setup->wLength) != urb->transfer_buffer_length) {
+			dev_dbg(&dev->dev, "BOGUS control len %d doesn't match transfer length %d\n",
+					le16_to_cpu(setup->wLength),
+					urb->transfer_buffer_length);
+			return -EBADR;
+		}
 	} else {
 		is_out = usb_endpoint_dir_out(&ep->desc);
 	}
@@ -403,13 +428,15 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 			URB_SETUP_MAP_SINGLE | URB_SETUP_MAP_LOCAL |
 			URB_DMA_SG_COMBINED);
 	urb->transfer_flags |= (is_out ? URB_DIR_OUT : URB_DIR_IN);
+	kmsan_handle_urb(urb, is_out);
 
 	if (xfertype != USB_ENDPOINT_XFER_CONTROL &&
 			dev->state < USB_STATE_CONFIGURED)
 		return -ENODEV;
 
 	max = usb_endpoint_maxp(&ep->desc);
-	if (max <= 0) {
+	is_eusb2_isoch_double = usb_endpoint_is_hs_isoc_double(dev, ep);
+	if (!max && !is_eusb2_isoch_double) {
 		dev_dbg(&dev->dev,
 			"bogus endpoint ep%d%s in %s (bad maxpacket %d)\n",
 			usb_endpoint_num(&ep->desc), is_out ? "out" : "in",
@@ -442,9 +469,13 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 			max = le32_to_cpu(isoc_ep_comp->dwBytesPerInterval);
 		}
 
-		/* "high bandwidth" mode, 1-3 packets/uframe? */
-		if (dev->speed == USB_SPEED_HIGH)
-			max *= usb_endpoint_maxp_mult(&ep->desc);
+		/* High speed, 1-3 packets/uframe, max 6 for eUSB2 double bw */
+		if (dev->speed == USB_SPEED_HIGH) {
+			if (is_eusb2_isoch_double)
+				max = le32_to_cpu(ep->eusb2_isoc_ep_comp.dwBytesPerInterval);
+			else
+				max *= usb_endpoint_maxp_mult(&ep->desc);
+		}
 
 		if (urb->number_of_packets <= 0)
 			return -EINVAL;
@@ -455,8 +486,7 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 			urb->iso_frame_desc[n].status = -EXDEV;
 			urb->iso_frame_desc[n].actual_length = 0;
 		}
-	} else if (urb->num_sgs && !urb->dev->bus->no_sg_constraint &&
-			dev->speed != USB_SPEED_WIRELESS) {
+	} else if (urb->num_sgs && !urb->dev->bus->no_sg_constraint) {
 		struct scatterlist *sg;
 		int i;
 
@@ -475,7 +505,7 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 	 */
 
 	/* Check that the pipe's type matches the endpoint's type */
-	if (usb_urb_ep_type_check(urb))
+	if (usb_pipe_type_check(urb->dev, urb->pipe))
 		dev_warn_once(&dev->dev, "BOGUS urb xfer, pipe %x != type %x\n",
 			usb_pipetype(urb->pipe), pipetypes[xfertype]);
 
@@ -487,7 +517,7 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 	case USB_ENDPOINT_XFER_INT:
 		if (is_out)
 			allowed |= URB_ZERO_PACKET;
-		/* FALLTHROUGH */
+		fallthrough;
 	default:			/* all non-iso endpoints */
 		if (!is_out)
 			allowed |= URB_SHORT_NOT_OK;
@@ -515,17 +545,9 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 	case USB_ENDPOINT_XFER_ISOC:
 	case USB_ENDPOINT_XFER_INT:
 		/* too small? */
-		switch (dev->speed) {
-		case USB_SPEED_WIRELESS:
-			if ((urb->interval < 6)
-				&& (xfertype == USB_ENDPOINT_XFER_INT))
-				return -EINVAL;
-			/* fall through */
-		default:
-			if (urb->interval <= 0)
-				return -EINVAL;
-			break;
-		}
+		if (urb->interval <= 0)
+			return -EINVAL;
+
 		/* too big? */
 		switch (dev->speed) {
 		case USB_SPEED_SUPER_PLUS:
@@ -534,10 +556,6 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 			if (urb->interval > (1 << 15))
 				return -EINVAL;
 			max = 1 << 15;
-			break;
-		case USB_SPEED_WIRELESS:
-			if (urb->interval > 16)
-				return -EINVAL;
 			break;
 		case USB_SPEED_HIGH:	/* units are microframes */
 			/* NOTE usb handles 2^15 */
@@ -562,10 +580,8 @@ int usb_submit_urb(struct urb *urb, gfp_t mem_flags)
 		default:
 			return -EINVAL;
 		}
-		if (dev->speed != USB_SPEED_WIRELESS) {
-			/* Round down to a power of 2, no more than max */
-			urb->interval = min(max, 1 << ilog2(urb->interval));
-		}
+		/* Round down to a power of 2, no more than max */
+		urb->interval = min(max, 1 << ilog2(urb->interval));
 	}
 
 	return usb_hcd_submit_urb(urb, mem_flags);
@@ -587,10 +603,9 @@ EXPORT_SYMBOL_GPL(usb_submit_urb);
  * code).
  *
  * Drivers should not call this routine or related routines, such as
- * usb_kill_urb() or usb_unlink_anchored_urbs(), after their disconnect
- * method has returned.  The disconnect function should synchronize with
- * a driver's I/O routines to insure that all URB-related activity has
- * completed before it returns.
+ * usb_kill_urb(), after their disconnect method has returned. The
+ * disconnect function should synchronize with a driver's I/O routines
+ * to insure that all URB-related activity has completed before it returns.
  *
  * This request is asynchronous, however the HCD might call the ->complete()
  * callback during unlink. Therefore when drivers call usb_unlink_urb(), they
@@ -880,28 +895,6 @@ void usb_unpoison_anchored_urbs(struct usb_anchor *anchor)
 	spin_unlock_irqrestore(&anchor->lock, flags);
 }
 EXPORT_SYMBOL_GPL(usb_unpoison_anchored_urbs);
-/**
- * usb_unlink_anchored_urbs - asynchronously cancel transfer requests en masse
- * @anchor: anchor the requests are bound to
- *
- * this allows all outstanding URBs to be unlinked starting
- * from the back of the queue. This function is asynchronous.
- * The unlinking is just triggered. It may happen after this
- * function has returned.
- *
- * This routine should not be called by a driver after its disconnect
- * method has returned.
- */
-void usb_unlink_anchored_urbs(struct usb_anchor *anchor)
-{
-	struct urb *victim;
-
-	while ((victim = usb_get_from_anchor(anchor)) != NULL) {
-		usb_unlink_urb(victim);
-		usb_put_urb(victim);
-	}
-}
-EXPORT_SYMBOL_GPL(usb_unlink_anchored_urbs);
 
 /**
  * usb_anchor_suspend_wakeups

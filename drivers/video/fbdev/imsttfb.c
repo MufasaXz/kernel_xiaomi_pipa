@@ -16,6 +16,7 @@
  *  more details.
  */
 
+#include <linux/aperture.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -30,9 +31,8 @@
 #include <asm/io.h>
 #include <linux/uaccess.h>
 
-#if defined(CONFIG_PPC)
+#if defined(CONFIG_PPC_PMAC)
 #include <linux/nvram.h>
-#include <asm/prom.h>
 #include "macmodes.h"
 #endif
 
@@ -87,7 +87,7 @@ enum {
 	SSTATUS	= 36, /* 0x90 */
 	PRC	= 37, /* 0x94 */
 
-#if 0	
+#if 0
 	/* PCI Registers */
 	DVID	= 0x00000000L,
 	SC	= 0x00000004L,
@@ -104,8 +104,8 @@ enum {
 	PDATA	= 0x04,
 	PPMASK	= 0x08,
 	PADDRR	= 0x0c,
-	PIDXLO	= 0x10,	
-	PIDXHI	= 0x14,	
+	PIDXLO	= 0x10,
+	PIDXHI	= 0x14,
 	PIDXDATA= 0x18,
 	PIDXCTL	= 0x1c
 };
@@ -132,7 +132,7 @@ enum {
 	SYSCLKC		= 0x18,	/* () System Clock C */
 	/*
 	 * Dot clock rate is 20MHz * (m + 1) / ((n + 1) * (p ? 2 * p : 1)
-	 * c is charge pump bias which depends on the VCO frequency  
+	 * c is charge pump bias which depends on the VCO frequency
 	 */
 	PIXM0		= 0x20,	/* () Pixel M 0 */
 	PIXN0		= 0x21,	/* () Pixel N 0 */
@@ -321,20 +321,19 @@ struct imstt_par {
 	__u32 ramdac;
 	__u32 palette[16];
 };
- 
+
 enum {
 	IBM = 0,
 	TVP = 1
 };
 
-#define USE_NV_MODES		1
 #define INIT_BPP		8
 #define INIT_XRES		640
 #define INIT_YRES		480
 
 static int inverse = 0;
 static char fontname[40] __initdata = { 0 };
-#if defined(CONFIG_PPC)
+#if defined(CONFIG_PPC_PMAC)
 static signed char init_vmode = -1, init_cmode = -1;
 #endif
 
@@ -375,7 +374,7 @@ static struct imstt_regvals tvp_reg_init_17 = {
 
 static struct imstt_regvals tvp_reg_init_18 = {
 	1152,
-  	0x0009, 0x0011, 0x059, 0x5b, 0x0003, 0x0031, 0x0397, 0x039a, 0x0000, 
+  	0x0009, 0x0011, 0x059, 0x5b, 0x0003, 0x0031, 0x0397, 0x039a, 0x0000,
 	0xfd, 0x3a, 0xf1,
 	{ 0x39, 0x38, 0x38 }, { 0xf3, 0xf3, 0xf2 }
 };
@@ -858,10 +857,10 @@ imsttfb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 }
 
 static int
-imsttfb_set_par(struct fb_info *info) 
+imsttfb_set_par(struct fb_info *info)
 {
 	struct imstt_par *par = info->par;
-		
+
 	if (!compute_imstt_regvals(par, info->var.xres, info->var.yres))
 		return -EINVAL;
 
@@ -932,7 +931,7 @@ imsttfb_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
 	return 0;
 }
 
-static int 
+static int
 imsttfb_blank(int blank, struct fb_info *info)
 {
 	struct imstt_par *par = info->par;
@@ -988,7 +987,7 @@ imsttfb_blank(int blank, struct fb_info *info)
 
 static void
 imsttfb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
-{ 
+{
 	struct imstt_par *par = info->par;
 	__u32 Bpp, line_pitch, bgc, dx, dy, width, height;
 
@@ -996,7 +995,7 @@ imsttfb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 	bgc |= (bgc << 8);
 	bgc |= (bgc << 16);
 
-	Bpp = info->var.bits_per_pixel >> 3,
+	Bpp = info->var.bits_per_pixel >> 3;
 	line_pitch = info->fix.line_length;
 
 	dy = rect->dy * line_pitch;
@@ -1037,7 +1036,7 @@ imsttfb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 	__u32 Bpp, line_pitch, fb_offset_old, fb_offset_new, sp, dp_octl;
  	__u32 cnt, bltctl, sx, sy, dx, dy, height, width;
 
-	Bpp = info->var.bits_per_pixel >> 3,
+	Bpp = info->var.bits_per_pixel >> 3;
 
 	sx = area->sx * Bpp;
 	sy = area->sy;
@@ -1194,7 +1193,7 @@ imstt_set_cursor(struct imstt_par *par, struct fb_image *d, int on)
 	}
 }
 
-static int 
+static int
 imsttfb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 {
 	struct imstt_par *par = info->par;
@@ -1202,7 +1201,7 @@ imsttfb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 
 	if (cursor->dest == NULL && cursor->rop == ROP_XOR)
 		return 1;
-	
+
 	imstt_set_cursor(info, cursor, 0);
 
 	if (flags & FB_CUR_SETPOS) {
@@ -1335,8 +1334,9 @@ static struct pci_driver imsttfb_pci_driver = {
 	.remove =	imsttfb_remove,
 };
 
-static struct fb_ops imsttfb_ops = {
+static const struct fb_ops imsttfb_ops = {
 	.owner 		= THIS_MODULE,
+	__FB_DEFAULT_IOMEM_OPS_RDWR,
 	.fb_check_var	= imsttfb_check_var,
 	.fb_set_par 	= imsttfb_set_par,
 	.fb_setcolreg 	= imsttfb_setcolreg,
@@ -1346,6 +1346,7 @@ static struct fb_ops imsttfb_ops = {
 	.fb_copyarea	= imsttfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
 	.fb_ioctl 	= imsttfb_ioctl,
+	__FB_DEFAULT_IOMEM_OPS_MMAP,
 };
 
 static int init_imstt(struct fb_info *info)
@@ -1390,8 +1391,8 @@ static int init_imstt(struct fb_info *info)
 		}
 	}
 
-#if USE_NV_MODES && defined(CONFIG_PPC32)
-	{
+#if defined(CONFIG_PPC_PMAC) && defined(CONFIG_PPC32)
+	if (IS_REACHABLE(CONFIG_NVRAM) && machine_is(powermac)) {
 		int vmode = init_vmode, cmode = init_cmode;
 
 		if (vmode == -1) {
@@ -1409,17 +1410,17 @@ static int init_imstt(struct fb_info *info)
 			info->var.yres = info->var.yres_virtual = INIT_YRES;
 			info->var.bits_per_pixel = INIT_BPP;
 		}
-	}
-#else
-	info->var.xres = info->var.xres_virtual = INIT_XRES;
-	info->var.yres = info->var.yres_virtual = INIT_YRES;
-	info->var.bits_per_pixel = INIT_BPP;
+	} else
 #endif
+	{
+		info->var.xres = info->var.xres_virtual = INIT_XRES;
+		info->var.yres = info->var.yres_virtual = INIT_YRES;
+		info->var.bits_per_pixel = INIT_BPP;
+	}
 
 	if ((info->var.xres * info->var.yres) * (info->var.bits_per_pixel >> 3) > info->fix.smem_len
 	    || !(compute_imstt_regvals(par, info->var.xres, info->var.yres))) {
 		printk("imsttfb: %ux%ux%u not supported\n", info->var.xres, info->var.yres, info->var.bits_per_pixel);
-		framebuffer_release(info);
 		return -ENODEV;
 	}
 
@@ -1447,15 +1448,15 @@ static int init_imstt(struct fb_info *info)
 	info->var.pixclock = 1000000 / getclkMHz(par);
 
 	info->fbops = &imsttfb_ops;
-	info->flags = FBINFO_DEFAULT |
-                      FBINFO_HWACCEL_COPYAREA |
+	info->flags = FBINFO_HWACCEL_COPYAREA |
 	              FBINFO_HWACCEL_FILLRECT |
 	              FBINFO_HWACCEL_YPAN;
 
-	fb_alloc_cmap(&info->cmap, 0, 0);
+	if (fb_alloc_cmap(&info->cmap, 0, 0))
+		return -ENODEV;
 
 	if (register_framebuffer(info) < 0) {
-		framebuffer_release(info);
+		fb_dealloc_cmap(&info->cmap);
 		return -ENODEV;
 	}
 
@@ -1471,20 +1472,22 @@ static int imsttfb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	struct imstt_par *par;
 	struct fb_info *info;
 	struct device_node *dp;
-	int ret = -ENOMEM;
-	
+	int ret;
+
+	ret = aperture_remove_conflicting_pci_devices(pdev, "imsttfb");
+	if (ret)
+		return ret;
+	ret = -ENOMEM;
+
 	dp = pci_device_to_OF_node(pdev);
 	if(dp)
-		printk(KERN_INFO "%s: OF name %s\n",__func__, dp->name);
+		printk(KERN_INFO "%s: OF name %pOFn\n",__func__, dp);
 	else if (IS_ENABLED(CONFIG_OF))
 		printk(KERN_ERR "imsttfb: no OF node for pci device\n");
 
 	info = framebuffer_alloc(sizeof(struct imstt_par), &pdev->dev);
-
-	if (!info) {
-		printk(KERN_ERR "imsttfb: Can't allocate memory\n");
+	if (!info)
 		return -ENOMEM;
-	}
 
 	par = info->par;
 
@@ -1500,8 +1503,8 @@ static int imsttfb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	switch (pdev->device) {
 		case PCI_DEVICE_ID_IMS_TT128: /* IMS,tt128mbA */
 			par->ramdac = IBM;
-			if (dp && ((strcmp(dp->name, "IMS,tt128mb8") == 0) ||
-				   (strcmp(dp->name, "IMS,tt128mb8A") == 0)))
+			if (of_node_name_eq(dp, "IMS,tt128mb8") ||
+			    of_node_name_eq(dp, "IMS,tt128mb8A"))
 				par->ramdac = TVP;
 			break;
 		case PCI_DEVICE_ID_IMS_TT3D:  /* IMS,tt3d */
@@ -1586,7 +1589,7 @@ imsttfb_setup(char *options)
 			inverse = 1;
 			fb_invert_cmaps();
 		}
-#if defined(CONFIG_PPC)
+#if defined(CONFIG_PPC_PMAC)
 		else if (!strncmp(this_opt, "vmode:", 6)) {
 			int vmode = simple_strtoul(this_opt+6, NULL, 0);
 			if (vmode > 0 && vmode <= VMODE_MAX)
@@ -1621,7 +1624,12 @@ static int __init imsttfb_init(void)
 {
 #ifndef MODULE
 	char *option = NULL;
+#endif
 
+	if (fb_modesetting_disabled("imsttfb"))
+		return -ENODEV;
+
+#ifndef MODULE
 	if (fb_get_options("imsttfb", &option))
 		return -ENODEV;
 
@@ -1629,7 +1637,7 @@ static int __init imsttfb_init(void)
 #endif
 	return pci_register_driver(&imsttfb_pci_driver);
 }
- 
+
 static void __exit imsttfb_exit(void)
 {
 	pci_unregister_driver(&imsttfb_pci_driver);

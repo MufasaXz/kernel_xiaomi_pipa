@@ -12,17 +12,8 @@
 #include <vdso/datapage.h>
 #include <vdso/helpers.h>
 
-#ifdef BUILD_VDSO32_64
-typedef u64 gtod_long_t;
-#else
-typedef unsigned long gtod_long_t;
-#endif
-#endif /* CONFIG_GENERIC_GETTIMEOFDAY */
+#include <uapi/linux/time.h>
 
-extern int vclocks_used;
-static inline bool vclock_was_used(int vclock)
-{
-	return READ_ONCE(vclocks_used) & (1 << vclock);
-}
+#endif /* CONFIG_GENERIC_GETTIMEOFDAY */
 
 #endif /* _ASM_X86_VGTOD_H */

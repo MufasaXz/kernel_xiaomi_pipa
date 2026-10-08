@@ -1,8 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
 #
 # 64-bit system call numbers and entry vectors
 #
 # The format is:
-# <number> <abi> <name> <entry point>
+# <number> <abi> <name> <entry point> [<compat entry point> [noreturn]]
+#
+# The __x64_sys_*() stubs are created on-the-fly for sys_*() system calls
 #
 # The abi is "common", "64" or "x32" for this file.
 #
@@ -21,7 +24,7 @@
 12	common	brk			sys_brk
 13	64	rt_sigaction		sys_rt_sigaction
 14	common	rt_sigprocmask		sys_rt_sigprocmask
-15	64	rt_sigreturn		sys_rt_sigreturn/ptregs
+15	64	rt_sigreturn		sys_rt_sigreturn
 16	64	ioctl			sys_ioctl
 17	common	pread64			sys_pread64
 18	common	pwrite64		sys_pwrite64
@@ -62,11 +65,11 @@
 53	common	socketpair		sys_socketpair
 54	64	setsockopt		sys_setsockopt
 55	64	getsockopt		sys_getsockopt
-56	common	clone			sys_clone/ptregs
-57	common	fork			sys_fork/ptregs
-58	common	vfork			sys_vfork/ptregs
-59	64	execve			sys_execve/ptregs
-60	common	exit			sys_exit
+56	common	clone			sys_clone
+57	common	fork			sys_fork
+58	common	vfork			sys_vfork
+59	64	execve			sys_execve
+60	common	exit			sys_exit			-			noreturn
 61	common	wait4			sys_wait4
 62	common	kill			sys_kill
 63	common	uname			sys_newuname
@@ -162,7 +165,7 @@
 153	common	vhangup			sys_vhangup
 154	common	modify_ldt		sys_modify_ldt
 155	common	pivot_root		sys_pivot_root
-156	64	_sysctl			sys_sysctl
+156	64	_sysctl			sys_ni_syscall
 157	common	prctl			sys_prctl
 158	common	arch_prctl		sys_arch_prctl
 159	common	adjtimex		sys_adjtimex
@@ -178,7 +181,7 @@
 169	common	reboot			sys_reboot
 170	common	sethostname		sys_sethostname
 171	common	setdomainname		sys_setdomainname
-172	common	iopl			sys_iopl/ptregs
+172	common	iopl			sys_iopl
 173	common	ioperm			sys_ioperm
 174	64	create_module
 175	common	init_module		sys_init_module
@@ -218,7 +221,7 @@
 209	64	io_submit		sys_io_submit
 210	common	io_cancel		sys_io_cancel
 211	64	get_thread_area
-212	common	lookup_dcookie		sys_lookup_dcookie
+212	common	lookup_dcookie
 213	common	epoll_create		sys_epoll_create
 214	64	epoll_ctl_old
 215	64	epoll_wait_old
@@ -237,7 +240,7 @@
 228	common	clock_gettime		sys_clock_gettime
 229	common	clock_getres		sys_clock_getres
 230	common	clock_nanosleep		sys_clock_nanosleep
-231	common	exit_group		sys_exit_group
+231	common	exit_group		sys_exit_group			-			noreturn
 232	common	epoll_wait		sys_epoll_wait
 233	common	epoll_ctl		sys_epoll_ctl
 234	common	tgkill			sys_tgkill
@@ -328,7 +331,7 @@
 319	common	memfd_create		sys_memfd_create
 320	common	kexec_file_load		sys_kexec_file_load
 321	common	bpf			sys_bpf
-322	64	execveat		sys_execveat/ptregs
+322	64	execveat		sys_execveat
 323	common	userfaultfd		sys_userfaultfd
 324	common	membarrier		sys_membarrier
 325	common	mlock2			sys_mlock2
@@ -339,48 +342,100 @@
 330	common	pkey_alloc		sys_pkey_alloc
 331	common	pkey_free		sys_pkey_free
 332	common	statx			sys_statx
+333	common	io_pgetevents		sys_io_pgetevents
+334	common	rseq			sys_rseq
+335	common	uretprobe		sys_uretprobe
+336	common	uprobe			sys_uprobe
+# don't use numbers 387 through 423, add new calls after the last
+# 'common' entry
 424	common	pidfd_send_signal	sys_pidfd_send_signal
+425	common	io_uring_setup		sys_io_uring_setup
+426	common	io_uring_enter		sys_io_uring_enter
+427	common	io_uring_register	sys_io_uring_register
+428	common	open_tree		sys_open_tree
+429	common	move_mount		sys_move_mount
+430	common	fsopen			sys_fsopen
+431	common	fsconfig		sys_fsconfig
+432	common	fsmount			sys_fsmount
+433	common	fspick			sys_fspick
 434	common	pidfd_open		sys_pidfd_open
+435	common	clone3			sys_clone3
+436	common	close_range		sys_close_range
+437	common	openat2			sys_openat2
+438	common	pidfd_getfd		sys_pidfd_getfd
+439	common	faccessat2		sys_faccessat2
+440	common	process_madvise		sys_process_madvise
+441	common	epoll_pwait2		sys_epoll_pwait2
+442	common	mount_setattr		sys_mount_setattr
+443	common	quotactl_fd		sys_quotactl_fd
+444	common	landlock_create_ruleset	sys_landlock_create_ruleset
+445	common	landlock_add_rule	sys_landlock_add_rule
+446	common	landlock_restrict_self	sys_landlock_restrict_self
+447	common	memfd_secret		sys_memfd_secret
+448	common	process_mrelease	sys_process_mrelease
+449	common	futex_waitv		sys_futex_waitv
+450	common	set_mempolicy_home_node	sys_set_mempolicy_home_node
+451	common	cachestat		sys_cachestat
+452	common	fchmodat2		sys_fchmodat2
+453	common	map_shadow_stack	sys_map_shadow_stack
+454	common	futex_wake		sys_futex_wake
+455	common	futex_wait		sys_futex_wait
+456	common	futex_requeue		sys_futex_requeue
+457	common	statmount		sys_statmount
+458	common	listmount		sys_listmount
+459	common	lsm_get_self_attr	sys_lsm_get_self_attr
+460	common	lsm_set_self_attr	sys_lsm_set_self_attr
+461	common	lsm_list_modules	sys_lsm_list_modules
+462 	common  mseal			sys_mseal
+463	common	setxattrat		sys_setxattrat
+464	common	getxattrat		sys_getxattrat
+465	common	listxattrat		sys_listxattrat
+466	common	removexattrat		sys_removexattrat
+467	common	open_tree_attr		sys_open_tree_attr
+468	common	file_getattr		sys_file_getattr
+469	common	file_setattr		sys_file_setattr
 
 #
-# x32-specific system call numbers start at 512 to avoid cache impact
-# for native 64-bit operation. The __x32_compat_sys stubs are created
-# on-the-fly for compat_sys_*() compatibility system calls if X86_X32
-# is defined.
+# Due to a historical design error, certain syscalls are numbered differently
+# in x32 as compared to native x86_64.  These syscalls have numbers 512-547.
+# Do not add new syscalls to this range.  Numbers 548 and above are available
+# for non-x32 use.
 #
-512	x32	rt_sigaction		__x32_compat_sys_rt_sigaction
-513	x32	rt_sigreturn		sys32_x32_rt_sigreturn
-514	x32	ioctl			__x32_compat_sys_ioctl
-515	x32	readv			__x32_compat_sys_readv
-516	x32	writev			__x32_compat_sys_writev
-517	x32	recvfrom		__x32_compat_sys_recvfrom
-518	x32	sendmsg			__x32_compat_sys_sendmsg
-519	x32	recvmsg			__x32_compat_sys_recvmsg
-520	x32	execve			__x32_compat_sys_execve/ptregs
-521	x32	ptrace			__x32_compat_sys_ptrace
-522	x32	rt_sigpending		__x32_compat_sys_rt_sigpending
-523	x32	rt_sigtimedwait		__x32_compat_sys_rt_sigtimedwait
-524	x32	rt_sigqueueinfo		__x32_compat_sys_rt_sigqueueinfo
-525	x32	sigaltstack		__x32_compat_sys_sigaltstack
-526	x32	timer_create		__x32_compat_sys_timer_create
-527	x32	mq_notify		__x32_compat_sys_mq_notify
-528	x32	kexec_load		__x32_compat_sys_kexec_load
-529	x32	waitid			__x32_compat_sys_waitid
-530	x32	set_robust_list		__x32_compat_sys_set_robust_list
-531	x32	get_robust_list		__x32_compat_sys_get_robust_list
-532	x32	vmsplice		__x32_compat_sys_vmsplice
-533	x32	move_pages		__x32_compat_sys_move_pages
-534	x32	preadv			__x32_compat_sys_preadv64
-535	x32	pwritev			__x32_compat_sys_pwritev64
-536	x32	rt_tgsigqueueinfo	__x32_compat_sys_rt_tgsigqueueinfo
-537	x32	recvmmsg		__x32_compat_sys_recvmmsg
-538	x32	sendmmsg		__x32_compat_sys_sendmmsg
-539	x32	process_vm_readv	__x32_compat_sys_process_vm_readv
-540	x32	process_vm_writev	__x32_compat_sys_process_vm_writev
-541	x32	setsockopt		__x32_compat_sys_setsockopt
-542	x32	getsockopt		__x32_compat_sys_getsockopt
-543	x32	io_setup		__x32_compat_sys_io_setup
-544	x32	io_submit		__x32_compat_sys_io_submit
-545	x32	execveat		__x32_compat_sys_execveat/ptregs
-546	x32	preadv2			__x32_compat_sys_preadv64v2
-547	x32	pwritev2		__x32_compat_sys_pwritev64v2
+512	x32	rt_sigaction		compat_sys_rt_sigaction
+513	x32	rt_sigreturn		compat_sys_x32_rt_sigreturn
+514	x32	ioctl			compat_sys_ioctl
+515	x32	readv			sys_readv
+516	x32	writev			sys_writev
+517	x32	recvfrom		compat_sys_recvfrom
+518	x32	sendmsg			compat_sys_sendmsg
+519	x32	recvmsg			compat_sys_recvmsg
+520	x32	execve			compat_sys_execve
+521	x32	ptrace			compat_sys_ptrace
+522	x32	rt_sigpending		compat_sys_rt_sigpending
+523	x32	rt_sigtimedwait		compat_sys_rt_sigtimedwait_time64
+524	x32	rt_sigqueueinfo		compat_sys_rt_sigqueueinfo
+525	x32	sigaltstack		compat_sys_sigaltstack
+526	x32	timer_create		compat_sys_timer_create
+527	x32	mq_notify		compat_sys_mq_notify
+528	x32	kexec_load		compat_sys_kexec_load
+529	x32	waitid			compat_sys_waitid
+530	x32	set_robust_list		compat_sys_set_robust_list
+531	x32	get_robust_list		compat_sys_get_robust_list
+532	x32	vmsplice		sys_vmsplice
+533	x32	move_pages		sys_move_pages
+534	x32	preadv			compat_sys_preadv64
+535	x32	pwritev			compat_sys_pwritev64
+536	x32	rt_tgsigqueueinfo	compat_sys_rt_tgsigqueueinfo
+537	x32	recvmmsg		compat_sys_recvmmsg_time64
+538	x32	sendmmsg		compat_sys_sendmmsg
+539	x32	process_vm_readv	sys_process_vm_readv
+540	x32	process_vm_writev	sys_process_vm_writev
+541	x32	setsockopt		sys_setsockopt
+542	x32	getsockopt		sys_getsockopt
+543	x32	io_setup		compat_sys_io_setup
+544	x32	io_submit		compat_sys_io_submit
+545	x32	execveat		compat_sys_execveat
+546	x32	preadv2			compat_sys_preadv64v2
+547	x32	pwritev2		compat_sys_pwritev64v2
+# This is the end of the legacy x32 range.  Numbers 548 and above are
+# not special and are not to be used for x32-specific syscalls.

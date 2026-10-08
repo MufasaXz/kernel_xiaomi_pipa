@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * helene.c
  *
@@ -6,16 +7,6 @@
  * Copyright 2012 Sony Corporation
  * Copyright (C) 2014 NetUP Inc.
  * Copyright (C) 2014 Abylay Ospan <aospan@netup.ru>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
   */
 
 #include <linux/slab.h>
@@ -1072,8 +1063,7 @@ struct dvb_frontend *helene_attach(struct dvb_frontend *fe,
 }
 EXPORT_SYMBOL_GPL(helene_attach);
 
-static int helene_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int helene_probe(struct i2c_client *client)
 {
 	struct helene_config *config = client->dev.platform_data;
 	struct dvb_frontend *fe = config->fe;
@@ -1120,7 +1110,7 @@ static struct i2c_driver helene_driver = {
 	.driver = {
 		.name = "helene",
 	},
-	.probe    = helene_probe,
+	.probe = helene_probe,
 	.id_table = helene_id,
 };
 module_i2c_driver(helene_driver);

@@ -9,6 +9,7 @@
 #include <linux/filter.h>
 #include <linux/tracepoint.h>
 #include <linux/bpf.h>
+#include <net/xdp.h>
 
 #define __XDP_ACT_MAP(FN)	\
 	FN(ABORTED)		\
@@ -22,7 +23,7 @@
 #define __XDP_ACT_SYM_FN(x)	\
 	{ XDP_##x, #x },
 #define __XDP_ACT_SYM_TAB	\
-	__XDP_ACT_MAP(__XDP_ACT_SYM_FN) { -1, 0 }
+	__XDP_ACT_MAP(__XDP_ACT_SYM_FN) { -1, NULL }
 __XDP_ACT_MAP(__XDP_ACT_TP_FN)
 
 TRACE_EVENT(xdp_exception,
@@ -86,19 +87,15 @@ struct _bpf_dtab_netdev {
 };
 #endif /* __DEVMAP_OBJ_TYPE */
 
-#define devmap_ifindex(tgt, map)				\
-	(((map->map_type == BPF_MAP_TYPE_DEVMAP ||	\
-		  map->map_type == BPF_MAP_TYPE_DEVMAP_HASH)) ? \
-	  ((struct _bpf_dtab_netdev *)tgt)->dev->ifindex : 0)
-
 DECLARE_EVENT_CLASS(xdp_redirect_template,
 
 	TP_PROTO(const struct net_device *dev,
 		 const struct bpf_prog *xdp,
 		 const void *tgt, int err,
-		 const struct bpf_map *map, u32 index),
+		 enum bpf_map_type map_type,
+		 u32 map_id, u32 index),
 
-	TP_ARGS(dev, xdp, tgt, err, map, index),
+	TP_ARGS(dev, xdp, tgt, err, map_type, map_id, index),
 
 	TP_STRUCT__entry(
 		__field(int, prog_id)
@@ -111,14 +108,26 @@ DECLARE_EVENT_CLASS(xdp_redirect_template,
 	),
 
 	TP_fast_assign(
+		u32 ifindex = 0, map_index = index;
+
+		if (map_type == BPF_MAP_TYPE_DEVMAP || map_type == BPF_MAP_TYPE_DEVMAP_HASH) {
+			/* Just leave to_ifindex to 0 if do broadcast redirect,
+			 * as tgt will be NULL.
+			 */
+			if (tgt)
+				ifindex = ((struct _bpf_dtab_netdev *)tgt)->dev->ifindex;
+		} else if (map_type == BPF_MAP_TYPE_UNSPEC && map_id == INT_MAX) {
+			ifindex = index;
+			map_index = 0;
+		}
+
 		__entry->prog_id	= xdp->aux->id;
 		__entry->act		= XDP_REDIRECT;
 		__entry->ifindex	= dev->ifindex;
 		__entry->err		= err;
-		__entry->to_ifindex	= map ? devmap_ifindex(tgt, map) :
-						index;
-		__entry->map_id		= map ? map->id : 0;
-		__entry->map_index	= map ? index : 0;
+		__entry->to_ifindex	= ifindex;
+		__entry->map_id		= map_id;
+		__entry->map_index	= map_index;
 	),
 
 	TP_printk("prog_id=%d action=%s ifindex=%d to_ifindex=%d err=%d"
@@ -133,47 +142,33 @@ DEFINE_EVENT(xdp_redirect_template, xdp_redirect,
 	TP_PROTO(const struct net_device *dev,
 		 const struct bpf_prog *xdp,
 		 const void *tgt, int err,
-		 const struct bpf_map *map, u32 index),
-	TP_ARGS(dev, xdp, tgt, err, map, index)
+		 enum bpf_map_type map_type,
+		 u32 map_id, u32 index),
+	TP_ARGS(dev, xdp, tgt, err, map_type, map_id, index)
 );
 
 DEFINE_EVENT(xdp_redirect_template, xdp_redirect_err,
 	TP_PROTO(const struct net_device *dev,
 		 const struct bpf_prog *xdp,
 		 const void *tgt, int err,
-		 const struct bpf_map *map, u32 index),
-	TP_ARGS(dev, xdp, tgt, err, map, index)
+		 enum bpf_map_type map_type,
+		 u32 map_id, u32 index),
+	TP_ARGS(dev, xdp, tgt, err, map_type, map_id, index)
 );
 
-#define _trace_xdp_redirect(dev, xdp, to)		\
-	 trace_xdp_redirect(dev, xdp, NULL, 0, NULL, to);
+#define _trace_xdp_redirect(dev, xdp, to)						\
+	 trace_xdp_redirect(dev, xdp, NULL, 0, BPF_MAP_TYPE_UNSPEC, INT_MAX, to)
 
-#define _trace_xdp_redirect_err(dev, xdp, to, err)	\
-	 trace_xdp_redirect_err(dev, xdp, NULL, err, NULL, to);
+#define _trace_xdp_redirect_err(dev, xdp, to, err)					\
+	 trace_xdp_redirect_err(dev, xdp, NULL, err, BPF_MAP_TYPE_UNSPEC, INT_MAX, to)
 
-#define _trace_xdp_redirect_map(dev, xdp, to, map, index)		\
-	 trace_xdp_redirect(dev, xdp, to, 0, map, index);
+#define _trace_xdp_redirect_map(dev, xdp, to, map_type, map_id, index) \
+	 trace_xdp_redirect(dev, xdp, to, 0, map_type, map_id, index)
 
-#define _trace_xdp_redirect_map_err(dev, xdp, to, map, index, err)	\
-	 trace_xdp_redirect_err(dev, xdp, to, err, map, index);
+#define _trace_xdp_redirect_map_err(dev, xdp, to, map_type, map_id, index, err) \
+	 trace_xdp_redirect_err(dev, xdp, to, err, map_type, map_id, index)
 
-/* not used anymore, but kept around so as not to break old programs */
-DEFINE_EVENT(xdp_redirect_template, xdp_redirect_map,
-	TP_PROTO(const struct net_device *dev,
-		 const struct bpf_prog *xdp,
-		 const void *tgt, int err,
-		 const struct bpf_map *map, u32 index),
-	TP_ARGS(dev, xdp, tgt, err, map, index)
-);
-
-DEFINE_EVENT(xdp_redirect_template, xdp_redirect_map_err,
-	TP_PROTO(const struct net_device *dev,
-		 const struct bpf_prog *xdp,
-		 const void *tgt, int err,
-		 const struct bpf_map *map, u32 index),
-	TP_ARGS(dev, xdp, tgt, err, map, index)
-);
-
+#ifdef CONFIG_BPF_SYSCALL
 TRACE_EVENT(xdp_cpumap_kthread,
 
 	TP_PROTO(int map_id, unsigned int processed,  unsigned int drops,
@@ -286,6 +281,102 @@ TRACE_EVENT(xdp_devmap_xmit,
 		  __print_symbolic(__entry->act, __XDP_ACT_SYM_TAB),
 		  __entry->sent, __entry->drops,
 		  __entry->err)
+);
+#endif /* CONFIG_BPF_SYSCALL */
+
+/* Expect users already include <net/xdp.h>, but not xdp_priv.h */
+#include <net/xdp_priv.h>
+
+#define __MEM_TYPE_MAP(FN)	\
+	FN(PAGE_SHARED)		\
+	FN(PAGE_ORDER0)		\
+	FN(PAGE_POOL)		\
+	FN(XSK_BUFF_POOL)
+
+#define __MEM_TYPE_TP_FN(x)	\
+	TRACE_DEFINE_ENUM(MEM_TYPE_##x);
+#define __MEM_TYPE_SYM_FN(x)	\
+	{ MEM_TYPE_##x, #x },
+#define __MEM_TYPE_SYM_TAB	\
+	__MEM_TYPE_MAP(__MEM_TYPE_SYM_FN) { -1, 0 }
+__MEM_TYPE_MAP(__MEM_TYPE_TP_FN)
+
+TRACE_EVENT(mem_disconnect,
+
+	TP_PROTO(const struct xdp_mem_allocator *xa),
+
+	TP_ARGS(xa),
+
+	TP_STRUCT__entry(
+		__field(const struct xdp_mem_allocator *,	xa)
+		__field(u32,		mem_id)
+		__field(u32,		mem_type)
+		__field(const void *,	allocator)
+	),
+
+	TP_fast_assign(
+		__entry->xa		= xa;
+		__entry->mem_id		= xa->mem.id;
+		__entry->mem_type	= xa->mem.type;
+		__entry->allocator	= xa->allocator;
+	),
+
+	TP_printk("mem_id=%d mem_type=%s allocator=%p",
+		  __entry->mem_id,
+		  __print_symbolic(__entry->mem_type, __MEM_TYPE_SYM_TAB),
+		  __entry->allocator
+	)
+);
+
+TRACE_EVENT(mem_connect,
+
+	TP_PROTO(const struct xdp_mem_allocator *xa,
+		 const struct xdp_rxq_info *rxq),
+
+	TP_ARGS(xa, rxq),
+
+	TP_STRUCT__entry(
+		__field(const struct xdp_mem_allocator *,	xa)
+		__field(u32,		mem_id)
+		__field(u32,		mem_type)
+		__field(const void *,	allocator)
+		__field(const struct xdp_rxq_info *,		rxq)
+		__field(int,		ifindex)
+	),
+
+	TP_fast_assign(
+		__entry->xa		= xa;
+		__entry->mem_id		= xa->mem.id;
+		__entry->mem_type	= xa->mem.type;
+		__entry->allocator	= xa->allocator;
+		__entry->rxq		= rxq;
+		__entry->ifindex	= rxq->dev->ifindex;
+	),
+
+	TP_printk("mem_id=%d mem_type=%s allocator=%p"
+		  " ifindex=%d",
+		  __entry->mem_id,
+		  __print_symbolic(__entry->mem_type, __MEM_TYPE_SYM_TAB),
+		  __entry->allocator,
+		  __entry->ifindex
+	)
+);
+
+TRACE_EVENT(bpf_xdp_link_attach_failed,
+
+	TP_PROTO(const char *msg),
+
+	TP_ARGS(msg),
+
+	TP_STRUCT__entry(
+		__string(msg, msg)
+	),
+
+	TP_fast_assign(
+		__assign_str(msg);
+	),
+
+	TP_printk("errmsg=%s", __get_str(msg))
 );
 
 #endif /* _TRACE_XDP_H */

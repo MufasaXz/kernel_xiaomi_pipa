@@ -58,8 +58,6 @@ struct lbs_private {
 #ifdef CONFIG_LIBERTAS_MESH
 	struct lbs_mesh_stats mstats;
 	uint16_t mesh_tlv;
-	u8 mesh_ssid[IEEE80211_MAX_SSID_LEN + 1];
-	u8 mesh_ssid_len;
 	u8 mesh_channel;
 #endif
 
@@ -85,12 +83,8 @@ struct lbs_private {
 	/* Deep sleep */
 	int is_deep_sleep;
 	int deep_sleep_required;
-	int is_auto_deep_sleep_enabled;
-	int wakeup_dev_required;
 	int is_activity_detected;
-	int auto_deep_sleep_timeout; /* in ms */
 	wait_queue_head_t ds_awake_q;
-	struct timer_list auto_deepsleep_timer;
 
 	/* Host sleep*/
 	int is_host_sleep_configured;

@@ -1,48 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright(c) 2015 - 2018 Intel Corporation.
- *
- * This file is provided under a dual BSD/GPLv2 license.  When using or
- * redistributing this file, you may do so under either license.
- *
- * GPL LICENSE SUMMARY
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * BSD LICENSE
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- *  - Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *  - Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *  - Neither the name of Intel Corporation nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
  */
 
 #include <linux/spinlock.h>
@@ -232,11 +190,11 @@ static const struct sdma_set_state_action sdma_action_table[] = {
 static void sdma_complete(struct kref *);
 static void sdma_finalput(struct sdma_state *);
 static void sdma_get(struct sdma_state *);
-static void sdma_hw_clean_up_task(unsigned long);
+static void sdma_hw_clean_up_task(struct tasklet_struct *);
 static void sdma_put(struct sdma_state *);
 static void sdma_set_state(struct sdma_engine *, enum sdma_states);
 static void sdma_start_hw_clean_up(struct sdma_engine *);
-static void sdma_sw_clean_up_task(unsigned long);
+static void sdma_sw_clean_up_task(struct tasklet_struct *);
 static void sdma_sendctrl(struct sdma_engine *, unsigned);
 static void init_sdma_regs(struct sdma_engine *, u32, uint);
 static void sdma_process_event(
@@ -379,7 +337,7 @@ static inline void complete_tx(struct sdma_engine *sde,
 	__sdma_txclean(sde->dd, tx);
 	if (complete)
 		(*complete)(tx, res);
-	if (wait && iowait_sdma_dec(wait))
+	if (iowait_sdma_dec(wait))
 		iowait_drain_wakeup(wait);
 }
 
@@ -406,6 +364,7 @@ static void sdma_flush(struct sdma_engine *sde)
 	struct sdma_txreq *txp, *txp_next;
 	LIST_HEAD(flushlist);
 	unsigned long flags;
+	uint seq;
 
 	/* flush from head to tail */
 	sdma_flush_descq(sde);
@@ -416,6 +375,22 @@ static void sdma_flush(struct sdma_engine *sde)
 	/* flush from flush list */
 	list_for_each_entry_safe(txp, txp_next, &flushlist, list)
 		complete_tx(sde, txp, SDMA_TXREQ_S_ABORTED);
+	/* wakeup QPs orphaned on the dmawait list */
+	do {
+		struct iowait *w, *nw;
+
+		seq = read_seqbegin(&sde->waitlock);
+		if (!list_empty(&sde->dmawait)) {
+			write_seqlock(&sde->waitlock);
+			list_for_each_entry_safe(w, nw, &sde->dmawait, list) {
+				if (w->wakeup) {
+					w->wakeup(w, SDMA_AVAIL_REASON);
+					list_del_init(&w->list);
+				}
+			}
+			write_sequnlock(&sde->waitlock);
+		}
+	} while (read_seqretry(&sde->waitlock, seq));
 }
 
 /*
@@ -492,7 +467,8 @@ static void sdma_err_progress_check_schedule(struct sdma_engine *sde)
 static void sdma_err_progress_check(struct timer_list *t)
 {
 	unsigned index;
-	struct sdma_engine *sde = from_timer(sde, t, err_progress_check_timer);
+	struct sdma_engine *sde = timer_container_of(sde, t,
+						     err_progress_check_timer);
 
 	dd_dev_err(sde->dd, "SDE progress check event\n");
 	for (index = 0; index < sde->dd->num_sdma; index++) {
@@ -528,9 +504,10 @@ static void sdma_err_progress_check(struct timer_list *t)
 	schedule_work(&sde->err_halt_worker);
 }
 
-static void sdma_hw_clean_up_task(unsigned long opaque)
+static void sdma_hw_clean_up_task(struct tasklet_struct *t)
 {
-	struct sdma_engine *sde = (struct sdma_engine *)opaque;
+	struct sdma_engine *sde = from_tasklet(sde, t,
+					       sdma_hw_clean_up_task);
 	u64 statuscsr;
 
 	while (1) {
@@ -587,9 +564,9 @@ static void sdma_flush_descq(struct sdma_engine *sde)
 		sdma_desc_avail(sde, sdma_descq_freecnt(sde));
 }
 
-static void sdma_sw_clean_up_task(unsigned long opaque)
+static void sdma_sw_clean_up_task(struct tasklet_struct *t)
 {
-	struct sdma_engine *sde = (struct sdma_engine *)opaque;
+	struct sdma_engine *sde = from_tasklet(sde, t, sdma_sw_clean_up_task);
 	unsigned long flags;
 
 	spin_lock_irqsave(&sde->tail_lock, flags);
@@ -816,7 +793,7 @@ struct sdma_engine *sdma_select_engine_sc(
 struct sdma_rht_map_elem {
 	u32 mask;
 	u8 ctr;
-	struct sdma_engine *sde[0];
+	struct sdma_engine *sde[];
 };
 
 struct sdma_rht_node {
@@ -853,20 +830,19 @@ struct sdma_engine *sdma_select_user_engine(struct hfi1_devdata *dd,
 {
 	struct sdma_rht_node *rht_node;
 	struct sdma_engine *sde = NULL;
-	const struct cpumask *current_mask = &current->cpus_allowed;
 	unsigned long cpu_id;
 
 	/*
 	 * To ensure that always the same sdma engine(s) will be
 	 * selected make sure the process is pinned to this CPU only.
 	 */
-	if (cpumask_weight(current_mask) != 1)
+	if (current->nr_cpus_allowed != 1)
 		goto out;
 
-	cpu_id = smp_processor_id();
 	rcu_read_lock();
-	rht_node = rhashtable_lookup_fast(dd->sdma_rht, &cpu_id,
-					  sdma_rht_params);
+	cpu_id = smp_processor_id();
+	rht_node = rhashtable_lookup(dd->sdma_rht, &cpu_id,
+				     sdma_rht_params);
 
 	if (rht_node && rht_node->map[vl]) {
 		struct sdma_rht_map_elem *map = rht_node->map[vl];
@@ -1014,7 +990,7 @@ ssize_t sdma_set_cpu_to_sde_map(struct sdma_engine *sde, const char *buf,
 	}
 
 	/* Clean up old mappings */
-	for_each_cpu(cpu, cpu_online_mask) {
+	for_each_online_cpu(cpu) {
 		struct sdma_rht_node *rht_node;
 
 		/* Don't cleanup sdes that are set in the new mask */
@@ -1268,7 +1244,7 @@ bail:
 }
 
 /**
- * sdma_clean()  Clean up allocated memory
+ * sdma_clean - Clean up allocated memory
  * @dd:          struct hfi1_devdata
  * @num_engines: num sdma engines
  *
@@ -1424,6 +1400,7 @@ int sdma_init(struct hfi1_devdata *dd, u8 port)
 		seqlock_init(&sde->head_lock);
 		spin_lock_init(&sde->senddmactrl_lock);
 		spin_lock_init(&sde->flushlist_lock);
+		seqlock_init(&sde->waitlock);
 		/* insure there is always a zero bit */
 		sde->ahg_bits = 0xfffffffe00000000ULL;
 
@@ -1439,11 +1416,10 @@ int sdma_init(struct hfi1_devdata *dd, u8 port)
 		sde->tail_csr =
 			get_kctxt_csr_addr(dd, this_idx, SD(TAIL));
 
-		tasklet_init(&sde->sdma_hw_clean_up_task, sdma_hw_clean_up_task,
-			     (unsigned long)sde);
-
-		tasklet_init(&sde->sdma_sw_clean_up_task, sdma_sw_clean_up_task,
-			     (unsigned long)sde);
+		tasklet_setup(&sde->sdma_hw_clean_up_task,
+			      sdma_hw_clean_up_task);
+		tasklet_setup(&sde->sdma_sw_clean_up_task,
+			      sdma_sw_clean_up_task);
 		INIT_WORK(&sde->err_halt_worker, sdma_err_halt_wait);
 		INIT_WORK(&sde->flush_worker, sdma_field_flush);
 
@@ -1452,12 +1428,9 @@ int sdma_init(struct hfi1_devdata *dd, u8 port)
 		timer_setup(&sde->err_progress_check_timer,
 			    sdma_err_progress_check, 0);
 
-		sde->descq = dma_zalloc_coherent(
-			&dd->pcidev->dev,
-			descq_cnt * sizeof(u64[2]),
-			&sde->descq_phys,
-			GFP_KERNEL
-		);
+		sde->descq = dma_alloc_coherent(&dd->pcidev->dev,
+						descq_cnt * sizeof(u64[2]),
+						&sde->descq_phys, GFP_KERNEL);
 		if (!sde->descq)
 			goto bail;
 		sde->tx_ring =
@@ -1470,24 +1443,18 @@ int sdma_init(struct hfi1_devdata *dd, u8 port)
 
 	dd->sdma_heads_size = L1_CACHE_BYTES * num_engines;
 	/* Allocate memory for DMA of head registers to memory */
-	dd->sdma_heads_dma = dma_zalloc_coherent(
-		&dd->pcidev->dev,
-		dd->sdma_heads_size,
-		&dd->sdma_heads_phys,
-		GFP_KERNEL
-	);
+	dd->sdma_heads_dma = dma_alloc_coherent(&dd->pcidev->dev,
+						dd->sdma_heads_size,
+						&dd->sdma_heads_phys,
+						GFP_KERNEL);
 	if (!dd->sdma_heads_dma) {
 		dd_dev_err(dd, "failed to allocate SendDMA head memory\n");
 		goto bail;
 	}
 
 	/* Allocate memory for pad */
-	dd->sdma_pad_dma = dma_zalloc_coherent(
-		&dd->pcidev->dev,
-		SDMA_PAD,
-		&dd->sdma_pad_phys,
-		GFP_KERNEL
-	);
+	dd->sdma_pad_dma = dma_alloc_coherent(&dd->pcidev->dev, SDMA_PAD,
+					      &dd->sdma_pad_phys, GFP_KERNEL);
 	if (!dd->sdma_pad_dma) {
 		dd_dev_err(dd, "failed to allocate SendDMA pad memory\n");
 		goto bail;
@@ -1555,24 +1522,6 @@ void sdma_all_running(struct hfi1_devdata *dd)
 }
 
 /**
- * sdma_all_idle() - called when the link goes down
- * @dd: hfi1_devdata
- *
- * This routine moves all engines to the idle state.
- */
-void sdma_all_idle(struct hfi1_devdata *dd)
-{
-	struct sdma_engine *sde;
-	unsigned int i;
-
-	/* idle all engines */
-	for (i = 0; i < dd->num_sdma; ++i) {
-		sde = &dd->per_sdma[i];
-		sdma_process_event(sde, sdma_event_e70_go_idle);
-	}
-}
-
-/**
  * sdma_start() - called to kick off state processing for all engines
  * @dd: hfi1_devdata
  *
@@ -1609,7 +1558,7 @@ void sdma_exit(struct hfi1_devdata *dd)
 				   sde->this_idx);
 		sdma_process_event(sde, sdma_event_e00_go_hw_down);
 
-		del_timer_sync(&sde->err_progress_check_timer);
+		timer_delete_sync(&sde->err_progress_check_timer);
 
 		/*
 		 * This waits for the state machine to exit so it is not
@@ -1629,20 +1578,18 @@ static inline void sdma_unmap_desc(
 {
 	switch (sdma_mapping_type(descp)) {
 	case SDMA_MAP_SINGLE:
-		dma_unmap_single(
-			&dd->pcidev->dev,
-			sdma_mapping_addr(descp),
-			sdma_mapping_len(descp),
-			DMA_TO_DEVICE);
+		dma_unmap_single(&dd->pcidev->dev, sdma_mapping_addr(descp),
+				 sdma_mapping_len(descp), DMA_TO_DEVICE);
 		break;
 	case SDMA_MAP_PAGE:
-		dma_unmap_page(
-			&dd->pcidev->dev,
-			sdma_mapping_addr(descp),
-			sdma_mapping_len(descp),
-			DMA_TO_DEVICE);
+		dma_unmap_page(&dd->pcidev->dev, sdma_mapping_addr(descp),
+			       sdma_mapping_len(descp), DMA_TO_DEVICE);
 		break;
 	}
+
+	if (descp->pinning_ctx && descp->ctx_put)
+		descp->ctx_put(descp->pinning_ctx);
+	descp->pinning_ctx = NULL;
 }
 
 /*
@@ -1734,7 +1681,7 @@ retry:
 			sane = (hwhead == swhead);
 
 		if (unlikely(!sane)) {
-			dd_dev_err(dd, "SDMA(%u) bad head (%s) hwhd=%hu swhd=%hu swtl=%hu cnt=%hu\n",
+			dd_dev_err(dd, "SDMA(%u) bad head (%s) hwhd=%u swhd=%u swtl=%u cnt=%u\n",
 				   sde->this_idx,
 				   use_dmahead ? "dma" : "kreg",
 				   hwhead, swhead, swtail, cnt);
@@ -1758,12 +1705,9 @@ retry:
  */
 static void sdma_desc_avail(struct sdma_engine *sde, uint avail)
 {
-	struct iowait *wait, *nw;
+	struct iowait *wait, *nw, *twait;
 	struct iowait *waits[SDMA_WAIT_BATCH_SIZE];
-	uint i, n = 0, seq, max_idx = 0;
-	struct sdma_txreq *stx;
-	struct hfi1_ibdev *dev = &sde->dd->verbs_dev;
-	u8 max_starved_cnt = 0;
+	uint i, n = 0, seq, tidx = 0;
 
 #ifdef CONFIG_SDMA_VERBOSITY
 	dd_dev_err(sde->dd, "CONFIG SDMA(%u) %s:%d %s()\n", sde->this_idx,
@@ -1772,49 +1716,50 @@ static void sdma_desc_avail(struct sdma_engine *sde, uint avail)
 #endif
 
 	do {
-		seq = read_seqbegin(&dev->iowait_lock);
+		seq = read_seqbegin(&sde->waitlock);
 		if (!list_empty(&sde->dmawait)) {
 			/* at least one item */
-			write_seqlock(&dev->iowait_lock);
+			write_seqlock(&sde->waitlock);
 			/* Harvest waiters wanting DMA descriptors */
 			list_for_each_entry_safe(
 					wait,
 					nw,
 					&sde->dmawait,
 					list) {
-				u16 num_desc = 0;
+				u32 num_desc;
 
 				if (!wait->wakeup)
 					continue;
 				if (n == ARRAY_SIZE(waits))
 					break;
-				if (!list_empty(&wait->tx_head)) {
-					stx = list_first_entry(
-						&wait->tx_head,
-						struct sdma_txreq,
-						list);
-					num_desc = stx->num_desc;
-				}
+				iowait_init_priority(wait);
+				num_desc = iowait_get_all_desc(wait);
 				if (num_desc > avail)
 					break;
 				avail -= num_desc;
-				/* Find the most starved wait memeber */
-				iowait_starve_find_max(wait, &max_starved_cnt,
-						       n, &max_idx);
+				/* Find the top-priority wait memeber */
+				if (n) {
+					twait = waits[tidx];
+					tidx =
+					    iowait_priority_update_top(wait,
+								       twait,
+								       n,
+								       tidx);
+				}
 				list_del_init(&wait->list);
 				waits[n++] = wait;
 			}
-			write_sequnlock(&dev->iowait_lock);
+			write_sequnlock(&sde->waitlock);
 			break;
 		}
-	} while (read_seqretry(&dev->iowait_lock, seq));
+	} while (read_seqretry(&sde->waitlock, seq));
 
-	/* Schedule the most starved one first */
+	/* Schedule the top-priority entry first */
 	if (n)
-		waits[max_idx]->wakeup(waits[max_idx], SDMA_AVAIL_REASON);
+		waits[tidx]->wakeup(waits[tidx], SDMA_AVAIL_REASON);
 
 	for (i = 0; i < n; i++)
-		if (i != max_idx)
+		if (i != tidx)
 			waits[i]->wakeup(waits[i], SDMA_AVAIL_REASON);
 }
 
@@ -1856,7 +1801,7 @@ retry:
 
 	/*
 	 * The SDMA idle interrupt is not guaranteed to be ordered with respect
-	 * to updates to the the dma_head location in host memory. The head
+	 * to updates to the dma_head location in host memory. The head
 	 * value read might not be fully up to date. If there are pending
 	 * descriptors and the SDMA idle interrupt fired then read from the
 	 * CSR SDMA head instead to get the latest value from the hardware.
@@ -2349,7 +2294,7 @@ static inline u16 submit_tx(struct sdma_engine *sde, struct sdma_txreq *tx)
  */
 static int sdma_check_progress(
 	struct sdma_engine *sde,
-	struct iowait *wait,
+	struct iowait_work *wait,
 	struct sdma_txreq *tx,
 	bool pkts_sent)
 {
@@ -2359,12 +2304,12 @@ static int sdma_check_progress(
 	if (tx->num_desc <= sde->desc_avail)
 		return -EAGAIN;
 	/* pulse the head_lock */
-	if (wait && wait->sleep) {
+	if (wait && iowait_ioww_to_iow(wait)->sleep) {
 		unsigned seq;
 
 		seq = raw_seqcount_begin(
 			(const seqcount_t *)&sde->head_lock.seqcount);
-		ret = wait->sleep(sde, wait, tx, seq, pkts_sent);
+		ret = wait->iow->sleep(sde, wait, tx, seq, pkts_sent);
 		if (ret == -EAGAIN)
 			sde->desc_avail = sdma_descq_freecnt(sde);
 	} else {
@@ -2376,7 +2321,7 @@ static int sdma_check_progress(
 /**
  * sdma_send_txreq() - submit a tx req to ring
  * @sde: sdma engine to use
- * @wait: wait structure to use when full (may be NULL)
+ * @wait: SE wait structure to use when full (may be NULL)
  * @tx: sdma_txreq to submit
  * @pkts_sent: has any packet been sent yet?
  *
@@ -2389,7 +2334,7 @@ static int sdma_check_progress(
  * -EIOCBQUEUED - tx queued to iowait, -ECOMM bad sdma state
  */
 int sdma_send_txreq(struct sdma_engine *sde,
-		    struct iowait *wait,
+		    struct iowait_work *wait,
 		    struct sdma_txreq *tx,
 		    bool pkts_sent)
 {
@@ -2400,7 +2345,7 @@ int sdma_send_txreq(struct sdma_engine *sde,
 	/* user should have supplied entire packet */
 	if (unlikely(tx->tlen))
 		return -EINVAL;
-	tx->wait = wait;
+	tx->wait = iowait_ioww_to_iow(wait);
 	spin_lock_irqsave(&sde->tail_lock, flags);
 retry:
 	if (unlikely(!__sdma_running(sde)))
@@ -2409,14 +2354,14 @@ retry:
 		goto nodesc;
 	tail = submit_tx(sde, tx);
 	if (wait)
-		iowait_sdma_inc(wait);
+		iowait_sdma_inc(iowait_ioww_to_iow(wait));
 	sdma_update_tail(sde, tail);
 unlock:
 	spin_unlock_irqrestore(&sde->tail_lock, flags);
 	return ret;
 unlock_noconn:
 	if (wait)
-		iowait_sdma_inc(wait);
+		iowait_sdma_inc(iowait_ioww_to_iow(wait));
 	tx->next_descq_idx = 0;
 #ifdef CONFIG_HFI1_DEBUG_SDMA_ORDER
 	tx->sn = sde->tail_sn++;
@@ -2425,10 +2370,7 @@ unlock_noconn:
 	spin_lock(&sde->flushlist_lock);
 	list_add_tail(&tx->list, &sde->flushlist);
 	spin_unlock(&sde->flushlist_lock);
-	if (wait) {
-		wait->tx_count++;
-		wait->count += tx->num_desc;
-	}
+	iowait_inc_wait_count(wait, tx->num_desc);
 	queue_work_on(sde->cpu, system_highpri_wq, &sde->flush_worker);
 	ret = -ECOMM;
 	goto unlock;
@@ -2445,13 +2387,13 @@ nodesc:
 /**
  * sdma_send_txlist() - submit a list of tx req to ring
  * @sde: sdma engine to use
- * @wait: wait structure to use when full (may be NULL)
+ * @wait: SE wait structure to use when full (may be NULL)
  * @tx_list: list of sdma_txreqs to submit
- * @count: pointer to a u32 which, after return will contain the total number of
- *         sdma_txreqs removed from the tx_list. This will include sdma_txreqs
- *         whose SDMA descriptors are submitted to the ring and the sdma_txreqs
- *         which are added to SDMA engine flush list if the SDMA engine state is
- *         not running.
+ * @count_out: pointer to a u16 which, after return will contain the total number of
+ *             sdma_txreqs removed from the tx_list. This will include sdma_txreqs
+ *             whose SDMA descriptors are submitted to the ring and the sdma_txreqs
+ *             which are added to SDMA engine flush list if the SDMA engine state is
+ *             not running.
  *
  * The call submits the list into the ring.
  *
@@ -2470,8 +2412,8 @@ nodesc:
  * -EINVAL - sdma_txreq incomplete, -EBUSY - no space in ring (wait == NULL)
  * -EIOCBQUEUED - tx queued to iowait, -ECOMM bad sdma state
  */
-int sdma_send_txlist(struct sdma_engine *sde, struct iowait *wait,
-		     struct list_head *tx_list, u32 *count_out)
+int sdma_send_txlist(struct sdma_engine *sde, struct iowait_work *wait,
+		     struct list_head *tx_list, u16 *count_out)
 {
 	struct sdma_txreq *tx, *tx_next;
 	int ret = 0;
@@ -2482,7 +2424,7 @@ int sdma_send_txlist(struct sdma_engine *sde, struct iowait *wait,
 	spin_lock_irqsave(&sde->tail_lock, flags);
 retry:
 	list_for_each_entry_safe(tx, tx_next, tx_list, list) {
-		tx->wait = wait;
+		tx->wait = iowait_ioww_to_iow(wait);
 		if (unlikely(!__sdma_running(sde)))
 			goto unlock_noconn;
 		if (unlikely(tx->num_desc > sde->desc_avail))
@@ -2503,8 +2445,9 @@ retry:
 update_tail:
 	total_count = submit_count + flush_count;
 	if (wait) {
-		iowait_sdma_add(wait, total_count);
-		iowait_starve_clear(submit_count > 0, wait);
+		iowait_sdma_add(iowait_ioww_to_iow(wait), total_count);
+		iowait_starve_clear(submit_count > 0,
+				    iowait_ioww_to_iow(wait));
 	}
 	if (tail != INVALID_TAIL)
 		sdma_update_tail(sde, tail);
@@ -2514,7 +2457,7 @@ update_tail:
 unlock_noconn:
 	spin_lock(&sde->flushlist_lock);
 	list_for_each_entry_safe(tx, tx_next, tx_list, list) {
-		tx->wait = wait;
+		tx->wait = iowait_ioww_to_iow(wait);
 		list_del_init(&tx->list);
 		tx->next_descq_idx = 0;
 #ifdef CONFIG_HFI1_DEBUG_SDMA_ORDER
@@ -2523,10 +2466,7 @@ unlock_noconn:
 #endif
 		list_add_tail(&tx->list, &sde->flushlist);
 		flush_count++;
-		if (wait) {
-			wait->tx_count++;
-			wait->count += tx->num_desc;
-		}
+		iowait_inc_wait_count(wait, tx->num_desc);
 	}
 	spin_unlock(&sde->flushlist_lock);
 	queue_work_on(sde->cpu, system_highpri_wq, &sde->flush_worker);
@@ -2585,7 +2525,7 @@ static void __sdma_process_event(struct sdma_engine *sde,
 			 * 7220, e.g.
 			 */
 			ss->go_s99_running = 1;
-			/* fall through -- and start dma engine */
+			fallthrough;	/* and start dma engine */
 		case sdma_event_e10_go_hw_start:
 			/* This reference means the state machine is started */
 			sdma_get(&sde->state);
@@ -2727,7 +2667,6 @@ static void __sdma_process_event(struct sdma_engine *sde,
 		case sdma_event_e70_go_idle:
 			break;
 		case sdma_event_e85_link_down:
-			/* fall through */
 		case sdma_event_e80_hw_freeze:
 			sdma_set_state(sde, sdma_state_s80_hw_freeze);
 			atomic_dec(&sde->dd->sdma_unfreeze_count);
@@ -3008,7 +2947,7 @@ static void __sdma_process_event(struct sdma_engine *sde,
 		case sdma_event_e60_hw_halted:
 			need_progress = 1;
 			sdma_err_progress_check_schedule(sde);
-			/* fall through */
+			fallthrough;
 		case sdma_event_e90_sw_halted:
 			/*
 			* SW initiated halt does not perform engines
@@ -3022,7 +2961,7 @@ static void __sdma_process_event(struct sdma_engine *sde,
 			break;
 		case sdma_event_e85_link_down:
 			ss->go_s99_running = 0;
-			/* fall through */
+			fallthrough;
 		case sdma_event_e80_hw_freeze:
 			sdma_set_state(sde, sdma_state_s80_hw_freeze);
 			atomic_dec(&sde->dd->sdma_unfreeze_count);
@@ -3131,7 +3070,7 @@ int ext_coal_sdma_tx_descs(struct hfi1_devdata *dd, struct sdma_txreq *tx,
 		}
 
 		if (type == SDMA_MAP_PAGE) {
-			kvaddr = kmap(page);
+			kvaddr = kmap_local_page(page);
 			kvaddr += offset;
 		} else if (WARN_ON(!kvaddr)) {
 			__sdma_txclean(dd, tx);
@@ -3141,7 +3080,7 @@ int ext_coal_sdma_tx_descs(struct hfi1_devdata *dd, struct sdma_txreq *tx,
 		memcpy(tx->coalesce_buf + tx->coalesce_idx, kvaddr, len);
 		tx->coalesce_idx += len;
 		if (type == SDMA_MAP_PAGE)
-			kunmap(page);
+			kunmap_local(kvaddr);
 
 		/* If there is more data, return */
 		if (tx->tlen - tx->coalesce_idx)
@@ -3171,7 +3110,7 @@ int ext_coal_sdma_tx_descs(struct hfi1_devdata *dd, struct sdma_txreq *tx,
 		/* Add descriptor for coalesce buffer */
 		tx->desc_limit = MAX_DESC;
 		return _sdma_txadd_daddr(dd, SDMA_MAP_SINGLE, tx,
-					 addr, tx->tlen);
+					 addr, tx->tlen, NULL, NULL, NULL);
 	}
 
 	return 1;
@@ -3209,12 +3148,14 @@ int _pad_sdma_tx_descs(struct hfi1_devdata *dd, struct sdma_txreq *tx)
 			return rval;
 		}
 	}
+
 	/* finish the one just added */
 	make_tx_sdma_desc(
 		tx,
 		SDMA_MAP_NONE,
 		dd->sdma_pad_phys,
-		sizeof(u32) - (tx->packet_len & (sizeof(u32) - 1)));
+		sizeof(u32) - (tx->packet_len & (sizeof(u32) - 1)),
+		NULL, NULL, NULL);
 	tx->num_desc++;
 	_sdma_close_tx(dd, tx);
 	return rval;
@@ -3252,7 +3193,7 @@ void _sdma_txreq_ahgadd(
 		tx->num_desc++;
 		tx->descs[2].qw[0] = 0;
 		tx->descs[2].qw[1] = 0;
-		/* FALLTHROUGH */
+		fallthrough;
 	case SDMA_AHG_APPLY_UPDATE2:
 		tx->num_desc++;
 		tx->descs[1].qw[0] = 0;

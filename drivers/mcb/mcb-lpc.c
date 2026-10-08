@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * MEN Chameleon Bus.
  *
  * Copyright (C) 2014 MEN Mikroelektronik GmbH (www.men.de)
  * Author: Andreas Werner <andreas.werner@men.de>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; version 2 of the License.
  */
 
 #include <linux/platform_device.h>
@@ -100,13 +97,11 @@ out_mcb_bus:
 	return ret;
 }
 
-static int mcb_lpc_remove(struct platform_device *pdev)
+static void mcb_lpc_remove(struct platform_device *pdev)
 {
 	struct priv *priv = platform_get_drvdata(pdev);
 
 	mcb_release_bus(priv->bus);
-
-	return 0;
 }
 
 static struct platform_device *mcb_lpc_pdev;
@@ -135,17 +130,8 @@ out_put:
 	return ret;
 }
 
-static struct resource sc24_fpga_resource = {
-	.start = 0xe000e000,
-	.end = 0xe000e000 + CHAM_HEADER_SIZE,
-	.flags = IORESOURCE_MEM,
-};
-
-static struct resource sc31_fpga_resource = {
-	.start = 0xf000e000,
-	.end = 0xf000e000 + CHAM_HEADER_SIZE,
-	.flags = IORESOURCE_MEM,
-};
+static struct resource sc24_fpga_resource = DEFINE_RES_MEM(0xe000e000, CHAM_HEADER_SIZE);
+static struct resource sc31_fpga_resource = DEFINE_RES_MEM(0xf000e000, CHAM_HEADER_SIZE);
 
 static struct platform_driver mcb_lpc_driver = {
 	.driver		= {
@@ -198,3 +184,4 @@ module_exit(mcb_lpc_exit);
 MODULE_AUTHOR("Andreas Werner <andreas.werner@men.de>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("MCB over LPC support");
+MODULE_IMPORT_NS("MCB");

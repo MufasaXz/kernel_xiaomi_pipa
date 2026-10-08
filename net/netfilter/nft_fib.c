@@ -1,7 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Generic part shared by ipv4 and ipv6 backends.
  */
@@ -16,27 +14,29 @@
 #include <net/netfilter/nf_tables.h>
 #include <net/netfilter/nft_fib.h>
 
-const struct nla_policy nft_fib_policy[NFTA_FIB_MAX + 1] = {
-	[NFTA_FIB_DREG]		= { .type = NLA_U32 },
-	[NFTA_FIB_RESULT]	= { .type = NLA_U32 },
-	[NFTA_FIB_FLAGS]	= { .type = NLA_U32 },
-};
-EXPORT_SYMBOL(nft_fib_policy);
-
 #define NFTA_FIB_F_ALL (NFTA_FIB_F_SADDR | NFTA_FIB_F_DADDR | \
 			NFTA_FIB_F_MARK | NFTA_FIB_F_IIF | NFTA_FIB_F_OIF | \
 			NFTA_FIB_F_PRESENT)
 
-int nft_fib_validate(const struct nft_ctx *ctx, const struct nft_expr *expr,
-		     const struct nft_data **data)
+const struct nla_policy nft_fib_policy[NFTA_FIB_MAX + 1] = {
+	[NFTA_FIB_DREG]		= { .type = NLA_U32 },
+	[NFTA_FIB_RESULT]	= { .type = NLA_U32 },
+	[NFTA_FIB_FLAGS]	=
+		NLA_POLICY_MASK(NLA_BE32, NFTA_FIB_F_ALL),
+};
+EXPORT_SYMBOL(nft_fib_policy);
+
+int nft_fib_validate(const struct nft_ctx *ctx, const struct nft_expr *expr)
 {
 	const struct nft_fib *priv = nft_expr_priv(expr);
 	unsigned int hooks;
 
 	switch (priv->result) {
-	case NFT_FIB_RESULT_OIF: /* fallthrough */
+	case NFT_FIB_RESULT_OIF:
 	case NFT_FIB_RESULT_OIFNAME:
-		hooks = (1 << NF_INET_PRE_ROUTING);
+		hooks = (1 << NF_INET_PRE_ROUTING) |
+			(1 << NF_INET_LOCAL_IN) |
+			(1 << NF_INET_FORWARD);
 		break;
 	case NFT_FIB_RESULT_ADDRTYPE:
 		if (priv->flags & NFTA_FIB_F_IIF)
@@ -75,7 +75,7 @@ int nft_fib_init(const struct nft_ctx *ctx, const struct nft_expr *expr,
 
 	priv->flags = ntohl(nla_get_be32(tb[NFTA_FIB_FLAGS]));
 
-	if (priv->flags == 0 || (priv->flags & ~NFTA_FIB_F_ALL))
+	if (priv->flags == 0)
 		return -EINVAL;
 
 	if ((priv->flags & (NFTA_FIB_F_SADDR | NFTA_FIB_F_DADDR)) ==
@@ -116,7 +116,7 @@ int nft_fib_init(const struct nft_ctx *ctx, const struct nft_expr *expr,
 }
 EXPORT_SYMBOL_GPL(nft_fib_init);
 
-int nft_fib_dump(struct sk_buff *skb, const struct nft_expr *expr)
+int nft_fib_dump(struct sk_buff *skb, const struct nft_expr *expr, bool reset)
 {
 	const struct nft_fib *priv = nft_expr_priv(expr);
 
@@ -134,21 +134,25 @@ int nft_fib_dump(struct sk_buff *skb, const struct nft_expr *expr)
 EXPORT_SYMBOL_GPL(nft_fib_dump);
 
 void nft_fib_store_result(void *reg, const struct nft_fib *priv,
-			  const struct nft_pktinfo *pkt, int index)
+			  const struct net_device *dev)
 {
-	struct net_device *dev;
 	u32 *dreg = reg;
+	int index;
 
 	switch (priv->result) {
 	case NFT_FIB_RESULT_OIF:
-		*dreg = (priv->flags & NFTA_FIB_F_PRESENT) ? !!index : index;
+		index = dev ? dev->ifindex : 0;
+		if (priv->flags & NFTA_FIB_F_PRESENT)
+			nft_reg_store8(dreg, !!index);
+		else
+			*dreg = index;
+
 		break;
 	case NFT_FIB_RESULT_OIFNAME:
-		dev = dev_get_by_index_rcu(nft_net(pkt), index);
 		if (priv->flags & NFTA_FIB_F_PRESENT)
-			*dreg = !!dev;
+			nft_reg_store8(dreg, !!dev);
 		else
-			strncpy(reg, dev ? dev->name : "", IFNAMSIZ);
+			strscpy_pad(reg, dev ? dev->name : "", IFNAMSIZ);
 		break;
 	default:
 		WARN_ON_ONCE(1);
@@ -158,5 +162,48 @@ void nft_fib_store_result(void *reg, const struct nft_fib *priv,
 }
 EXPORT_SYMBOL_GPL(nft_fib_store_result);
 
+bool nft_fib_reduce(struct nft_regs_track *track,
+		    const struct nft_expr *expr)
+{
+	const struct nft_fib *priv = nft_expr_priv(expr);
+	unsigned int len = NFT_REG32_SIZE;
+	const struct nft_fib *fib;
+
+	switch (priv->result) {
+	case NFT_FIB_RESULT_OIF:
+		break;
+	case NFT_FIB_RESULT_OIFNAME:
+		if (priv->flags & NFTA_FIB_F_PRESENT)
+			len = NFT_REG32_SIZE;
+		else
+			len = IFNAMSIZ;
+		break;
+	case NFT_FIB_RESULT_ADDRTYPE:
+	     break;
+	default:
+		WARN_ON_ONCE(1);
+		break;
+	}
+
+	if (!nft_reg_track_cmp(track, expr, priv->dreg)) {
+		nft_reg_track_update(track, expr, priv->dreg, len);
+		return false;
+	}
+
+	fib = nft_expr_priv(track->regs[priv->dreg].selector);
+	if (priv->result != fib->result ||
+	    priv->flags != fib->flags) {
+		nft_reg_track_update(track, expr, priv->dreg, len);
+		return false;
+	}
+
+	if (!track->regs[priv->dreg].bitwise)
+		return true;
+
+	return false;
+}
+EXPORT_SYMBOL_GPL(nft_fib_reduce);
+
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Query routing table from nftables");
 MODULE_AUTHOR("Florian Westphal <fw@strlen.de>");

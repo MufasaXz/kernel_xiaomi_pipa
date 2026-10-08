@@ -641,8 +641,8 @@ alloc_scq(struct idt77252_dev *card, int class)
 	scq = kzalloc(sizeof(struct scq_info), GFP_KERNEL);
 	if (!scq)
 		return NULL;
-	scq->base = dma_zalloc_coherent(&card->pcidev->dev, SCQ_SIZE,
-					&scq->paddr, GFP_KERNEL);
+	scq->base = dma_alloc_coherent(&card->pcidev->dev, SCQ_SIZE,
+				       &scq->paddr, GFP_KERNEL);
 	if (scq->base == NULL) {
 		kfree(scq);
 		return NULL;
@@ -835,6 +835,7 @@ queue_skb(struct idt77252_dev *card, struct vc_map *vc,
 	unsigned long flags;
 	int error;
 	int aal;
+	u32 word4;
 
 	if (skb->len == 0) {
 		printk("%s: invalid skb->len (%d)\n", card->name, skb->len);
@@ -846,6 +847,8 @@ queue_skb(struct idt77252_dev *card, struct vc_map *vc,
 
 	tbd = &IDT77252_PRV_TBD(skb);
 	vcc = ATM_SKB(skb)->vcc;
+	word4 = (skb->data[0] << 24) | (skb->data[1] << 16) |
+			(skb->data[2] <<  8) | (skb->data[3] <<  0);
 
 	IDT77252_PRV_PADDR(skb) = dma_map_single(&card->pcidev->dev, skb->data,
 						 skb->len, DMA_TO_DEVICE);
@@ -861,8 +864,7 @@ queue_skb(struct idt77252_dev *card, struct vc_map *vc,
 		tbd->word_1 = SAR_TBD_OAM | ATM_CELL_PAYLOAD | SAR_TBD_EPDU;
 		tbd->word_2 = IDT77252_PRV_PADDR(skb) + 4;
 		tbd->word_3 = 0x00000000;
-		tbd->word_4 = (skb->data[0] << 24) | (skb->data[1] << 16) |
-			      (skb->data[2] <<  8) | (skb->data[3] <<  0);
+		tbd->word_4 = word4;
 
 		if (test_bit(VCF_RSV, &vc->flags))
 			vc = card->vcs[0];
@@ -892,8 +894,7 @@ queue_skb(struct idt77252_dev *card, struct vc_map *vc,
 
 		tbd->word_2 = IDT77252_PRV_PADDR(skb) + 4;
 		tbd->word_3 = 0x00000000;
-		tbd->word_4 = (skb->data[0] << 24) | (skb->data[1] << 16) |
-			      (skb->data[2] <<  8) | (skb->data[3] <<  0);
+		tbd->word_4 = word4;
 		break;
 
 	case ATM_AAL5:
@@ -973,8 +974,8 @@ init_rsq(struct idt77252_dev *card)
 {
 	struct rsq_entry *rsqe;
 
-	card->rsq.base = dma_zalloc_coherent(&card->pcidev->dev, RSQSIZE,
-					     &card->rsq.paddr, GFP_KERNEL);
+	card->rsq.base = dma_alloc_coherent(&card->pcidev->dev, RSQSIZE,
+					    &card->rsq.paddr, GFP_KERNEL);
 	if (card->rsq.base == NULL) {
 		printk("%s: can't allocate RSQ.\n", card->name);
 		return -1;
@@ -1382,7 +1383,6 @@ init_tsq(struct idt77252_dev *card)
 		printk("%s: can't allocate TSQ.\n", card->name);
 		return -1;
 	}
-	memset(card->tsq.base, 0, TSQSIZE);
 
 	card->tsq.last = card->tsq.base + TSQ_NUM_ENTRIES - 1;
 	card->tsq.next = card->tsq.last;
@@ -1533,7 +1533,7 @@ idt77252_tx(struct idt77252_dev *card)
 static void
 tst_timer(struct timer_list *t)
 {
-	struct idt77252_dev *card = from_timer(card, t, tst_timer);
+	struct idt77252_dev *card = timer_container_of(card, t, tst_timer);
 	unsigned long base, idle, jump;
 	unsigned long flags;
 	u32 pc;
@@ -1785,12 +1785,6 @@ set_tct(struct idt77252_dev *card, struct vc_map *vc)
 /* FBQ Handling                                                              */
 /*                                                                           */
 /*****************************************************************************/
-
-static __inline__ int
-idt77252_fbq_level(struct idt77252_dev *card, int queue)
-{
-	return (readl(SAR_REG_STAT) >> (16 + (queue << 2))) & 0x0f;
-}
 
 static __inline__ int
 idt77252_fbq_full(struct idt77252_dev *card, int queue)
@@ -2081,7 +2075,7 @@ idt77252_rate_logindex(struct idt77252_dev *card, int pcr)
 static void
 idt77252_est_timer(struct timer_list *t)
 {
-	struct rate_estimator *est = from_timer(est, t, timer);
+	struct rate_estimator *est = timer_container_of(est, t, timer);
 	struct vc_map *vc = est->vc;
 	struct idt77252_dev *card = vc->card;
 	unsigned long flags;
@@ -2225,7 +2219,7 @@ idt77252_init_ubr(struct idt77252_dev *card, struct vc_map *vc,
 	}
 	spin_unlock_irqrestore(&vc->lock, flags);
 	if (est) {
-		del_timer_sync(&est->timer);
+		timer_shutdown_sync(&est->timer);
 		kfree(est);
 	}
 
@@ -2542,7 +2536,7 @@ done:
 		vc->tx_vcc = NULL;
 
 		if (vc->estimator) {
-			del_timer(&vc->estimator->timer);
+			timer_shutdown(&vc->estimator->timer);
 			kfree(vc->estimator);
 			vc->estimator = NULL;
 		}
@@ -3409,10 +3403,10 @@ static int init_card(struct atm_dev *dev)
 	writel(0, SAR_REG_GP);
 
 	/* Initialize RAW Cell Handle Register  */
-	card->raw_cell_hnd = dma_zalloc_coherent(&card->pcidev->dev,
-						 2 * sizeof(u32),
-						 &card->raw_cell_paddr,
-						 GFP_KERNEL);
+	card->raw_cell_hnd = dma_alloc_coherent(&card->pcidev->dev,
+						2 * sizeof(u32),
+						&card->raw_cell_paddr,
+						GFP_KERNEL);
 	if (!card->raw_cell_hnd) {
 		printk("%s: memory allocation failure.\n", card->name);
 		deinit_card(card);
@@ -3561,7 +3555,7 @@ static int idt77252_preset(struct idt77252_dev *card)
 		return -1;
 	}
 	if (!(pci_command & PCI_COMMAND_IO)) {
-		printk("%s: PCI_COMMAND: %04x (???)\n",
+		printk("%s: PCI_COMMAND: %04x (?)\n",
 		       card->name, pci_command);
 		deinit_card(card);
 		return (-1);
@@ -3762,16 +3756,7 @@ static int __init idt77252_init(void)
 	struct sk_buff *skb;
 
 	printk("%s: at %p\n", __func__, idt77252_init);
-
-	if (sizeof(skb->cb) < sizeof(struct atm_skb_data) +
-			      sizeof(struct idt77252_skb_prv)) {
-		printk(KERN_ERR "%s: skb->cb is too small (%lu < %lu)\n",
-		       __func__, (unsigned long) sizeof(skb->cb),
-		       (unsigned long) sizeof(struct atm_skb_data) +
-				       sizeof(struct idt77252_skb_prv));
-		return -EIO;
-	}
-
+	BUILD_BUG_ON(sizeof(skb->cb) < sizeof(struct idt77252_skb_prv) + sizeof(struct atm_skb_data));
 	return pci_register_driver(&idt77252_driver);
 }
 
@@ -3786,7 +3771,7 @@ static void __exit idt77252_exit(void)
 		card = idt77252_chain;
 		dev = card->atmdev;
 		idt77252_chain = card->next;
-		del_timer_sync(&card->tst_timer);
+		timer_shutdown_sync(&card->tst_timer);
 
 		if (dev->phy->stop)
 			dev->phy->stop(dev);

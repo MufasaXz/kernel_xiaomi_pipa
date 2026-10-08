@@ -8,9 +8,9 @@
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/regmap.h>
-#include <media/dvb_math.h>
+#include <linux/int_log.h>
 
 #include "mn88443x.h"
 
@@ -673,9 +673,9 @@ static const struct regmap_config regmap_config = {
 	.cache_type = REGCACHE_NONE,
 };
 
-static int mn88443x_probe(struct i2c_client *client,
-			  const struct i2c_device_id *id)
+static int mn88443x_probe(struct i2c_client *client)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct mn88443x_config *conf = client->dev.platform_data;
 	struct mn88443x_priv *chip;
 	struct device *dev = &client->dev;
@@ -731,9 +731,9 @@ static int mn88443x_probe(struct i2c_client *client,
 	 * Chip has two I2C addresses for each satellite/terrestrial system.
 	 * ISDB-T uses address ISDB-S + 4, so we register a dummy client.
 	 */
-	chip->client_t = i2c_new_dummy(client->adapter, client->addr + 4);
-	if (!chip->client_t)
-		return -ENODEV;
+	chip->client_t = i2c_new_dummy_device(client->adapter, client->addr + 4);
+	if (IS_ERR(chip->client_t))
+		return PTR_ERR(chip->client_t);
 
 	chip->regmap_t = devm_regmap_init_i2c(chip->client_t, &regmap_config);
 	if (IS_ERR(chip->regmap_t)) {
@@ -762,15 +762,13 @@ err_i2c_t:
 	return ret;
 }
 
-static int mn88443x_remove(struct i2c_client *client)
+static void mn88443x_remove(struct i2c_client *client)
 {
 	struct mn88443x_priv *chip = i2c_get_clientdata(client);
 
 	mn88443x_cmn_power_off(chip);
 
 	i2c_unregister_device(chip->client_t);
-
-	return 0;
 }
 
 static const struct mn88443x_spec mn88443x_spec_pri = {

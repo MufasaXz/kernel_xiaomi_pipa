@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * meson-mx-sdio.c - Meson6, Meson8 and Meson8b SDIO/MMC Host Controller
  *
  * Copyright (C) 2015 Endless Mobile, Inc.
  * Author: Carlo Caione <carlo@endlessm.com>
  * Copyright (C) 2017 Martin Blumenstingl <martin.blumenstingl@googlemail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or (at
- * your option) any later version.
  */
 
 #include <linux/bitfield.h>
@@ -19,6 +15,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
+#include <linux/io.h>
 #include <linux/ioport.h>
 #include <linux/platform_device.h>
 #include <linux/of_platform.h>
@@ -297,7 +294,7 @@ static void meson_mx_mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 	switch (ios->power_mode) {
 	case MMC_POWER_OFF:
 		vdd = 0;
-		/* fall-through: */
+		fallthrough;
 	case MMC_POWER_UP:
 		if (!IS_ERR(mmc->supply.vmmc)) {
 			host->error = mmc_regulator_set_ocr(mmc,
@@ -421,10 +418,9 @@ static irqreturn_t meson_mx_mmc_irq(int irq, void *data)
 {
 	struct meson_mx_mmc_host *host = (void *) data;
 	u32 irqs, send;
-	unsigned long irqflags;
 	irqreturn_t ret;
 
-	spin_lock_irqsave(&host->irq_lock, irqflags);
+	spin_lock(&host->irq_lock);
 
 	irqs = readl(host->base + MESON_MX_SDIO_IRQS);
 	send = readl(host->base + MESON_MX_SDIO_SEND);
@@ -437,7 +433,7 @@ static irqreturn_t meson_mx_mmc_irq(int irq, void *data)
 	/* finally ACK all pending interrupts */
 	writel(irqs, host->base + MESON_MX_SDIO_IRQS);
 
-	spin_unlock_irqrestore(&host->irq_lock, irqflags);
+	spin_unlock(&host->irq_lock);
 
 	return ret;
 }
@@ -450,7 +446,7 @@ static irqreturn_t meson_mx_mmc_irq_thread(int irq, void *irq_data)
 	if (WARN_ON(!cmd))
 		return IRQ_HANDLED;
 
-	del_timer_sync(&host->cmd_timeout);
+	timer_delete_sync(&host->cmd_timeout);
 
 	if (cmd->data) {
 		dma_unmap_sg(mmc_dev(host->mmc), cmd->data->sg,
@@ -471,7 +467,8 @@ static irqreturn_t meson_mx_mmc_irq_thread(int irq, void *irq_data)
 
 static void meson_mx_mmc_timeout(struct timer_list *t)
 {
-	struct meson_mx_mmc_host *host = from_timer(host, t, cmd_timeout);
+	struct meson_mx_mmc_host *host = timer_container_of(host, t,
+							    cmd_timeout);
 	unsigned long irqflags;
 	u32 irqc;
 
@@ -567,7 +564,7 @@ static int meson_mx_mmc_add_host(struct meson_mx_mmc_host *host)
 	mmc->f_max = clk_round_rate(host->cfg_div_clk,
 				    clk_get_rate(host->parent_clk));
 
-	mmc->caps |= MMC_CAP_ERASE | MMC_CAP_CMD23 | MMC_CAP_WAIT_WHILE_BUSY;
+	mmc->caps |= MMC_CAP_CMD23 | MMC_CAP_WAIT_WHILE_BUSY;
 	mmc->ops = &meson_mx_mmc_ops;
 
 	ret = mmc_of_parse(mmc);
@@ -635,7 +632,6 @@ static int meson_mx_mmc_probe(struct platform_device *pdev)
 	struct platform_device *slot_pdev;
 	struct mmc_host *mmc;
 	struct meson_mx_mmc_host *host;
-	struct resource *res;
 	int ret, irq;
 	u32 conf;
 
@@ -660,8 +656,7 @@ static int meson_mx_mmc_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, host);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	host->base = devm_ioremap_resource(host->controller_dev, res);
+	host->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(host->base)) {
 		ret = PTR_ERR(host->base);
 		goto error_free_mmc;
@@ -734,12 +729,12 @@ error_unregister_slot_pdev:
 	return ret;
 }
 
-static int meson_mx_mmc_remove(struct platform_device *pdev)
+static void meson_mx_mmc_remove(struct platform_device *pdev)
 {
 	struct meson_mx_mmc_host *host = platform_get_drvdata(pdev);
 	struct device *slot_dev = mmc_dev(host->mmc);
 
-	del_timer_sync(&host->cmd_timeout);
+	timer_delete_sync(&host->cmd_timeout);
 
 	mmc_remove_host(host->mmc);
 
@@ -749,8 +744,6 @@ static int meson_mx_mmc_remove(struct platform_device *pdev)
 	clk_disable_unprepare(host->core_clk);
 
 	mmc_free_host(host->mmc);
-
-	return 0;
 }
 
 static const struct of_device_id meson_mx_mmc_of_match[] = {
@@ -762,9 +755,10 @@ MODULE_DEVICE_TABLE(of, meson_mx_mmc_of_match);
 
 static struct platform_driver meson_mx_mmc_driver = {
 	.probe   = meson_mx_mmc_probe,
-	.remove  = meson_mx_mmc_remove,
+	.remove = meson_mx_mmc_remove,
 	.driver  = {
 		.name = "meson-mx-sdio",
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = of_match_ptr(meson_mx_mmc_of_match),
 	},
 };

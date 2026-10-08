@@ -1,14 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* X.509 certificate parser internal definitions
  *
  * Copyright (C) 2012 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public Licence
- * as published by the Free Software Foundation; either version
- * 2 of the Licence, or (at your option) any later version.
  */
 
+#include <linux/cleanup.h>
 #include <linux/time.h>
 #include <crypto/public_key.h>
 #include <keys/asymmetric-type.h>
@@ -26,7 +23,7 @@ struct x509_certificate {
 	time64_t	valid_to;
 	const void	*tbs;			/* Signed data */
 	unsigned	tbs_size;		/* Size of signed data */
-	unsigned	raw_sig_size;		/* Size of sigature */
+	unsigned	raw_sig_size;		/* Size of signature */
 	const void	*raw_sig;		/* Signature data */
 	const void	*raw_serial;		/* Raw serial number in ASN.1 */
 	unsigned	raw_serial_size;
@@ -40,7 +37,6 @@ struct x509_certificate {
 	bool		seen;			/* Infinite recursion prevention */
 	bool		verified;
 	bool		self_signed;		/* T if self-signed (check unsupported_sig too) */
-	bool		unsupported_key;	/* T if key uses unsupported crypto */
 	bool		unsupported_sig;	/* T if signature uses unsupported crypto */
 	bool		blacklisted;
 };
@@ -49,6 +45,8 @@ struct x509_certificate {
  * x509_cert_parser.c
  */
 extern void x509_free_certificate(struct x509_certificate *cert);
+DEFINE_FREE(x509_free_certificate, struct x509_certificate *,
+	    if (!IS_ERR(_T)) x509_free_certificate(_T))
 extern struct x509_certificate *x509_cert_parse(const void *data, size_t datalen);
 extern int x509_decode_time(time64_t *_t,  size_t hdrlen,
 			    unsigned char tag,

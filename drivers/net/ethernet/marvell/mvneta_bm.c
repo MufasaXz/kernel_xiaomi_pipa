@@ -190,7 +190,7 @@ struct mvneta_bm_pool *mvneta_bm_pool_use(struct mvneta_bm *priv, u8 pool_id,
 			SKB_DATA_ALIGN(sizeof(struct skb_shared_info));
 		hwbm_pool->construct = mvneta_bm_construct;
 		hwbm_pool->priv = new_pool;
-		spin_lock_init(&hwbm_pool->lock);
+		mutex_init(&hwbm_pool->buf_lock);
 
 		/* Create new pool */
 		err = mvneta_bm_pool_create(priv, new_pool);
@@ -201,7 +201,7 @@ struct mvneta_bm_pool *mvneta_bm_pool_use(struct mvneta_bm *priv, u8 pool_id,
 		}
 
 		/* Allocate buffers for this pool */
-		num = hwbm_pool_add(hwbm_pool, hwbm_pool->size, GFP_ATOMIC);
+		num = hwbm_pool_add(hwbm_pool, hwbm_pool->size);
 		if (num != hwbm_pool->size) {
 			WARN(1, "pool %d: %d of %d allocated\n",
 			     new_pool->id, num, hwbm_pool->size);
@@ -411,15 +411,13 @@ static int mvneta_bm_probe(struct platform_device *pdev)
 {
 	struct device_node *dn = pdev->dev.of_node;
 	struct mvneta_bm *priv;
-	struct resource *res;
 	int err;
 
 	priv = devm_kzalloc(&pdev->dev, sizeof(struct mvneta_bm), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	priv->reg_base = devm_ioremap_resource(&pdev->dev, res);
+	priv->reg_base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(priv->reg_base))
 		return PTR_ERR(priv->reg_base);
 
@@ -459,7 +457,7 @@ err_clk:
 	return err;
 }
 
-static int mvneta_bm_remove(struct platform_device *pdev)
+static void mvneta_bm_remove(struct platform_device *pdev)
 {
 	struct mvneta_bm *priv = platform_get_drvdata(pdev);
 	u8 all_ports_map = 0xff;
@@ -477,8 +475,6 @@ static int mvneta_bm_remove(struct platform_device *pdev)
 	mvneta_bm_write(priv, MVNETA_BM_COMMAND_REG, MVNETA_BM_STOP_MASK);
 
 	clk_disable_unprepare(priv->clk);
-
-	return 0;
 }
 
 static const struct of_device_id mvneta_bm_match[] = {

@@ -85,6 +85,8 @@
 #define SCLK_EMMC_DIV50		83
 #define SCLK_DDRCLK		84
 #define SCLK_UART1_SRC		85
+#define SCLK_SDMMC_DIV		86
+#define SCLK_SDMMC_DIV50	87
 
 /* dclk gates */
 #define DCLK_VOPB		150
@@ -173,8 +175,6 @@
 #define PCLK_CIF		352
 #define PCLK_OTP_PHY		353
 
-#define CLK_NR_CLKS		(PCLK_OTP_PHY + 1)
-
 /* pmu-clocks indices */
 
 #define PLL_GPLL		1
@@ -192,8 +192,6 @@
 
 #define PCLK_GPIO0_PMU		20
 #define PCLK_UART0_PMU		21
-
-#define CLKPMU_NR_CLKS		(PCLK_UART0_PMU + 1)
 
 /* soft-reset indices */
 #define SRST_CORE0_PO		0

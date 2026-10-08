@@ -1,23 +1,10 @@
-/* -*- mode: c; c-basic-offset: 8 -*- */
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 /* SNI RM driver
  *
  * Copyright (C) 2001 by James.Bottomley@HansenPartnership.com
 **-----------------------------------------------------------------------------
 **
-**  This program is free software; you can redistribute it and/or modify
-**  it under the terms of the GNU General Public License as published by
-**  the Free Software Foundation; either version 2 of the License, or
-**  (at your option) any later version.
-**
-**  This program is distributed in the hope that it will be useful,
-**  but WITHOUT ANY WARRANTY; without even the implied warranty of
-**  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-**  GNU General Public License for more details.
-**
-**  You should have received a copy of the GNU General Public License
-**  along with this program; if not, write to the Free Software
-**  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 **
 **-----------------------------------------------------------------------------
  */
@@ -40,7 +27,6 @@
 #include <linux/platform_device.h>
 
 #include <asm/page.h>
-#include <linux/pgtable.h>
 #include <asm/irq.h>
 #include <asm/delay.h>
 
@@ -84,7 +70,7 @@ static int snirm710_probe(struct platform_device *dev)
 
 	hostdata->dev = &dev->dev;
 	dma_set_mask(&dev->dev, DMA_BIT_MASK(32));
-	hostdata->base = ioremap_nocache(base, 0x100);
+	hostdata->base = ioremap(base, 0x100);
 	hostdata->differential = 0;
 
 	hostdata->clock = SNIRM710_CLOCK;
@@ -118,7 +104,7 @@ static int snirm710_probe(struct platform_device *dev)
 	return -ENODEV;
 }
 
-static int snirm710_driver_remove(struct platform_device *dev)
+static void snirm710_driver_remove(struct platform_device *dev)
 {
 	struct Scsi_Host *host = dev_get_drvdata(&dev->dev);
 	struct NCR_700_Host_Parameters *hostdata =
@@ -129,8 +115,6 @@ static int snirm710_driver_remove(struct platform_device *dev)
 	free_irq(host->irq, host);
 	iounmap(hostdata->base);
 	kfree(hostdata);
-
-	return 0;
 }
 
 static struct platform_driver snirm710_driver = {
@@ -140,16 +124,4 @@ static struct platform_driver snirm710_driver = {
 		.name	= "snirm_53c710",
 	},
 };
-
-static int __init snirm710_init(void)
-{
-	return platform_driver_register(&snirm710_driver);
-}
-
-static void __exit snirm710_exit(void)
-{
-	platform_driver_unregister(&snirm710_driver);
-}
-
-module_init(snirm710_init);
-module_exit(snirm710_exit);
+module_platform_driver(snirm710_driver);

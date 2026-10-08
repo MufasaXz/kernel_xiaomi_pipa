@@ -1,22 +1,13 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Copyright (c) 2016 Icenowy Zheng <icenowy@aosc.xyz>
  *
  * Based on ccu-sun8i-h3.h, which is:
  * Copyright (c) 2016 Maxime Ripard <maxime.ripard@free-electrons.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
-#ifndef _CCU_SUN8I_H3_H_
-#define _CCU_SUN8I_H3_H_
+#ifndef _CCU_SUN8I_V3S_H_
+#define _CCU_SUN8I_V3S_H_
 
 #include <dt-bindings/clock/sun8i-v3s-ccu.h>
 #include <dt-bindings/reset/sun8i-v3s-ccu.h>
@@ -60,6 +51,4 @@
 
 #define CLK_PLL_DDR1		74
 
-#define CLK_NUMBER		(CLK_PLL_DDR1 + 1)
-
-#endif /* _CCU_SUN8I_H3_H_ */
+#endif /* _CCU_SUN8I_V3S_H_ */

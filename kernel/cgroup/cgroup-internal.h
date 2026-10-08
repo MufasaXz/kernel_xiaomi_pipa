@@ -7,10 +7,12 @@
 #include <linux/workqueue.h>
 #include <linux/list.h>
 #include <linux/refcount.h>
+#include <linux/fs_parser.h>
 
 #define TRACE_CGROUP_PATH_LEN 1024
 extern spinlock_t trace_cgroup_path_lock;
 extern char trace_cgroup_path[TRACE_CGROUP_PATH_LEN];
+extern void __init enable_debug_cgroup(void);
 
 /*
  * cgroup_path() takes a spin lock. It is good practice not to take
@@ -25,14 +27,42 @@ extern char trace_cgroup_path[TRACE_CGROUP_PATH_LEN];
 #define TRACE_CGROUP_PATH(type, cgrp, ...)				\
 	do {								\
 		if (trace_cgroup_##type##_enabled()) {			\
-			spin_lock(&trace_cgroup_path_lock);		\
+			unsigned long flags;				\
+			spin_lock_irqsave(&trace_cgroup_path_lock,	\
+					  flags);			\
 			cgroup_path(cgrp, trace_cgroup_path,		\
 				    TRACE_CGROUP_PATH_LEN);		\
 			trace_cgroup_##type(cgrp, trace_cgroup_path,	\
 					    ##__VA_ARGS__);		\
-			spin_unlock(&trace_cgroup_path_lock);		\
+			spin_unlock_irqrestore(&trace_cgroup_path_lock, \
+					       flags);			\
 		}							\
 	} while (0)
+
+/*
+ * The cgroup filesystem superblock creation/mount context.
+ */
+struct cgroup_fs_context {
+	struct kernfs_fs_context kfc;
+	struct cgroup_root	*root;
+	struct cgroup_namespace	*ns;
+	unsigned int	flags;			/* CGRP_ROOT_* flags */
+
+	/* cgroup1 bits */
+	bool		cpuset_clone_children;
+	bool		none;			/* User explicitly requested empty subsystem */
+	bool		all_ss;			/* Seen 'all' option */
+	u16		subsys_mask;		/* Selected subsystems */
+	char		*name;			/* Hierarchy name */
+	char		*release_agent;		/* Path for release notifications */
+};
+
+static inline struct cgroup_fs_context *cgroup_fc2context(struct fs_context *fc)
+{
+	struct kernfs_fs_context *kfc = fc->fs_private;
+
+	return container_of(kfc, struct cgroup_fs_context, kfc);
+}
 
 struct cgroup_pidlist;
 
@@ -51,6 +81,8 @@ struct cgroup_file_ctx {
 	struct {
 		struct cgroup_pidlist	*pidlist;
 	} procs1;
+
+	struct cgroup_of_peak peak;
 };
 
 /*
@@ -134,24 +166,14 @@ struct cgroup_mgctx {
 #define DEFINE_CGROUP_MGCTX(name)						\
 	struct cgroup_mgctx name = CGROUP_MGCTX_INIT(name)
 
-struct cgroup_sb_opts {
-	u16 subsys_mask;
-	unsigned int flags;
-	char *release_agent;
-	bool cpuset_clone_children;
-	char *name;
-	/* User explicitly requested empty subsystem */
-	bool none;
-};
-
-extern struct mutex cgroup_mutex;
-extern spinlock_t css_set_lock;
 extern struct cgroup_subsys *cgroup_subsys[];
 extern struct list_head cgroup_roots;
+extern bool cgrp_dfl_visible;
 
 /* iterate across the hierarchies */
 #define for_each_root(root)						\
-	list_for_each_entry((root), &cgroup_roots, root_list)
+	list_for_each_entry_rcu((root), &cgroup_roots, root_list,	\
+				lockdep_is_held(&cgroup_mutex))
 
 /**
  * for_each_subsys - iterate all enabled cgroup subsystems
@@ -201,8 +223,6 @@ static inline void get_css_set(struct css_set *cset)
 
 bool cgroup_ssid_enabled(int ssid);
 bool cgroup_on_dfl(const struct cgroup *cgrp);
-bool cgroup_is_thread_root(struct cgroup *cgrp);
-bool cgroup_is_threaded(struct cgroup *cgrp);
 
 struct cgroup_root *cgroup_root_from_kf(struct kernfs_root *kf_root);
 struct cgroup *task_cgroup_from_root(struct task_struct *task,
@@ -212,13 +232,12 @@ void cgroup_kn_unlock(struct kernfs_node *kn);
 int cgroup_path_ns_locked(struct cgroup *cgrp, char *buf, size_t buflen,
 			  struct cgroup_namespace *ns);
 
+void cgroup_favor_dynmods(struct cgroup_root *root, bool favor);
 void cgroup_free_root(struct cgroup_root *root);
-void init_cgroup_root(struct cgroup_root *root, struct cgroup_sb_opts *opts);
+void init_cgroup_root(struct cgroup_fs_context *ctx);
 int cgroup_setup_root(struct cgroup_root *root, u16 ss_mask);
 int rebind_subsystems(struct cgroup_root *dst_root, u16 ss_mask);
-struct dentry *cgroup_do_mount(struct file_system_type *fs_type, int flags,
-			       struct cgroup_root *root, unsigned long magic,
-			       struct cgroup_namespace *ns);
+int cgroup_do_get_tree(struct fs_context *fc);
 
 int cgroup_migrate_vet_dst(struct cgroup *dst_cgrp);
 void cgroup_migrate_finish(struct cgroup_mgctx *mgctx);
@@ -230,9 +249,15 @@ int cgroup_migrate(struct task_struct *leader, bool threadgroup,
 
 int cgroup_attach_task(struct cgroup *dst_cgrp, struct task_struct *leader,
 		       bool threadgroup);
-struct task_struct *cgroup_procs_write_start(char *buf, bool threadgroup)
+void cgroup_attach_lock(enum cgroup_attach_lock_mode lock_mode,
+			struct task_struct *tsk);
+void cgroup_attach_unlock(enum cgroup_attach_lock_mode lock_mode,
+			  struct task_struct *tsk);
+struct task_struct *cgroup_procs_write_start(char *buf, bool threadgroup,
+					     enum cgroup_attach_lock_mode *lock_mode)
 	__acquires(&cgroup_threadgroup_rwsem);
-void cgroup_procs_write_finish(struct task_struct *task)
+void cgroup_procs_write_finish(struct task_struct *task,
+			       enum cgroup_attach_lock_mode lock_mode)
 	__releases(&cgroup_threadgroup_rwsem);
 
 void cgroup_lock_and_drain_offline(struct cgroup *cgrp);
@@ -248,9 +273,9 @@ int cgroup_task_count(const struct cgroup *cgrp);
 /*
  * rstat.c
  */
-int cgroup_rstat_init(struct cgroup *cgrp);
-void cgroup_rstat_exit(struct cgroup *cgrp);
-void cgroup_rstat_boot(void);
+int css_rstat_init(struct cgroup_subsys_state *css);
+void css_rstat_exit(struct cgroup_subsys_state *css);
+int ss_rstat_init(struct cgroup_subsys *ss);
 void cgroup_base_stat_cputime_show(struct seq_file *seq);
 
 /*
@@ -263,14 +288,15 @@ extern const struct proc_ns_operations cgroupns_operations;
  */
 extern struct cftype cgroup1_base_files[];
 extern struct kernfs_syscall_ops cgroup1_kf_syscall_ops;
+extern const struct fs_parameter_spec cgroup1_fs_parameters[];
 
 int proc_cgroupstats_show(struct seq_file *m, void *v);
 bool cgroup1_ssid_disabled(int ssid);
 void cgroup1_pidlist_destroy_all(struct cgroup *cgrp);
 void cgroup1_release_agent(struct work_struct *work);
 void cgroup1_check_for_release(struct cgroup *cgrp);
-struct dentry *cgroup1_mount(struct file_system_type *fs_type, int flags,
-			     void *data, unsigned long magic,
-			     struct cgroup_namespace *ns);
+int cgroup1_parse_param(struct fs_context *fc, struct fs_parameter *param);
+int cgroup1_get_tree(struct fs_context *fc);
+int cgroup1_reconfigure(struct fs_context *ctx);
 
 #endif /* __CGROUP_INTERNAL_H */

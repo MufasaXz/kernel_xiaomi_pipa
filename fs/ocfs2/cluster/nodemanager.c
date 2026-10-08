@@ -1,22 +1,6 @@
-/* -*- mode: c; c-basic-offset: 8; -*-
- * vim: noexpandtab sw=8 ts=8 sts=0:
- *
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
  * Copyright (C) 2004, 2005 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
  */
 
 #include <linux/slab.h>
@@ -70,7 +54,7 @@ int o2nm_configured_node_map(unsigned long *map, unsigned bytes)
 		return -EINVAL;
 
 	read_lock(&cluster->cl_nodes_lock);
-	memcpy(map, cluster->cl_nodes_bitmap, sizeof(cluster->cl_nodes_bitmap));
+	bitmap_copy(map, cluster->cl_nodes_bitmap, O2NM_MAX_NODES);
 	read_unlock(&cluster->cl_nodes_lock);
 
 	return 0;
@@ -705,7 +689,7 @@ static struct config_group *o2nm_cluster_group_make_group(struct config_group *g
 	struct o2nm_node_group *ns = NULL;
 	struct config_group *o2hb_group = NULL, *ret = NULL;
 
-	/* this runs under the parent dir's i_mutex; there can be only
+	/* this runs under the parent dir's i_rwsem; there can be only
 	 * one caller in here at a time */
 	if (o2nm_single_cluster)
 		return ERR_PTR(-ENOSPC);
@@ -840,11 +824,9 @@ static void __exit exit_o2nm(void)
 
 static int __init init_o2nm(void)
 {
-	int ret = -1;
+	int ret;
 
-	ret = o2hb_init();
-	if (ret)
-		goto out;
+	o2hb_init();
 
 	ret = o2net_init();
 	if (ret)

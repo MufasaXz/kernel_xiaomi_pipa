@@ -6,8 +6,9 @@
  * Author(s): Jan Glauber <jang@linux.vnet.ibm.com>
  */
 #include <linux/uaccess.h>
-#include <linux/stop_machine.h>
 #include <linux/jump_label.h>
+#include <linux/module.h>
+#include <asm/text-patching.h>
 #include <asm/ipl.h>
 
 struct insn {
@@ -15,29 +16,24 @@ struct insn {
 	s32 offset;
 } __packed;
 
-struct insn_args {
-	struct jump_entry *entry;
-	enum jump_label_type type;
-};
-
 static void jump_label_make_nop(struct jump_entry *entry, struct insn *insn)
 {
-	/* brcl 0,0 */
+	/* brcl 0,offset */
 	insn->opcode = 0xc004;
-	insn->offset = 0;
+	insn->offset = (jump_entry_target(entry) - jump_entry_code(entry)) >> 1;
 }
 
 static void jump_label_make_branch(struct jump_entry *entry, struct insn *insn)
 {
 	/* brcl 15,offset */
 	insn->opcode = 0xc0f4;
-	insn->offset = (entry->target - entry->code) >> 1;
+	insn->offset = (jump_entry_target(entry) - jump_entry_code(entry)) >> 1;
 }
 
 static void jump_label_bug(struct jump_entry *entry, struct insn *expected,
 			   struct insn *new)
 {
-	unsigned char *ipc = (unsigned char *)entry->code;
+	unsigned char *ipc = (unsigned char *)jump_entry_code(entry);
 	unsigned char *ipe = (unsigned char *)expected;
 	unsigned char *ipn = (unsigned char *)new;
 
@@ -48,15 +44,10 @@ static void jump_label_bug(struct jump_entry *entry, struct insn *expected,
 	panic("Corrupted kernel text");
 }
 
-static struct insn orignop = {
-	.opcode = 0xc004,
-	.offset = JUMP_LABEL_NOP_OFFSET >> 1,
-};
-
-static void __jump_label_transform(struct jump_entry *entry,
-				   enum jump_label_type type,
-				   int init)
+static void jump_label_transform(struct jump_entry *entry,
+				 enum jump_label_type type)
 {
+	void *code = (void *)jump_entry_code(entry);
 	struct insn old, new;
 
 	if (type == JUMP_LABEL_JMP) {
@@ -66,37 +57,26 @@ static void __jump_label_transform(struct jump_entry *entry,
 		jump_label_make_branch(entry, &old);
 		jump_label_make_nop(entry, &new);
 	}
-	if (init) {
-		if (memcmp((void *)entry->code, &orignop, sizeof(orignop)))
-			jump_label_bug(entry, &orignop, &new);
-	} else {
-		if (memcmp((void *)entry->code, &old, sizeof(old)))
-			jump_label_bug(entry, &old, &new);
-	}
-	s390_kernel_write((void *)entry->code, &new, sizeof(new));
-}
-
-static int __sm_arch_jump_label_transform(void *data)
-{
-	struct insn_args *args = data;
-
-	__jump_label_transform(args->entry, args->type, 0);
-	return 0;
+	if (memcmp(code, &old, sizeof(old)))
+		jump_label_bug(entry, &old, &new);
+	s390_kernel_write(code, &new, sizeof(new));
 }
 
 void arch_jump_label_transform(struct jump_entry *entry,
 			       enum jump_label_type type)
 {
-	struct insn_args args;
-
-	args.entry = entry;
-	args.type = type;
-
-	stop_machine_cpuslocked(__sm_arch_jump_label_transform, &args, NULL);
+	jump_label_transform(entry, type);
+	text_poke_sync();
 }
 
-void arch_jump_label_transform_static(struct jump_entry *entry,
-				      enum jump_label_type type)
+bool arch_jump_label_transform_queue(struct jump_entry *entry,
+				     enum jump_label_type type)
 {
-	__jump_label_transform(entry, type, 1);
+	jump_label_transform(entry, type);
+	return true;
+}
+
+void arch_jump_label_transform_apply(void)
+{
+	text_poke_sync();
 }

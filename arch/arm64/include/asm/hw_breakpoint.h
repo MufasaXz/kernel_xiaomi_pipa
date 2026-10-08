@@ -1,17 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2012 ARM Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #ifndef __ASM_HW_BREAKPOINT_H
 #define __ASM_HW_BREAKPOINT_H
@@ -20,8 +9,6 @@
 #include <asm/cpufeature.h>
 #include <asm/sysreg.h>
 #include <asm/virt.h>
-
-#ifdef __KERNEL__
 
 struct arch_hw_breakpoint_ctrl {
 	u32 __reserved	: 19,
@@ -72,7 +59,6 @@ static inline void decode_ctrl_reg(u32 reg,
 /* Watchpoints */
 #define ARM_BREAKPOINT_LOAD	1
 #define ARM_BREAKPOINT_STORE	2
-#define AARCH64_ESR_ACCESS_MASK	(1 << 6)
 
 /* Lengths */
 #define ARM_BREAKPOINT_LEN_1	0x1
@@ -155,7 +141,7 @@ static inline int get_num_brps(void)
 	u64 dfr0 = read_sanitised_ftr_reg(SYS_ID_AA64DFR0_EL1);
 	return 1 +
 		cpuid_feature_extract_unsigned_field(dfr0,
-						ID_AA64DFR0_BRPS_SHIFT);
+						ID_AA64DFR0_EL1_BRPs_SHIFT);
 }
 
 /* Determine number of WRP registers available. */
@@ -164,8 +150,15 @@ static inline int get_num_wrps(void)
 	u64 dfr0 = read_sanitised_ftr_reg(SYS_ID_AA64DFR0_EL1);
 	return 1 +
 		cpuid_feature_extract_unsigned_field(dfr0,
-						ID_AA64DFR0_WRPS_SHIFT);
+						ID_AA64DFR0_EL1_WRPs_SHIFT);
 }
 
-#endif	/* __KERNEL__ */
+#ifdef CONFIG_CPU_PM
+extern void cpu_suspend_set_dbg_restorer(int (*hw_bp_restore)(unsigned int));
+#else
+static inline void cpu_suspend_set_dbg_restorer(int (*hw_bp_restore)(unsigned int))
+{
+}
+#endif
+
 #endif	/* __ASM_BREAKPOINT_H */

@@ -1,21 +1,11 @@
-/* -*- mode: c; c-basic-offset: 8; -*-
- * vim: noexpandtab sw=8 ts=8 sts=0:
- *
+// SPDX-License-Identifier: GPL-2.0-only
+/*
  * stackglue.c
  *
  * Code which implements an OCFS2 specific interface to underlying
  * cluster stacks.
  *
  * Copyright (C) 2007, 2009 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation, version 2.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
  */
 
 #include <linux/list.h>
@@ -344,10 +334,10 @@ int ocfs2_cluster_connect(const char *stack_name,
 		goto out;
 	}
 
-	strlcpy(new_conn->cc_name, group, GROUP_NAME_MAX + 1);
+	strscpy(new_conn->cc_name, group, GROUP_NAME_MAX + 1);
 	new_conn->cc_namelen = grouplen;
 	if (cluster_name_len)
-		strlcpy(new_conn->cc_cluster_name, cluster_name,
+		strscpy(new_conn->cc_cluster_name, cluster_name,
 			CLUSTER_NAME_MAX + 1);
 	new_conn->cc_cluster_name_len = cluster_name_len;
 	new_conn->cc_recovery_handler = recovery_handler;
@@ -660,9 +650,7 @@ error:
  * and easier to preserve the name.
  */
 
-#define FS_OCFS2_NM		1
-
-static struct ctl_table ocfs2_nm_table[] = {
+static const struct ctl_table ocfs2_nm_table[] = {
 	{
 		.procname	= "hb_ctl_path",
 		.data		= ocfs2_hb_ctl_path,
@@ -670,44 +658,9 @@ static struct ctl_table ocfs2_nm_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dostring,
 	},
-	{ }
-};
-
-static struct ctl_table ocfs2_mod_table[] = {
-	{
-		.procname	= "nm",
-		.data		= NULL,
-		.maxlen		= 0,
-		.mode		= 0555,
-		.child		= ocfs2_nm_table
-	},
-	{ }
-};
-
-static struct ctl_table ocfs2_kern_table[] = {
-	{
-		.procname	= "ocfs2",
-		.data		= NULL,
-		.maxlen		= 0,
-		.mode		= 0555,
-		.child		= ocfs2_mod_table
-	},
-	{ }
-};
-
-static struct ctl_table ocfs2_root_table[] = {
-	{
-		.procname	= "fs",
-		.data		= NULL,
-		.maxlen		= 0,
-		.mode		= 0555,
-		.child		= ocfs2_kern_table
-	},
-	{ }
 };
 
 static struct ctl_table_header *ocfs2_table_header;
-
 
 /*
  * Initialization
@@ -719,7 +672,7 @@ static int __init ocfs2_stack_glue_init(void)
 
 	strcpy(cluster_stack_name, OCFS2_STACK_PLUGIN_O2CB);
 
-	ocfs2_table_header = register_sysctl_table(ocfs2_root_table);
+	ocfs2_table_header = register_sysctl("fs/ocfs2/nm", ocfs2_nm_table);
 	if (!ocfs2_table_header) {
 		printk(KERN_ERR
 		       "ocfs2 stack glue: unable to register sysctl\n");
@@ -738,12 +691,11 @@ static void __exit ocfs2_stack_glue_exit(void)
 	memset(&locking_max_version, 0,
 	       sizeof(struct ocfs2_protocol_version));
 	ocfs2_sysfs_exit();
-	if (ocfs2_table_header)
-		unregister_sysctl_table(ocfs2_table_header);
+	unregister_sysctl_table(ocfs2_table_header);
 }
 
 MODULE_AUTHOR("Oracle");
-MODULE_DESCRIPTION("ocfs2 cluter stack glue layer");
+MODULE_DESCRIPTION("ocfs2 cluster stack glue layer");
 MODULE_LICENSE("GPL");
 module_init(ocfs2_stack_glue_init);
 module_exit(ocfs2_stack_glue_exit);

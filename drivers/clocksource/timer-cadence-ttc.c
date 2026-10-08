@@ -1,18 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * This file contains driver for the Cadence Triple Timer Counter Rev 06
  *
  *  Copyright (C) 2011-2013 Xilinx
  *
  * based on arch/mips/kernel/time.c timer driver
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/clk.h>
@@ -21,6 +13,7 @@
 #include <linux/clocksource.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
+#include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/sched_clock.h>
 #include <linux/module.h>
@@ -76,7 +69,7 @@
  * @base_addr:	Base address of timer
  * @freq:	Timer input clock frequency
  * @clk:	Associated clock source
- * @clk_rate_change_nb	Notifier block for clock rate changes
+ * @clk_rate_change_nb:	Notifier block for clock rate changes
  */
 struct ttc_timer {
 	void __iomem *base_addr;
@@ -141,7 +134,7 @@ static void ttc_set_interval(struct ttc_timer *timer,
  * @irq:	IRQ number of the Timer
  * @dev_id:	void pointer to the ttc_timer instance
  *
- * returns: Always IRQ_HANDLED - success
+ * Returns: Always IRQ_HANDLED - success
  **/
 static irqreturn_t ttc_clock_event_interrupt(int irq, void *dev_id)
 {
@@ -158,8 +151,9 @@ static irqreturn_t ttc_clock_event_interrupt(int irq, void *dev_id)
 
 /**
  * __ttc_clocksource_read - Reads the timer counter register
+ * @cs: &clocksource to read from
  *
- * returns: Current timer counter register value
+ * Returns: Current timer counter register value
  **/
 static u64 __ttc_clocksource_read(struct clocksource *cs)
 {
@@ -180,7 +174,7 @@ static u64 notrace ttc_sched_clock_read(void)
  * @cycles:	Timer interval ticks
  * @evt:	Address of clock event instance
  *
- * returns: Always 0 - success
+ * Returns: Always %0 - success
  **/
 static int ttc_set_next_event(unsigned long cycles,
 					struct clock_event_device *evt)
@@ -193,9 +187,12 @@ static int ttc_set_next_event(unsigned long cycles,
 }
 
 /**
- * ttc_set_{shutdown|oneshot|periodic} - Sets the state of timer
- *
+ * ttc_shutdown - Sets the state of timer
  * @evt:	Address of clock event instance
+ *
+ * Used for shutdown or oneshot.
+ *
+ * Returns: Always %0 - success
  **/
 static int ttc_shutdown(struct clock_event_device *evt)
 {
@@ -209,6 +206,12 @@ static int ttc_shutdown(struct clock_event_device *evt)
 	return 0;
 }
 
+/**
+ * ttc_set_periodic - Sets the state of timer
+ * @evt:	Address of clock event instance
+ *
+ * Returns: Always %0 - success
+ */
 static int ttc_set_periodic(struct clock_event_device *evt)
 {
 	struct ttc_timer_clockevent *ttce = to_ttc_timer_clkevent(evt);
@@ -317,7 +320,7 @@ static int ttc_rate_change_clocksource_cb(struct notifier_block *nb,
 		/* restore original register value */
 		writel_relaxed(ttccs->scale_clk_ctrl_reg_old,
 			       ttccs->ttc.base_addr + TTC_CLK_CNTRL_OFFSET);
-		/* fall through */
+		fallthrough;
 	default:
 		return NOTIFY_DONE;
 	}
@@ -400,7 +403,7 @@ static int ttc_rate_change_clockevent_cb(struct notifier_block *nb,
 
 		clockevents_update_freq(&ttcce->ce, ndata->new_rate / PRESCALE);
 
-		/* fall through */
+		fallthrough;
 	case PRE_RATE_CHANGE:
 	case ABORT_RATE_CHANGE:
 	default:
@@ -432,7 +435,7 @@ static int __init ttc_setup_clockevent(struct clk *clk,
 				    &ttcce->ttc.clk_rate_change_nb);
 	if (err) {
 		pr_warn("Unable to register clock notifier.\n");
-		goto out_kfree;
+		goto out_clk_unprepare;
 	}
 
 	ttcce->ttc.freq = clk_get_rate(ttcce->ttc.clk);
@@ -462,13 +465,15 @@ static int __init ttc_setup_clockevent(struct clk *clk,
 	err = request_irq(irq, ttc_clock_event_interrupt,
 			  IRQF_TIMER, ttcce->ce.name, ttcce);
 	if (err)
-		goto out_kfree;
+		goto out_clk_unprepare;
 
 	clockevents_config_and_register(&ttcce->ce,
 			ttcce->ttc.freq / PRESCALE, 1, 0xfffe);
 
 	return 0;
 
+out_clk_unprepare:
+	clk_disable_unprepare(ttcce->ttc.clk);
 out_kfree:
 	kfree(ttcce);
 	return err;
@@ -533,7 +538,7 @@ static int __init ttc_timer_probe(struct platform_device *pdev)
 	if (ret)
 		goto put_clk_ce;
 
-	pr_info("%s #0 at %p, irq=%d\n", timer->name, timer_baseaddr, irq);
+	pr_info("%pOFn #0 at %p, irq=%d\n", timer, timer_baseaddr, irq);
 
 	return 0;
 

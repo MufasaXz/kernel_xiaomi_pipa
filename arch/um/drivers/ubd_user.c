@@ -1,8 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2016 Anton Ivanov (aivanov@brocade.com)
  * Copyright (C) 2000, 2001, 2002 Jeff Dike (jdike@karaya.com)
  * Copyright (C) 2001 Ridgerun,Inc (glonnon@ridgerun.com)
- * Licensed under the GPL
  */
 
 #include <stddef.h>
@@ -23,11 +23,11 @@
 #include <os.h>
 #include <poll.h>
 
-struct pollfd kernel_pollfd;
+static struct pollfd kernel_pollfd;
 
-int start_io_thread(unsigned long sp, int *fd_out)
+int start_io_thread(struct os_helper_thread **td_out, int *fd_out)
 {
-	int pid, fds[2], err;
+	int fds[2], err;
 
 	err = os_pipe(fds, 1, 1);
 	if(err < 0){
@@ -47,14 +47,14 @@ int start_io_thread(unsigned long sp, int *fd_out)
 		goto out_close;
 	}
 
-	pid = clone(io_thread, (void *) sp, CLONE_FILES | CLONE_VM, NULL);
-	if(pid < 0){
-		err = -errno;
-		printk("start_io_thread - clone failed : errno = %d\n", errno);
+	err = os_run_helper_thread(td_out, io_thread, NULL);
+	if (err < 0) {
+		printk("%s - failed to run helper thread, err = %d\n",
+		       __func__, -err);
 		goto out_close;
 	}
 
-	return(pid);
+	return 0;
 
  out_close:
 	os_close_file(fds[0]);

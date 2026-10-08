@@ -1,24 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * This file is part of wl1271
  *
  * Copyright (C) 2009-2010 Nokia Corporation
  *
  * Contact: Luciano Coelho <luciano.coelho@nokia.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
- *
  */
 
 #include <linux/irq.h>
@@ -30,7 +16,6 @@
 #include <linux/mmc/sdio_ids.h>
 #include <linux/mmc/card.h>
 #include <linux/mmc/host.h>
-#include <linux/gpio.h>
 #include <linux/pm_runtime.h>
 #include <linux/printk.h>
 #include <linux/of.h>
@@ -40,15 +25,7 @@
 #include "wl12xx_80211.h"
 #include "io.h"
 
-#ifndef SDIO_VENDOR_ID_TI
-#define SDIO_VENDOR_ID_TI		0x0097
-#endif
-
-#ifndef SDIO_DEVICE_ID_TI_WL1271
-#define SDIO_DEVICE_ID_TI_WL1271	0x4076
-#endif
-
-static bool dump = false;
+static bool dump;
 
 struct wl12xx_sdio_glue {
 	struct device *dev;
@@ -97,8 +74,8 @@ static int __must_check wl12xx_sdio_raw_read(struct device *child, int addr,
 
 	sdio_release_host(func);
 
-	if (WARN_ON(ret))
-		dev_err(child->parent, "sdio read failed (%d)\n", ret);
+	if (ret)
+		dev_err_ratelimited(child->parent, "sdio read failed (%d)\n", ret);
 
 	if (unlikely(dump)) {
 		printk(KERN_DEBUG "wlcore_sdio: READ from 0x%04x\n", addr);
@@ -142,8 +119,8 @@ static int __must_check wl12xx_sdio_raw_write(struct device *child, int addr,
 
 	sdio_release_host(func);
 
-	if (WARN_ON(ret))
-		dev_err(child->parent, "sdio write failed (%d)\n", ret);
+	if (ret)
+		dev_err_ratelimited(child->parent, "sdio write failed (%d)\n", ret);
 
 	return ret;
 }
@@ -154,9 +131,8 @@ static int wl12xx_sdio_power_on(struct wl12xx_sdio_glue *glue)
 	struct sdio_func *func = dev_to_sdio_func(glue->dev);
 	struct mmc_card *card = func->card;
 
-	ret = pm_runtime_get_sync(&card->dev);
+	ret = pm_runtime_resume_and_get(&card->dev);
 	if (ret < 0) {
-		pm_runtime_put_noidle(&card->dev);
 		dev_err(glue->dev, "%s: failed to get_sync(%d)\n",
 			__func__, ret);
 
@@ -168,7 +144,7 @@ static int wl12xx_sdio_power_on(struct wl12xx_sdio_glue *glue)
 	 * To guarantee that the SDIO card is power cycled, as required to make
 	 * the FW programming to succeed, let's do a brute force HW reset.
 	 */
-	mmc_hw_reset(card->host);
+	mmc_hw_reset(card);
 
 	sdio_enable_func(func);
 	sdio_release_host(func);
@@ -240,7 +216,7 @@ static const struct of_device_id wlcore_sdio_of_match_table[] = {
 	{ }
 };
 
-static int wlcore_probe_of(struct device *dev, int *irq,
+static int wlcore_probe_of(struct device *dev, int *irq, int *wakeirq,
 			   struct wlcore_platdev_data *pdev_data)
 {
 	struct device_node *np = dev->of_node;
@@ -258,6 +234,8 @@ static int wlcore_probe_of(struct device *dev, int *irq,
 		return -EINVAL;
 	}
 
+	*wakeirq = irq_of_parse_and_map(np, 1);
+
 	/* optional clock frequency params */
 	of_property_read_u32(np, "ref-clock-frequency",
 			     &pdev_data->ref_clock_freq);
@@ -267,7 +245,7 @@ static int wlcore_probe_of(struct device *dev, int *irq,
 	return 0;
 }
 #else
-static int wlcore_probe_of(struct device *dev, int *irq,
+static int wlcore_probe_of(struct device *dev, int *irq, int *wakeirq,
 			   struct wlcore_platdev_data *pdev_data)
 {
 	return -ENODATA;
@@ -279,10 +257,10 @@ static int wl1271_probe(struct sdio_func *func,
 {
 	struct wlcore_platdev_data *pdev_data;
 	struct wl12xx_sdio_glue *glue;
-	struct resource res[1];
+	struct resource res[2];
 	mmc_pm_flag_t mmcflags;
 	int ret = -ENOMEM;
-	int irq;
+	int irq, wakeirq, num_irqs;
 	const char *chip_family;
 
 	/* We are only able to handle the wlan function */
@@ -307,7 +285,7 @@ static int wl1271_probe(struct sdio_func *func,
 	/* Use block mode for transferring over one block size of data */
 	func->card->quirks |= MMC_QUIRK_BLKSZ_FOR_BYTE_MODE;
 
-	ret = wlcore_probe_of(&func->dev, &irq, pdev_data);
+	ret = wlcore_probe_of(&func->dev, &irq, &wakeirq, pdev_data);
 	if (ret)
 		goto out;
 
@@ -345,12 +323,17 @@ static int wl1271_probe(struct sdio_func *func,
 
 	memset(res, 0x00, sizeof(res));
 
-	res[0].start = irq;
-	res[0].flags = IORESOURCE_IRQ |
-		       irqd_get_trigger_type(irq_get_irq_data(irq));
-	res[0].name = "irq";
+	res[0] = DEFINE_RES_IRQ_NAMED(irq, "irq");
+	res[0].flags |= irq_get_trigger_type(irq);
 
-	ret = platform_device_add_resources(glue->core, res, ARRAY_SIZE(res));
+	if (wakeirq > 0) {
+		res[1] = DEFINE_RES_IRQ_NAMED(wakeirq, "wakeirq");
+		res[1].flags |= irq_get_trigger_type(wakeirq);
+		num_irqs = 2;
+	} else {
+		num_irqs = 1;
+	}
+	ret = platform_device_add_resources(glue->core, res, num_irqs);
 	if (ret) {
 		dev_err(glue->dev, "can't add resources\n");
 		goto out_dev_put;
@@ -453,22 +436,12 @@ static struct sdio_driver wl1271_sdio_driver = {
 #endif
 };
 
-static int __init wl1271_init(void)
-{
-	return sdio_register_driver(&wl1271_sdio_driver);
-}
-
-static void __exit wl1271_exit(void)
-{
-	sdio_unregister_driver(&wl1271_sdio_driver);
-}
-
-module_init(wl1271_init);
-module_exit(wl1271_exit);
+module_sdio_driver(wl1271_sdio_driver);
 
 module_param(dump, bool, 0600);
 MODULE_PARM_DESC(dump, "Enable sdio read/write dumps.");
 
+MODULE_DESCRIPTION("TI WLAN SDIO helpers");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Luciano Coelho <coelho@ti.com>");
 MODULE_AUTHOR("Juuso Oikarinen <juuso.oikarinen@nokia.com>");

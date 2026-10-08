@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) 2016 Masaki Ota <masaki.ota@jp.alps.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
  */
 
 #include <linux/kernel.h>
@@ -12,7 +8,7 @@
 #include <linux/input.h>
 #include <linux/input/mt.h>
 #include <linux/module.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include "hid-ids.h"
 
 /* ALPS Device Product ID */
@@ -78,7 +74,7 @@ enum dev_num {
 	UNKNOWN,
 };
 /**
- * struct u1_data
+ * struct alps_dev
  *
  * @input: pointer to the kernel input device
  * @input2: pointer to the kernel input2 device
@@ -393,8 +389,7 @@ static int u1_raw_event(struct alps_dev *hdata, u8 *data, int size)
 				input_report_abs(hdata->input,
 					ABS_MT_PRESSURE, z);
 			} else {
-				input_mt_report_slot_state(hdata->input,
-					MT_TOOL_FINGER, 0);
+				input_mt_report_slot_inactive(hdata->input);
 			}
 		}
 
@@ -441,6 +436,9 @@ static int alps_raw_event(struct hid_device *hdev,
 {
 	int ret = 0;
 	struct alps_dev *hdata = hid_get_drvdata(hdev);
+
+	if (!(hdev->claimed & HID_CLAIMED_INPUT) || !hdata->input)
+		return 0;
 
 	switch (hdev->product) {
 	case HID_PRODUCT_ID_T4_BTNLESS:
@@ -531,7 +529,7 @@ static int u1_init(struct hid_device *hdev, struct alps_dev *pri_data)
 
 	ret = u1_read_write_register(hdev, ADDRESS_U1_NUM_SENS_Y,
 			&sen_line_num_y, 0, true);
-		if (ret < 0) {
+	if (ret < 0) {
 		dev_err(&hdev->dev, "failed U1_NUM_SENS_Y (%d)\n", ret);
 		goto exit;
 	}
@@ -825,11 +823,6 @@ static int alps_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	return 0;
 }
 
-static void alps_remove(struct hid_device *hdev)
-{
-	hid_hw_stop(hdev);
-}
-
 static const struct hid_device_id alps_id[] = {
 	{ HID_DEVICE(HID_BUS_ANY, HID_GROUP_ANY,
 		USB_VENDOR_ID_ALPS_JP, HID_DEVICE_ID_ALPS_U1_DUAL) },
@@ -847,7 +840,6 @@ static struct hid_driver alps_driver = {
 	.name = "hid-alps",
 	.id_table		= alps_id,
 	.probe			= alps_probe,
-	.remove			= alps_remove,
 	.raw_event		= alps_raw_event,
 	.input_mapping		= alps_input_mapping,
 	.input_configured	= alps_input_configured,

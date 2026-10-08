@@ -1,18 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver for I2C adapter in Rockchip RK3xxx SoC
  *
  * Max Schwarz <max.schwarz@online.de>
  * based on the patches by Rockchip Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
+#include <linux/iopoll.h>
 #include <linux/errno.h>
 #include <linux/err.h>
 #include <linux/platform_device.h>
@@ -30,8 +28,8 @@
 /* Register Map */
 #define REG_CON        0x00 /* control register */
 #define REG_CLKDIV     0x04 /* clock divisor register */
-#define REG_MRXADDR    0x08 /* slave address for REGISTER_TX */
-#define REG_MRXRADDR   0x0c /* slave register address for REGISTER_TX */
+#define REG_MRXADDR    0x08 /* target address for REGISTER_TX */
+#define REG_MRXRADDR   0x0c /* target register address for REGISTER_TX */
 #define REG_MTXCNT     0x10 /* number of bytes to be transmitted */
 #define REG_MRXCNT     0x14 /* number of bytes to be received */
 #define REG_IEN        0x18 /* interrupt enable */
@@ -70,8 +68,8 @@ enum {
 /* REG_IEN/REG_IPD bits */
 #define REG_INT_BTF       BIT(0) /* a byte was transmitted */
 #define REG_INT_BRF       BIT(1) /* a byte was received */
-#define REG_INT_MBTF      BIT(2) /* master data transmit finished */
-#define REG_INT_MBRF      BIT(3) /* master data receive finished */
+#define REG_INT_MBTF      BIT(2) /* controller data transmit finished */
+#define REG_INT_MBRF      BIT(3) /* controller data receive finished */
 #define REG_INT_START     BIT(4) /* START condition generated */
 #define REG_INT_STOP      BIT(5) /* STOP condition generated */
 #define REG_INT_NAKRCV    BIT(6) /* NACK received */
@@ -180,12 +178,13 @@ struct rk3x_i2c_soc_data {
  * @clk: function clk for rk3399 or function & Bus clks for others
  * @pclk: Bus clk for rk3399
  * @clk_rate_nb: i2c clk rate change notify
+ * @irq: irq number
  * @t: I2C known timing information
  * @lock: spinlock for the i2c bus
  * @wait: the waitqueue to wait for i2c transfer
  * @busy: the condition for the event to wait for
  * @msg: current i2c message
- * @addr: addr of i2c slave device
+ * @addr: addr of i2c target device
  * @mode: mode of i2c transfer
  * @is_last_msg: flag determines whether it is the last msg in this transfer
  * @state: state of i2c transfer
@@ -202,6 +201,7 @@ struct rk3x_i2c {
 	struct clk *clk;
 	struct clk *pclk;
 	struct notifier_block clk_rate_nb;
+	int irq;
 
 	/* Settings */
 	struct i2c_timings t;
@@ -544,9 +544,9 @@ out:
  */
 static const struct i2c_spec_values *rk3x_i2c_get_spec(unsigned int speed)
 {
-	if (speed <= 100000)
+	if (speed <= I2C_MAX_STANDARD_MODE_FREQ)
 		return &standard_mode_spec;
-	else if (speed <= 400000)
+	else if (speed <= I2C_MAX_FAST_MODE_FREQ)
 		return &fast_mode_spec;
 	else
 		return &fast_mode_plus_spec;
@@ -582,8 +582,8 @@ static int rk3x_i2c_v0_calc_timings(unsigned long clk_rate,
 	int ret = 0;
 
 	/* Only support standard-mode and fast-mode */
-	if (WARN_ON(t->bus_freq_hz > 400000))
-		t->bus_freq_hz = 400000;
+	if (WARN_ON(t->bus_freq_hz > I2C_MAX_FAST_MODE_FREQ))
+		t->bus_freq_hz = I2C_MAX_FAST_MODE_FREQ;
 
 	/* prevent scl_rate_khz from becoming 0 */
 	if (WARN_ON(t->bus_freq_hz < 1000))
@@ -761,8 +761,8 @@ static int rk3x_i2c_v1_calc_timings(unsigned long clk_rate,
 	int ret = 0;
 
 	/* Support standard-mode, fast-mode and fast-mode plus */
-	if (WARN_ON(t->bus_freq_hz > 1000000))
-		t->bus_freq_hz = 1000000;
+	if (WARN_ON(t->bus_freq_hz > I2C_MAX_FAST_MODE_PLUS_FREQ))
+		t->bus_freq_hz = I2C_MAX_FAST_MODE_PLUS_FREQ;
 
 	/* prevent scl_rate_khz from becoming 0 */
 	if (WARN_ON(t->bus_freq_hz < 1000))
@@ -979,7 +979,7 @@ static int rk3x_i2c_setup(struct rk3x_i2c *i2c, struct i2c_msg *msgs, int num)
 	/*
 	 * The I2C adapter can issue a small (len < 4) write packet before
 	 * reading. This speeds up SMBus-style register reads.
-	 * The MRXADDR/MRXRADDR hold the slave address and the slave register
+	 * The MRXADDR/MRXRADDR hold the target address and the target register
 	 * address in this case.
 	 */
 
@@ -1016,7 +1016,7 @@ static int rk3x_i2c_setup(struct rk3x_i2c *i2c, struct i2c_msg *msgs, int num)
 			addr |= 1; /* set read bit */
 
 			/*
-			 * We have to transmit the slave addr first. Use
+			 * We have to transmit the target addr first. Use
 			 * MOD_REGISTER_TX for that purpose.
 			 */
 			i2c->mode = REG_CON_MOD_REGISTER_TX;
@@ -1043,11 +1043,25 @@ static int rk3x_i2c_setup(struct rk3x_i2c *i2c, struct i2c_msg *msgs, int num)
 	return ret;
 }
 
-static int rk3x_i2c_xfer(struct i2c_adapter *adap,
-			 struct i2c_msg *msgs, int num)
+static int rk3x_i2c_wait_xfer_poll(struct rk3x_i2c *i2c)
+{
+	ktime_t timeout = ktime_add_ms(ktime_get(), WAIT_TIMEOUT);
+
+	while (READ_ONCE(i2c->busy) &&
+	       ktime_compare(ktime_get(), timeout) < 0) {
+		udelay(5);
+		rk3x_i2c_irq(0, i2c);
+	}
+
+	return !i2c->busy;
+}
+
+static int rk3x_i2c_xfer_common(struct i2c_adapter *adap,
+				struct i2c_msg *msgs, int num, bool polling)
 {
 	struct rk3x_i2c *i2c = (struct rk3x_i2c *)adap->algo_data;
-	unsigned long timeout, flags;
+	unsigned long flags;
+	long time_left;
 	u32 val;
 	int ret = 0;
 	int i;
@@ -1076,17 +1090,23 @@ static int rk3x_i2c_xfer(struct i2c_adapter *adap,
 
 		spin_unlock_irqrestore(&i2c->lock, flags);
 
-		rk3x_i2c_start(i2c);
+		if (!polling) {
+			rk3x_i2c_start(i2c);
 
-		timeout = wait_event_timeout(i2c->wait, !i2c->busy,
-					     msecs_to_jiffies(WAIT_TIMEOUT));
+			time_left = wait_event_timeout(i2c->wait, !i2c->busy,
+						       msecs_to_jiffies(WAIT_TIMEOUT));
+		} else {
+			disable_irq(i2c->irq);
+			rk3x_i2c_start(i2c);
+
+			time_left = rk3x_i2c_wait_xfer_poll(i2c);
+
+			enable_irq(i2c->irq);
+		}
 
 		spin_lock_irqsave(&i2c->lock, flags);
 
-		if (timeout == 0) {
-			dev_err(i2c->dev, "timeout, ipd: 0x%02x, state: %d\n",
-				i2c_readl(i2c, REG_IPD), i2c->state);
-
+		if (time_left == 0) {
 			/* Force a STOP condition without interrupt */
 			i2c_writel(i2c, 0, REG_IEN);
 			val = i2c_readl(i2c, REG_CON) & REG_CON_TUNING_MASK;
@@ -1113,6 +1133,18 @@ static int rk3x_i2c_xfer(struct i2c_adapter *adap,
 	return ret < 0 ? ret : num;
 }
 
+static int rk3x_i2c_xfer(struct i2c_adapter *adap,
+			 struct i2c_msg *msgs, int num)
+{
+	return rk3x_i2c_xfer_common(adap, msgs, num, false);
+}
+
+static int rk3x_i2c_xfer_polling(struct i2c_adapter *adap,
+				 struct i2c_msg *msgs, int num)
+{
+	return rk3x_i2c_xfer_common(adap, msgs, num, true);
+}
+
 static __maybe_unused int rk3x_i2c_resume(struct device *dev)
 {
 	struct rk3x_i2c *i2c = dev_get_drvdata(dev);
@@ -1128,12 +1160,18 @@ static u32 rk3x_i2c_func(struct i2c_adapter *adap)
 }
 
 static const struct i2c_algorithm rk3x_i2c_algorithm = {
-	.master_xfer		= rk3x_i2c_xfer,
-	.functionality		= rk3x_i2c_func,
+	.xfer = rk3x_i2c_xfer,
+	.xfer_atomic = rk3x_i2c_xfer_polling,
+	.functionality = rk3x_i2c_func,
 };
 
 static const struct rk3x_i2c_soc_data rv1108_soc_data = {
 	.grf_offset = -1,
+	.calc_timings = rk3x_i2c_v1_calc_timings,
+};
+
+static const struct rk3x_i2c_soc_data rv1126_soc_data = {
+	.grf_offset = 0x118,
 	.calc_timings = rk3x_i2c_v1_calc_timings,
 };
 
@@ -1168,6 +1206,10 @@ static const struct of_device_id rk3x_i2c_match[] = {
 		.data = &rv1108_soc_data
 	},
 	{
+		.compatible = "rockchip,rv1126-i2c",
+		.data = &rv1126_soc_data
+	},
+	{
 		.compatible = "rockchip,rk3066-i2c",
 		.data = &rk3066_soc_data
 	},
@@ -1196,7 +1238,6 @@ static int rk3x_i2c_probe(struct platform_device *pdev)
 	struct device_node *np = pdev->dev.of_node;
 	const struct of_device_id *match;
 	struct rk3x_i2c *i2c;
-	struct resource *mem;
 	int ret = 0;
 	int bus_nr;
 	u32 value;
@@ -1213,7 +1254,7 @@ static int rk3x_i2c_probe(struct platform_device *pdev)
 	/* use common interface to get I2C timing properties */
 	i2c_parse_fw_timings(&pdev->dev, &i2c->t, true);
 
-	strlcpy(i2c->adap.name, "rk3x-i2c", sizeof(i2c->adap.name));
+	strscpy(i2c->adap.name, "rk3x-i2c", sizeof(i2c->adap.name));
 	i2c->adap.owner = THIS_MODULE;
 	i2c->adap.algo = &rk3x_i2c_algorithm;
 	i2c->adap.retries = 3;
@@ -1226,8 +1267,7 @@ static int rk3x_i2c_probe(struct platform_device *pdev)
 	spin_lock_init(&i2c->lock);
 	init_waitqueue_head(&i2c->wait);
 
-	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	i2c->regs = devm_ioremap_resource(&pdev->dev, mem);
+	i2c->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(i2c->regs))
 		return PTR_ERR(i2c->regs);
 
@@ -1253,8 +1293,12 @@ static int rk3x_i2c_probe(struct platform_device *pdev)
 			return -EINVAL;
 		}
 
-		/* 27+i: write mask, 11+i: value */
-		value = BIT(27 + bus_nr) | BIT(11 + bus_nr);
+		/* rv1126 i2c2 uses non-sequential write mask 20, value 4 */
+		if (i2c->soc_data == &rv1126_soc_data && bus_nr == 2)
+			value = BIT(20) | BIT(4);
+		else
+			/* 27+i: write mask, 11+i: value */
+			value = BIT(27 + bus_nr) | BIT(11 + bus_nr);
 
 		ret = regmap_write(grf, i2c->soc_data->grf_offset, value);
 		if (ret != 0) {
@@ -1265,10 +1309,8 @@ static int rk3x_i2c_probe(struct platform_device *pdev)
 
 	/* IRQ setup */
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		dev_err(&pdev->dev, "cannot find rk3x IRQ\n");
+	if (irq < 0)
 		return irq;
-	}
 
 	ret = devm_request_irq(&pdev->dev, irq, rk3x_i2c_irq,
 			       0, dev_name(&pdev->dev), i2c);
@@ -1276,6 +1318,8 @@ static int rk3x_i2c_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "cannot request IRQ\n");
 		return ret;
 	}
+
+	i2c->irq = irq;
 
 	platform_set_drvdata(pdev, i2c);
 
@@ -1288,18 +1332,13 @@ static int rk3x_i2c_probe(struct platform_device *pdev)
 		i2c->pclk = devm_clk_get(&pdev->dev, "pclk");
 	}
 
-	if (IS_ERR(i2c->clk)) {
-		ret = PTR_ERR(i2c->clk);
-		if (ret != -EPROBE_DEFER)
-			dev_err(&pdev->dev, "Can't get bus clk: %d\n", ret);
-		return ret;
-	}
-	if (IS_ERR(i2c->pclk)) {
-		ret = PTR_ERR(i2c->pclk);
-		if (ret != -EPROBE_DEFER)
-			dev_err(&pdev->dev, "Can't get periph clk: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(i2c->clk))
+		return dev_err_probe(&pdev->dev, PTR_ERR(i2c->clk),
+				     "Can't get bus clk\n");
+
+	if (IS_ERR(i2c->pclk))
+		return dev_err_probe(&pdev->dev, PTR_ERR(i2c->pclk),
+				     "Can't get periph clk\n");
 
 	ret = clk_prepare(i2c->clk);
 	if (ret < 0) {
@@ -1319,8 +1358,15 @@ static int rk3x_i2c_probe(struct platform_device *pdev)
 		goto err_pclk;
 	}
 
+	ret = clk_enable(i2c->clk);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "Can't enable bus clk: %d\n", ret);
+		goto err_clk_notifier;
+	}
+
 	clk_rate = clk_get_rate(i2c->clk);
 	rk3x_i2c_adapt_div(i2c, clk_rate);
+	clk_disable(i2c->clk);
 
 	ret = i2c_add_adapter(&i2c->adap);
 	if (ret < 0)
@@ -1337,7 +1383,7 @@ err_clk:
 	return ret;
 }
 
-static int rk3x_i2c_remove(struct platform_device *pdev)
+static void rk3x_i2c_remove(struct platform_device *pdev)
 {
 	struct rk3x_i2c *i2c = platform_get_drvdata(pdev);
 
@@ -1346,15 +1392,13 @@ static int rk3x_i2c_remove(struct platform_device *pdev)
 	clk_notifier_unregister(i2c->clk, &i2c->clk_rate_nb);
 	clk_unprepare(i2c->pclk);
 	clk_unprepare(i2c->clk);
-
-	return 0;
 }
 
 static SIMPLE_DEV_PM_OPS(rk3x_i2c_pm_ops, NULL, rk3x_i2c_resume);
 
 static struct platform_driver rk3x_i2c_driver = {
 	.probe   = rk3x_i2c_probe,
-	.remove  = rk3x_i2c_remove,
+	.remove = rk3x_i2c_remove,
 	.driver  = {
 		.name  = "rk3x-i2c",
 		.of_match_table = rk3x_i2c_match,

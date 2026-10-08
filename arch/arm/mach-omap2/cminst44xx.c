@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * OMAP4 CM instance functions
  *
@@ -5,10 +6,6 @@
  * Copyright (C) 2008-2011 Texas Instruments, Inc.
  * Paul Walmsley
  * Rajendra Nayak <rnayak@ti.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * This is needed since CM instances can be in the PRM, PRCM_MPU, CM1,
  * or CM2 hardware modules.  For example, the EMU_CM CM instance is in
@@ -240,7 +237,7 @@ static void omap4_cminst_clkdm_disable_hwsup(u8 part, u16 inst, u16 cdoffs)
 }
 
 /**
- * omap4_cminst_clkdm_force_sleep - try to take a clockdomain out of idle
+ * omap4_cminst_clkdm_force_wakeup - try to take a clockdomain out of idle
  * @part: PRCM partition ID that the clockdomain registers exist in
  * @inst: CM instance register offset (*_INST macro)
  * @cdoffs: Clockdomain register offset (*_CDOFFS macro)

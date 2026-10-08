@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *	SEGA Dreamcast mouse driver
  *	Based on drivers/usb/usbmouse.c
@@ -72,7 +73,7 @@ static int probe_maple_mouse(struct device *dev)
 	struct input_dev *input_dev;
 	struct dc_mouse *mse;
 
-	mse = kzalloc(sizeof(struct dc_mouse), GFP_KERNEL);
+	mse = kzalloc(sizeof(*mse), GFP_KERNEL);
 	if (!mse) {
 		error = -ENOMEM;
 		goto fail;

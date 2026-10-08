@@ -9,7 +9,6 @@
 
 #include <linux/device.h>
 #include <linux/mutex.h>
-#include <linux/pm_wakeup.h>
 
 #include "power.h"
 
@@ -54,7 +53,7 @@ static void try_to_suspend(struct work_struct *work)
 		goto out;
 
 	/*
-	 * If the wakeup occured for an unknown reason, wait to prevent the
+	 * If the wakeup occurred for an unknown reason, wait to prevent the
 	 * system from trying to suspend and waking up in a tight loop.
 	 */
 	if (final_count == initial_count)

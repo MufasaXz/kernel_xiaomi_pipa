@@ -2,7 +2,7 @@
 /*
  * Driver for the on-board character LCD found on some ARM reference boards
  * This is basically an Hitachi HD44780 LCD with a custom IP block to drive it
- * http://en.wikipedia.org/wiki/HD44780_Character_LCD
+ * https://en.wikipedia.org/wiki/HD44780_Character_LCD
  * Currently it will just display the text "ARM Linux" and the linux version
  *
  * Author: Linus Walleij <triad@df.lth.se>
@@ -270,7 +270,7 @@ static int __init charlcd_probe(struct platform_device *pdev)
 	struct charlcd *lcd;
 	struct resource *res;
 
-	lcd = kzalloc(sizeof(struct charlcd), GFP_KERNEL);
+	lcd = kzalloc(sizeof(*lcd), GFP_KERNEL);
 	if (!lcd)
 		return -ENOMEM;
 
@@ -323,7 +323,7 @@ static int __init charlcd_probe(struct platform_device *pdev)
 out_no_irq:
 	iounmap(lcd->virtbase);
 out_no_memregion:
-	release_mem_region(lcd->phybase, SZ_4K);
+	release_mem_region(lcd->phybase, lcd->physize);
 out_no_resource:
 	kfree(lcd);
 	return ret;

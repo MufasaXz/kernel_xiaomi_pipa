@@ -1,11 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Windfarm PowerMac thermal control.
  * Control loops for machines with SMU and PPC970MP processors.
  *
  * Copyright (C) 2005 Paul Mackerras, IBM Corp. <paulus@samba.org>
  * Copyright (C) 2006 Benjamin Herrenschmidt, IBM Corp.
- *
- * Use and redistribute under the terms of the GNU GPL v2.
  */
 #include <linux/types.h>
 #include <linux/errno.h>
@@ -13,7 +12,9 @@
 #include <linux/device.h>
 #include <linux/platform_device.h>
 #include <linux/reboot.h>
-#include <asm/prom.h>
+#include <linux/of.h>
+#include <linux/slab.h>
+
 #include <asm/smu.h>
 
 #include "windfarm.h"
@@ -661,11 +662,9 @@ static int wf_pm112_probe(struct platform_device *dev)
 	return 0;
 }
 
-static int wf_pm112_remove(struct platform_device *dev)
+static void wf_pm112_remove(struct platform_device *dev)
 {
 	wf_unregister_client(&pm112_events);
-	/* should release all sensors and controls */
-	return 0;
 }
 
 static struct platform_driver wf_pm112_driver = {

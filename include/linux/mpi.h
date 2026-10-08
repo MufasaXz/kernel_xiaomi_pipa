@@ -1,22 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* mpi.h  -  Multi Precision Integers
  *	Copyright (C) 1994, 1996, 1998, 1999,
  *                    2000, 2001 Free Software Foundation, Inc.
  *
  * This file is part of GNUPG.
- *
- * GNUPG is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * GNUPG is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA
  *
  * Note: This code is heavily based on the GNU MP Library.
  *	 Actually it's the same code with only minor changes in the
@@ -59,6 +46,8 @@ MPI mpi_alloc(unsigned nlimbs);
 void mpi_free(MPI a);
 int mpi_resize(MPI a, unsigned nlimbs);
 
+MPI mpi_copy(MPI a);
+
 /*-- mpicoder.c --*/
 MPI mpi_read_raw_data(const void *xbuffer, size_t nbytes);
 MPI mpi_read_from_buffer(const void *buffer, unsigned *ret_nread);
@@ -69,6 +58,9 @@ int mpi_read_buffer(MPI a, uint8_t *buf, unsigned buf_len, unsigned *nbytes,
 int mpi_write_to_sgl(MPI a, struct scatterlist *sg, unsigned nbytes,
 		     int *sign);
 
+/*-- mpi-mod.c --*/
+int mpi_mod(MPI rem, MPI dividend, MPI divisor);
+
 /*-- mpi-pow.c --*/
 int mpi_powm(MPI res, MPI base, MPI exp, MPI mod);
 
@@ -76,16 +68,36 @@ int mpi_powm(MPI res, MPI base, MPI exp, MPI mod);
 int mpi_cmp_ui(MPI u, ulong v);
 int mpi_cmp(MPI u, MPI v);
 
+/*-- mpi-sub-ui.c --*/
+int mpi_sub_ui(MPI w, MPI u, unsigned long vval);
+
 /*-- mpi-bit.c --*/
 void mpi_normalize(MPI a);
 unsigned mpi_get_nbits(MPI a);
+int mpi_test_bit(MPI a, unsigned int n);
+int mpi_set_bit(MPI a, unsigned int n);
+int mpi_rshift(MPI x, MPI a, unsigned int n);
+
+/*-- mpi-add.c --*/
+int mpi_add(MPI w, MPI u, MPI v);
+int mpi_sub(MPI w, MPI u, MPI v);
+int mpi_addm(MPI w, MPI u, MPI v, MPI m);
+int mpi_subm(MPI w, MPI u, MPI v, MPI m);
+
+/*-- mpi-mul.c --*/
+int mpi_mul(MPI w, MPI u, MPI v);
+int mpi_mulm(MPI w, MPI u, MPI v, MPI m);
+
+/*-- mpi-div.c --*/
+int mpi_tdiv_r(MPI rem, MPI num, MPI den);
+int mpi_fdiv_r(MPI rem, MPI dividend, MPI divisor);
 
 /* inline functions */
 
 /**
  * mpi_get_size() - returns max size required to store the number
  *
- * @a:	A multi precision integer for which we want to allocate a bufer
+ * @a:	A multi precision integer for which we want to allocate a buffer
  *
  * Return: size required to store the number
  */

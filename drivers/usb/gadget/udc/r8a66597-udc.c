@@ -1516,7 +1516,7 @@ static irqreturn_t r8a66597_irq(int irq, void *_r8a66597)
 
 static void r8a66597_timer(struct timer_list *t)
 {
-	struct r8a66597 *r8a66597 = from_timer(r8a66597, t, timer);
+	struct r8a66597 *r8a66597 = timer_container_of(r8a66597, t, timer);
 	unsigned long flags;
 	u16 tmp;
 
@@ -1805,19 +1805,17 @@ static const struct usb_gadget_ops r8a66597_gadget_ops = {
 	.set_selfpowered	= r8a66597_set_selfpowered,
 };
 
-static int r8a66597_remove(struct platform_device *pdev)
+static void r8a66597_remove(struct platform_device *pdev)
 {
 	struct r8a66597		*r8a66597 = platform_get_drvdata(pdev);
 
 	usb_del_gadget_udc(&r8a66597->gadget);
-	del_timer_sync(&r8a66597->timer);
+	timer_delete_sync(&r8a66597->timer);
 	r8a66597_free_request(&r8a66597->ep[0].ep, r8a66597->ep0_req);
 
 	if (r8a66597->pdata->on_chip) {
 		clk_disable_unprepare(r8a66597->clk);
 	}
-
-	return 0;
 }
 
 static void nop_completion(struct usb_ep *ep, struct usb_request *r)
@@ -1827,10 +1825,8 @@ static void nop_completion(struct usb_ep *ep, struct usb_request *r)
 static int r8a66597_sudmac_ioremap(struct r8a66597 *r8a66597,
 					  struct platform_device *pdev)
 {
-	struct resource *res;
-
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "sudmac");
-	r8a66597->sudmac_reg = devm_ioremap_resource(&pdev->dev, res);
+	r8a66597->sudmac_reg =
+		devm_platform_ioremap_resource_byname(pdev, "sudmac");
 	return PTR_ERR_OR_ZERO(r8a66597->sudmac_reg);
 }
 
@@ -1838,7 +1834,7 @@ static int r8a66597_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	char clk_name[8];
-	struct resource *res, *ires;
+	struct resource *ires;
 	int irq;
 	void __iomem *reg = NULL;
 	struct r8a66597 *r8a66597 = NULL;
@@ -1846,8 +1842,7 @@ static int r8a66597_probe(struct platform_device *pdev)
 	int i;
 	unsigned long irq_trigger;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	reg = devm_ioremap_resource(&pdev->dev, res);
+	reg = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(reg))
 		return PTR_ERR(reg);
 
@@ -1969,13 +1964,14 @@ clean_up2:
 
 /*-------------------------------------------------------------------------*/
 static struct platform_driver r8a66597_driver = {
+	.probe =	r8a66597_probe,
 	.remove =	r8a66597_remove,
 	.driver		= {
-		.name =	(char *) udc_name,
+		.name =	udc_name,
 	},
 };
 
-module_platform_driver_probe(r8a66597_driver, r8a66597_probe);
+module_platform_driver(r8a66597_driver);
 
 MODULE_DESCRIPTION("R8A66597 USB gadget driver");
 MODULE_LICENSE("GPL");

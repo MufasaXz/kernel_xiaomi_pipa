@@ -18,14 +18,16 @@
 #include "callback.h"
 #include "internal.h"
 #include "nfs4session.h"
+#include "nfs4trace.h"
 
 #define CB_OP_TAGLEN_MAXSZ		(512)
 #define CB_OP_HDR_RES_MAXSZ		(2 * 4) // opcode, status
 #define CB_OP_GETATTR_BITMAP_MAXSZ	(4 * 4) // bitmap length, 3 bitmaps
 #define CB_OP_GETATTR_RES_MAXSZ		(CB_OP_HDR_RES_MAXSZ + \
 					 CB_OP_GETATTR_BITMAP_MAXSZ + \
-					 /* change, size, ctime, mtime */\
-					 (2 + 2 + 3 + 3) * 4)
+					 /* change, size, atime, ctime,
+					  * mtime, deleg_atime, deleg_mtime */\
+					 (2 + 2 + 3 + 3 + 3 + 3 + 3) * 4)
 #define CB_OP_RECALL_RES_MAXSZ		(CB_OP_HDR_RES_MAXSZ)
 
 #if defined(CONFIG_NFS_V4_1)
@@ -62,14 +64,13 @@ static __be32 nfs4_callback_null(struct svc_rqst *rqstp)
 	return htonl(NFS4_OK);
 }
 
-static int nfs4_decode_void(struct svc_rqst *rqstp, __be32 *p)
+/*
+ * svc_process_common() looks for an XDR encoder to know when
+ * not to drop a Reply.
+ */
+static bool nfs4_encode_void(struct svc_rqst *rqstp, struct xdr_stream *xdr)
 {
-	return xdr_argsize_check(rqstp, p);
-}
-
-static int nfs4_encode_void(struct svc_rqst *rqstp, __be32 *p)
-{
-	return xdr_ressize_check(rqstp, p);
+	return true;
 }
 
 static __be32 decode_string(struct xdr_stream *xdr, unsigned int *len,
@@ -117,7 +118,9 @@ static __be32 decode_bitmap(struct xdr_stream *xdr, uint32_t *bitmap)
 	if (likely(attrlen > 0))
 		bitmap[0] = ntohl(*p++);
 	if (attrlen > 1)
-		bitmap[1] = ntohl(*p);
+		bitmap[1] = ntohl(*p++);
+	if (attrlen > 2)
+		bitmap[2] = ntohl(*p);
 	return 0;
 }
 
@@ -447,7 +450,7 @@ static __be32 decode_recallany_args(struct svc_rqst *rqstp,
 				      void *argp)
 {
 	struct cb_recallanyargs *args = argp;
-	uint32_t bitmap[2];
+	uint32_t bitmap[3];
 	__be32 *p, status;
 
 	p = xdr_inline_decode(xdr, 4);
@@ -625,7 +628,7 @@ static __be32 encode_attr_size(struct xdr_stream *xdr, const uint32_t *bitmap, u
 	return 0;
 }
 
-static __be32 encode_attr_time(struct xdr_stream *xdr, const struct timespec *time)
+static __be32 encode_attr_time(struct xdr_stream *xdr, const struct timespec64 *time)
 {
 	__be32 *p;
 
@@ -637,16 +640,41 @@ static __be32 encode_attr_time(struct xdr_stream *xdr, const struct timespec *ti
 	return 0;
 }
 
-static __be32 encode_attr_ctime(struct xdr_stream *xdr, const uint32_t *bitmap, const struct timespec *time)
+static __be32 encode_attr_atime(struct xdr_stream *xdr, const uint32_t *bitmap, const struct timespec64 *time)
+{
+	if (!(bitmap[1] & FATTR4_WORD1_TIME_ACCESS))
+		return 0;
+	return encode_attr_time(xdr,time);
+}
+
+static __be32 encode_attr_ctime(struct xdr_stream *xdr, const uint32_t *bitmap, const struct timespec64 *time)
 {
 	if (!(bitmap[1] & FATTR4_WORD1_TIME_METADATA))
 		return 0;
 	return encode_attr_time(xdr,time);
 }
 
-static __be32 encode_attr_mtime(struct xdr_stream *xdr, const uint32_t *bitmap, const struct timespec *time)
+static __be32 encode_attr_mtime(struct xdr_stream *xdr, const uint32_t *bitmap, const struct timespec64 *time)
 {
 	if (!(bitmap[1] & FATTR4_WORD1_TIME_MODIFY))
+		return 0;
+	return encode_attr_time(xdr,time);
+}
+
+static __be32 encode_attr_delegatime(struct xdr_stream *xdr,
+				     const uint32_t *bitmap,
+				     const struct timespec64 *time)
+{
+	if (!(bitmap[2] & FATTR4_WORD2_TIME_DELEG_ACCESS))
+		return 0;
+	return encode_attr_time(xdr,time);
+}
+
+static __be32 encode_attr_delegmtime(struct xdr_stream *xdr,
+				     const uint32_t *bitmap,
+				     const struct timespec64 *time)
+{
+	if (!(bitmap[2] & FATTR4_WORD2_TIME_DELEG_MODIFY))
 		return 0;
 	return encode_attr_time(xdr,time);
 }
@@ -701,10 +729,19 @@ static __be32 encode_getattr_res(struct svc_rqst *rqstp, struct xdr_stream *xdr,
 	status = encode_attr_size(xdr, res->bitmap, res->size);
 	if (unlikely(status != 0))
 		goto out;
+	status = encode_attr_atime(xdr, res->bitmap, &res->atime);
+	if (unlikely(status != 0))
+		goto out;
 	status = encode_attr_ctime(xdr, res->bitmap, &res->ctime);
 	if (unlikely(status != 0))
 		goto out;
 	status = encode_attr_mtime(xdr, res->bitmap, &res->mtime);
+	if (unlikely(status != 0))
+		goto out;
+	status = encode_attr_delegatime(xdr, res->bitmap, &res->atime);
+	if (unlikely(status != 0))
+		goto out;
+	status = encode_attr_delegmtime(xdr, res->bitmap, &res->mtime);
 	*savep = htonl((unsigned int)((char *)xdr->p - (char *)(savep+1)));
 out:
 	return status;
@@ -861,17 +898,16 @@ preprocess_nfs4_op(unsigned int op_nr, struct callback_op **op)
 }
 
 static __be32 process_op(int nop, struct svc_rqst *rqstp,
-		struct xdr_stream *xdr_in, void *argp,
-		struct xdr_stream *xdr_out, void *resp,
-		struct cb_process_state *cps)
+			 struct cb_process_state *cps)
 {
+	struct xdr_stream *xdr_out = &rqstp->rq_res_stream;
 	struct callback_op *op = &callback_ops[0];
 	unsigned int op_nr;
 	__be32 status;
 	long maxlen;
 	__be32 res;
 
-	status = decode_op_hdr(xdr_in, &op_nr);
+	status = decode_op_hdr(&rqstp->rq_arg_stream, &op_nr);
 	if (unlikely(status))
 		return status;
 
@@ -901,9 +937,11 @@ static __be32 process_op(int nop, struct svc_rqst *rqstp,
 
 	maxlen = xdr_out->end - xdr_out->p;
 	if (maxlen > 0 && maxlen < PAGE_SIZE) {
-		status = op->decode_args(rqstp, xdr_in, argp);
+		status = op->decode_args(rqstp, &rqstp->rq_arg_stream,
+					 rqstp->rq_argp);
 		if (likely(status == 0))
-			status = op->process_op(argp, resp, cps);
+			status = op->process_op(rqstp->rq_argp, rqstp->rq_resp,
+						cps);
 	} else
 		status = htonl(NFS4ERR_RESOURCE);
 
@@ -912,7 +950,7 @@ encode_hdr:
 	if (unlikely(res))
 		return res;
 	if (op->encode_res != NULL && status == 0)
-		status = op->encode_res(rqstp, xdr_out, resp);
+		status = op->encode_res(rqstp, xdr_out, rqstp->rq_resp);
 	return status;
 }
 
@@ -923,45 +961,42 @@ static __be32 nfs4_callback_compound(struct svc_rqst *rqstp)
 {
 	struct cb_compound_hdr_arg hdr_arg = { 0 };
 	struct cb_compound_hdr_res hdr_res = { NULL };
-	struct xdr_stream xdr_in, xdr_out;
-	__be32 *p, status;
 	struct cb_process_state cps = {
 		.drc_status = 0,
 		.clp = NULL,
 		.net = SVC_NET(rqstp),
 	};
 	unsigned int nops = 0;
+	__be32 status;
 
-	xdr_init_decode(&xdr_in, &rqstp->rq_arg, rqstp->rq_arg.head[0].iov_base);
-
-	p = (__be32*)((char *)rqstp->rq_res.head[0].iov_base + rqstp->rq_res.head[0].iov_len);
-	xdr_init_encode(&xdr_out, &rqstp->rq_res, p);
-
-	status = decode_compound_hdr_arg(&xdr_in, &hdr_arg);
+	status = decode_compound_hdr_arg(&rqstp->rq_arg_stream, &hdr_arg);
 	if (status == htonl(NFS4ERR_RESOURCE))
 		return rpc_garbage_args;
 
 	if (hdr_arg.minorversion == 0) {
 		cps.clp = nfs4_find_client_ident(SVC_NET(rqstp), hdr_arg.cb_ident);
-		if (!cps.clp || !check_gss_callback_principal(cps.clp, rqstp)) {
-			if (cps.clp)
-				nfs_put_client(cps.clp);
+		if (!cps.clp) {
+			trace_nfs_cb_no_clp(rqstp->rq_xid, hdr_arg.cb_ident);
 			goto out_invalidcred;
 		}
+		if (!check_gss_callback_principal(cps.clp, rqstp)) {
+			trace_nfs_cb_badprinc(rqstp->rq_xid, hdr_arg.cb_ident);
+			nfs_put_client(cps.clp);
+			goto out_invalidcred;
+		}
+		svc_xprt_set_valid(rqstp->rq_xprt);
 	}
 
 	cps.minorversion = hdr_arg.minorversion;
 	hdr_res.taglen = hdr_arg.taglen;
 	hdr_res.tag = hdr_arg.tag;
-	if (encode_compound_hdr_res(&xdr_out, &hdr_res) != 0) {
+	if (encode_compound_hdr_res(&rqstp->rq_res_stream, &hdr_res) != 0) {
 		if (cps.clp)
 			nfs_put_client(cps.clp);
 		return rpc_system_err;
 	}
 	while (status == 0 && nops != hdr_arg.nops) {
-		status = process_op(nops, rqstp, &xdr_in,
-				    rqstp->rq_argp, &xdr_out, rqstp->rq_resp,
-				    &cps);
+		status = process_op(nops, rqstp, &cps);
 		nops++;
 	}
 
@@ -972,6 +1007,11 @@ static __be32 nfs4_callback_compound(struct svc_rqst *rqstp)
 		nops--;
 	}
 
+	if (svc_is_backchannel(rqstp) && cps.clp) {
+		rqstp->bc_to_initval = cps.clp->cl_rpcclient->cl_timeout->to_initval;
+		rqstp->bc_to_retries = cps.clp->cl_rpcclient->cl_timeout->to_retries;
+	}
+
 	*hdr_res.status = status;
 	*hdr_res.nops = htonl(nops);
 	nfs4_cb_free_slot(&cps);
@@ -980,7 +1020,17 @@ static __be32 nfs4_callback_compound(struct svc_rqst *rqstp)
 
 out_invalidcred:
 	pr_warn_ratelimited("NFS: NFSv4 callback contains invalid cred\n");
-	return svc_return_autherr(rqstp, rpc_autherr_badcred);
+	rqstp->rq_auth_stat = rpc_autherr_badcred;
+	return rpc_success;
+}
+
+static int
+nfs_callback_dispatch(struct svc_rqst *rqstp)
+{
+	const struct svc_procedure *procp = rqstp->rq_procinfo;
+
+	*rqstp->rq_accept_statp = procp->pc_func(rqstp);
+	return 1;
 }
 
 /*
@@ -1049,39 +1099,43 @@ static struct callback_op callback_ops[] = {
 static const struct svc_procedure nfs4_callback_procedures1[] = {
 	[CB_NULL] = {
 		.pc_func = nfs4_callback_null,
-		.pc_decode = nfs4_decode_void,
 		.pc_encode = nfs4_encode_void,
 		.pc_xdrressize = 1,
+		.pc_name = "NULL",
 	},
 	[CB_COMPOUND] = {
 		.pc_func = nfs4_callback_compound,
 		.pc_encode = nfs4_encode_void,
 		.pc_argsize = 256,
+		.pc_argzero = 256,
 		.pc_ressize = 256,
 		.pc_xdrressize = NFS4_CALLBACK_BUFSIZE,
+		.pc_name = "COMPOUND",
 	}
 };
 
-static unsigned int nfs4_callback_count1[ARRAY_SIZE(nfs4_callback_procedures1)];
+static DEFINE_PER_CPU_ALIGNED(unsigned long,
+			      nfs4_callback_count1[ARRAY_SIZE(nfs4_callback_procedures1)]);
 const struct svc_version nfs4_callback_version1 = {
 	.vs_vers = 1,
 	.vs_nproc = ARRAY_SIZE(nfs4_callback_procedures1),
 	.vs_proc = nfs4_callback_procedures1,
 	.vs_count = nfs4_callback_count1,
 	.vs_xdrsize = NFS4_CALLBACK_XDRSIZE,
-	.vs_dispatch = NULL,
+	.vs_dispatch = nfs_callback_dispatch,
 	.vs_hidden = true,
 	.vs_need_cong_ctrl = true,
 };
 
-static unsigned int nfs4_callback_count4[ARRAY_SIZE(nfs4_callback_procedures1)];
+static DEFINE_PER_CPU_ALIGNED(unsigned long,
+			      nfs4_callback_count4[ARRAY_SIZE(nfs4_callback_procedures1)]);
 const struct svc_version nfs4_callback_version4 = {
 	.vs_vers = 4,
 	.vs_nproc = ARRAY_SIZE(nfs4_callback_procedures1),
 	.vs_proc = nfs4_callback_procedures1,
 	.vs_count = nfs4_callback_count4,
 	.vs_xdrsize = NFS4_CALLBACK_XDRSIZE,
-	.vs_dispatch = NULL,
+	.vs_dispatch = nfs_callback_dispatch,
 	.vs_hidden = true,
 	.vs_need_cong_ctrl = true,
 };

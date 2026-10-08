@@ -9,8 +9,10 @@
 
 #include <linux/backlight.h>
 #include <linux/kernel.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mfd/rave-sp.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 
 #define	RAVE_SP_BACKLIGHT_LCD_EN	BIT(7)
@@ -19,7 +21,7 @@ static int rave_sp_backlight_update_status(struct backlight_device *bd)
 {
 	const struct backlight_properties *p = &bd->props;
 	const u8 intensity =
-		(p->power == FB_BLANK_UNBLANK) ? p->brightness : 0;
+		(p->power == BACKLIGHT_POWER_ON) ? p->brightness : 0;
 	struct rave_sp *sp = dev_get_drvdata(&bd->dev);
 	u8 cmd[] = {
 		[0] = RAVE_SP_CMD_SET_BACKLIGHT,
@@ -48,14 +50,20 @@ static int rave_sp_backlight_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct backlight_device *bd;
 
-	bd = devm_backlight_device_register(dev, pdev->name, dev->parent,
+	bd = devm_backlight_device_register(dev, pdev->name, dev,
 					    dev_get_drvdata(dev->parent),
 					    &rave_sp_backlight_ops,
 					    &rave_sp_backlight_props);
 	if (IS_ERR(bd))
 		return PTR_ERR(bd);
 
-	backlight_update_status(bd);
+	/*
+	 * If there is a phandle pointing to the device node we can
+	 * assume that another device will manage the status changes.
+	 * If not we make sure the backlight is in a consistent state.
+	 */
+	if (!dev->of_node->phandle)
+		backlight_update_status(bd);
 
 	return 0;
 }

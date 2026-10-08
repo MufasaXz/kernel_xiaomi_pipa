@@ -48,7 +48,6 @@
 #include <linux/semaphore.h>
 
 #include <asm/page.h>
-#include <linux/pgtable.h>
 #include <asm/xen/hypervisor.h>
 #include <asm/hypervisor.h>
 #include <xen/xenbus.h>
@@ -93,12 +92,12 @@ static int backend_bus_id(char bus_id[XEN_BUS_ID_SIZE], const char *nodename)
 	return 0;
 }
 
-static int xenbus_uevent_backend(struct device *dev,
+static int xenbus_uevent_backend(const struct device *dev,
 				 struct kobj_uevent_env *env)
 {
-	struct xenbus_device *xdev;
-	struct xenbus_driver *drv;
-	struct xen_bus_type *bus;
+	const struct xenbus_device *xdev;
+	const struct xenbus_driver *drv;
+	const struct xen_bus_type *bus;
 
 	DPRINTK("");
 
@@ -206,7 +205,6 @@ static struct xen_bus_type xenbus_backend = {
 		.uevent		= xenbus_uevent_backend,
 		.probe		= xenbus_dev_probe,
 		.remove		= xenbus_dev_remove,
-		.shutdown	= xenbus_dev_shutdown,
 		.dev_groups	= xenbus_dev_groups,
 	},
 };
@@ -286,13 +284,9 @@ static unsigned long backend_shrink_memory_count(struct shrinker *shrinker,
 	return 0;
 }
 
-static struct shrinker backend_memory_shrinker = {
-	.count_objects = backend_shrink_memory_count,
-	.seeks = DEFAULT_SEEKS,
-};
-
 static int __init xenbus_probe_backend_init(void)
 {
+	struct shrinker *backend_memory_shrinker;
 	static struct notifier_block xenstore_notifier = {
 		.notifier_call = backend_probe_and_watch
 	};
@@ -307,8 +301,15 @@ static int __init xenbus_probe_backend_init(void)
 
 	register_xenstore_notifier(&xenstore_notifier);
 
-	if (register_shrinker(&backend_memory_shrinker))
-		pr_warn("shrinker registration failed\n");
+	backend_memory_shrinker = shrinker_alloc(0, "xen-backend");
+	if (!backend_memory_shrinker) {
+		pr_warn("shrinker allocation failed\n");
+		return 0;
+	}
+
+	backend_memory_shrinker->count_objects = backend_shrink_memory_count;
+
+	shrinker_register(backend_memory_shrinker);
 
 	return 0;
 }

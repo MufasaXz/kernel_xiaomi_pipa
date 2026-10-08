@@ -1,14 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *      uvc_entity.c  --  USB Video Class driver
  *
  *      Copyright (C) 2005-2011
  *          Laurent Pinchart (laurent.pinchart@ideasonboard.com)
- *
- *      This program is free software; you can redistribute it and/or modify
- *      it under the terms of the GNU General Public License as published by
- *      the Free Software Foundation; either version 2 of the License, or
- *      (at your option) any later version.
- *
  */
 
 #include <linux/kernel.h>
@@ -81,7 +76,7 @@ static int uvc_mc_init_entity(struct uvc_video_chain *chain,
 		u32 function;
 
 		v4l2_subdev_init(&entity->subdev, &uvc_subdev_ops);
-		strlcpy(entity->subdev.name, entity->name,
+		strscpy(entity->subdev.name, entity->name,
 			sizeof(entity->subdev.name));
 
 		switch (UVC_ENTITY_TYPE(entity)) {
@@ -110,6 +105,7 @@ static int uvc_mc_init_entity(struct uvc_video_chain *chain,
 		case UVC_OTT_DISPLAY:
 		case UVC_OTT_MEDIA_TRANSPORT_OUTPUT:
 		case UVC_EXTERNAL_VENDOR_SPECIFIC:
+		case UVC_EXT_GPIO_UNIT:
 		default:
 			function = MEDIA_ENT_F_V4L2_SUBDEV_UNKNOWN;
 			break;
@@ -144,8 +140,9 @@ int uvc_mc_register_entities(struct uvc_video_chain *chain)
 	list_for_each_entry(entity, &chain->entities, chain) {
 		ret = uvc_mc_init_entity(chain, entity);
 		if (ret < 0) {
-			uvc_printk(KERN_INFO, "Failed to initialize entity for "
-				   "entity %u\n", entity->id);
+			dev_info(&chain->dev->intf->dev,
+				 "Failed to initialize entity for entity %u\n",
+				 entity->id);
 			return ret;
 		}
 	}
@@ -153,8 +150,9 @@ int uvc_mc_register_entities(struct uvc_video_chain *chain)
 	list_for_each_entry(entity, &chain->entities, chain) {
 		ret = uvc_mc_create_links(chain, entity);
 		if (ret < 0) {
-			uvc_printk(KERN_INFO, "Failed to create links for "
-				   "entity %u\n", entity->id);
+			dev_info(&chain->dev->intf->dev,
+				 "Failed to create links for entity %u\n",
+				 entity->id);
 			return ret;
 		}
 	}

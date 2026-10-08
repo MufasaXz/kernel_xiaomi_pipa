@@ -11,9 +11,14 @@
 
 static const struct flag_info flag_array[] = {
 	{
-		.mask	= _PAGE_PRIVILEGED,
-		.val	= 0,
-		.set	= "user",
+#ifdef CONFIG_PPC_16K_PAGES
+		.mask	= _PAGE_HUGE,
+		.val	= _PAGE_HUGE,
+#else
+		.mask	= _PAGE_SPS,
+		.val	= _PAGE_SPS,
+#endif
+		.set	= "huge",
 		.clear	= "    ",
 	}, {
 		.mask	= _PAGE_RO | _PAGE_NA,
@@ -64,9 +69,11 @@ static const struct flag_info flag_array[] = {
 	}
 };
 
-struct pgtable_level pg_level[5] = {
-	{
-	}, { /* pgd */
+struct ptdump_pg_level pg_level[5] = {
+	{ /* pgd */
+		.flag	= flag_array,
+		.num	= ARRAY_SIZE(flag_array),
+	}, { /* p4d */
 		.flag	= flag_array,
 		.num	= ARRAY_SIZE(flag_array),
 	}, { /* pud */

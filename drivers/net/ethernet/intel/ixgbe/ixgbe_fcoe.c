@@ -5,6 +5,7 @@
 #include <linux/if_ether.h>
 #include <linux/gfp.h>
 #include <linux/if_vlan.h>
+#include <generated/utsrelease.h>
 #include <scsi/scsi_cmnd.h>
 #include <scsi/scsi_device.h>
 #include <scsi/fc/fc_fs.h>
@@ -55,7 +56,7 @@ int ixgbe_fcoe_ddp_put(struct net_device *netdev, u16 xid)
 	if (xid >= netdev->fcoe_ddp_xid)
 		return 0;
 
-	adapter = netdev_priv(netdev);
+	adapter = ixgbe_from_netdev(netdev);
 	fcoe = &adapter->fcoe;
 	ddp = &fcoe->ddp[xid];
 	if (!ddp->udl)
@@ -152,7 +153,7 @@ static int ixgbe_fcoe_ddp_setup(struct net_device *netdev, u16 xid,
 	if (!netdev || !sgl)
 		return 0;
 
-	adapter = netdev_priv(netdev);
+	adapter = ixgbe_from_netdev(netdev);
 	if (xid >= netdev->fcoe_ddp_xid) {
 		e_warn(drv, "xid=0x%x out-of-range\n", xid);
 		return 0;
@@ -443,7 +444,7 @@ int ixgbe_fcoe_ddp(struct ixgbe_adapter *adapter,
 		ddp->err = (__force u32)ddp_err;
 		ddp->sgl = NULL;
 		ddp->sgc = 0;
-		/* fall through */
+		fallthrough;
 	/* if DDP length is present pass it through to ULD */
 	case cpu_to_le32(IXGBE_RXDADV_STAT_FCSTAT_NODDP):
 		/* update length of DDPed data */
@@ -669,8 +670,8 @@ void ixgbe_configure_fcoe(struct ixgbe_adapter *adapter)
 			int fcoe_i_h = fcoe->offset + ((i + fcreta_size) %
 							fcoe->indices);
 			fcoe_q_h = adapter->rx_ring[fcoe_i_h]->reg_idx;
-			fcoe_q_h = (fcoe_q_h << IXGBE_FCRETA_ENTRY_HIGH_SHIFT) &
-				   IXGBE_FCRETA_ENTRY_HIGH_MASK;
+			fcoe_q_h = FIELD_PREP(IXGBE_FCRETA_ENTRY_HIGH_MASK,
+					      fcoe_q_h);
 		}
 
 		fcoe_i = fcoe->offset + (i % fcoe->indices);
@@ -743,7 +744,7 @@ void ixgbe_free_fcoe_ddp_resources(struct ixgbe_adapter *adapter)
  * ixgbe_setup_fcoe_ddp_resources - setup all fcoe ddp context resources
  * @adapter: ixgbe adapter
  *
- * Sets up ddp context resouces
+ * Sets up ddp context resources
  *
  * Returns : 0 indicates success or -EINVAL on failure
  */
@@ -833,7 +834,7 @@ static void ixgbe_fcoe_ddp_disable(struct ixgbe_adapter *adapter)
  */
 int ixgbe_fcoe_enable(struct net_device *netdev)
 {
-	struct ixgbe_adapter *adapter = netdev_priv(netdev);
+	struct ixgbe_adapter *adapter = ixgbe_from_netdev(netdev);
 	struct ixgbe_fcoe *fcoe = &adapter->fcoe;
 
 	atomic_inc(&fcoe->refcnt);
@@ -857,7 +858,7 @@ int ixgbe_fcoe_enable(struct net_device *netdev)
 
 	/* enable FCoE and notify stack */
 	adapter->flags |= IXGBE_FLAG_FCOE_ENABLED;
-	netdev->features |= NETIF_F_FCOE_MTU;
+	netdev->fcoe_mtu = true;
 	netdev_features_change(netdev);
 
 	/* release existing queues and reallocate them */
@@ -880,7 +881,7 @@ int ixgbe_fcoe_enable(struct net_device *netdev)
  */
 int ixgbe_fcoe_disable(struct net_device *netdev)
 {
-	struct ixgbe_adapter *adapter = netdev_priv(netdev);
+	struct ixgbe_adapter *adapter = ixgbe_from_netdev(netdev);
 
 	if (!atomic_dec_and_test(&adapter->fcoe.refcnt))
 		return -EINVAL;
@@ -897,7 +898,7 @@ int ixgbe_fcoe_disable(struct net_device *netdev)
 
 	/* disable FCoE and notify stack */
 	adapter->flags &= ~IXGBE_FLAG_FCOE_ENABLED;
-	netdev->features &= ~NETIF_F_FCOE_MTU;
+	netdev->fcoe_mtu = false;
 
 	netdev_features_change(netdev);
 
@@ -926,7 +927,7 @@ int ixgbe_fcoe_disable(struct net_device *netdev)
 int ixgbe_fcoe_get_wwn(struct net_device *netdev, u64 *wwn, int type)
 {
 	u16 prefix = 0xffff;
-	struct ixgbe_adapter *adapter = netdev_priv(netdev);
+	struct ixgbe_adapter *adapter = ixgbe_from_netdev(netdev);
 	struct ixgbe_mac_info *mac = &adapter->hw.mac;
 
 	switch (type) {
@@ -966,10 +967,9 @@ int ixgbe_fcoe_get_wwn(struct net_device *netdev, u64 *wwn, int type)
 int ixgbe_fcoe_get_hbainfo(struct net_device *netdev,
 			   struct netdev_fcoe_hbainfo *info)
 {
-	struct ixgbe_adapter *adapter = netdev_priv(netdev);
+	struct ixgbe_adapter *adapter = ixgbe_from_netdev(netdev);
 	struct ixgbe_hw *hw = &adapter->hw;
-	int i, pos;
-	u8 buf[8];
+	u64 dsn;
 
 	if (!info)
 		return -EINVAL;
@@ -985,17 +985,11 @@ int ixgbe_fcoe_get_hbainfo(struct net_device *netdev,
 	/* Serial Number */
 
 	/* Get the PCI-e Device Serial Number Capability */
-	pos = pci_find_ext_capability(adapter->pdev, PCI_EXT_CAP_ID_DSN);
-	if (pos) {
-		pos += 4;
-		for (i = 0; i < 8; i++)
-			pci_read_config_byte(adapter->pdev, pos + i, &buf[i]);
-
+	dsn = pci_get_dsn(adapter->pdev);
+	if (dsn)
 		snprintf(info->serial_number, sizeof(info->serial_number),
-			 "%02X%02X%02X%02X%02X%02X%02X%02X",
-			 buf[7], buf[6], buf[5], buf[4],
-			 buf[3], buf[2], buf[1], buf[0]);
-	} else
+			 "%016llX", dsn);
+	else
 		snprintf(info->serial_number, sizeof(info->serial_number),
 			 "Unknown");
 
@@ -1008,9 +1002,9 @@ int ixgbe_fcoe_get_hbainfo(struct net_device *netdev,
 		 sizeof(info->driver_version),
 		 "%s v%s",
 		 ixgbe_driver_name,
-		 ixgbe_driver_version);
+		 UTS_RELEASE);
 	/* Firmware Version */
-	strlcpy(info->firmware_version, adapter->eeprom_id,
+	strscpy(info->firmware_version, adapter->eeprom_id,
 		sizeof(info->firmware_version));
 
 	/* Model */

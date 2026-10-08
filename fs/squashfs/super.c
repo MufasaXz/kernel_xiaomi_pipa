@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Squashfs - a compressed read only filesystem for Linux
  *
  * Copyright (c) 2002, 2003, 2004, 2005, 2006, 2007, 2008
  * Phillip Lougher <phillip@squashfs.org.uk>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2,
- * or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * super.c
  */
@@ -29,11 +16,14 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/blkdev.h>
 #include <linux/fs.h>
 #include <linux/fs_context.h>
+#include <linux/fs_parser.h>
 #include <linux/vfs.h>
 #include <linux/slab.h>
 #include <linux/mutex.h>
+#include <linux/seq_file.h>
 #include <linux/pagemap.h>
 #include <linux/init.h>
 #include <linux/module.h>
@@ -49,6 +39,115 @@
 
 static struct file_system_type squashfs_fs_type;
 static const struct super_operations squashfs_super_ops;
+
+enum Opt_errors {
+	Opt_errors_continue,
+	Opt_errors_panic,
+};
+
+enum squashfs_param {
+	Opt_errors,
+	Opt_threads,
+};
+
+struct squashfs_mount_opts {
+	enum Opt_errors errors;
+	const struct squashfs_decompressor_thread_ops *thread_ops;
+	int thread_num;
+};
+
+static const struct constant_table squashfs_param_errors[] = {
+	{"continue",   Opt_errors_continue },
+	{"panic",      Opt_errors_panic },
+	{}
+};
+
+static const struct fs_parameter_spec squashfs_fs_parameters[] = {
+	fsparam_enum("errors", Opt_errors, squashfs_param_errors),
+	fsparam_string("threads", Opt_threads),
+	{}
+};
+
+
+static int squashfs_parse_param_threads_str(const char *str, struct squashfs_mount_opts *opts)
+{
+#ifdef CONFIG_SQUASHFS_CHOICE_DECOMP_BY_MOUNT
+	if (strcmp(str, "single") == 0) {
+		opts->thread_ops = &squashfs_decompressor_single;
+		return 0;
+	}
+	if (strcmp(str, "multi") == 0) {
+		opts->thread_ops = &squashfs_decompressor_multi;
+		return 0;
+	}
+	if (strcmp(str, "percpu") == 0) {
+		opts->thread_ops = &squashfs_decompressor_percpu;
+		return 0;
+	}
+#endif
+	return -EINVAL;
+}
+
+static int squashfs_parse_param_threads_num(const char *str, struct squashfs_mount_opts *opts)
+{
+#ifdef CONFIG_SQUASHFS_MOUNT_DECOMP_THREADS
+	int ret;
+	unsigned long num;
+
+	ret = kstrtoul(str, 0, &num);
+	if (ret != 0)
+		return -EINVAL;
+	if (num > 1) {
+		opts->thread_ops = &squashfs_decompressor_multi;
+		if (num > opts->thread_ops->max_decompressors())
+			return -EINVAL;
+		opts->thread_num = (int)num;
+		return 0;
+	}
+#ifdef CONFIG_SQUASHFS_DECOMP_SINGLE
+	if (num == 1) {
+		opts->thread_ops = &squashfs_decompressor_single;
+		opts->thread_num = 1;
+		return 0;
+	}
+#endif
+#endif /* !CONFIG_SQUASHFS_MOUNT_DECOMP_THREADS */
+	return -EINVAL;
+}
+
+static int squashfs_parse_param_threads(const char *str, struct squashfs_mount_opts *opts)
+{
+	int ret = squashfs_parse_param_threads_str(str, opts);
+
+	if (ret == 0)
+		return ret;
+	return squashfs_parse_param_threads_num(str, opts);
+}
+
+static int squashfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
+{
+	struct squashfs_mount_opts *opts = fc->fs_private;
+	struct fs_parse_result result;
+	int opt;
+
+	opt = fs_parse(fc, squashfs_fs_parameters, param, &result);
+	if (opt < 0)
+		return opt;
+
+	switch (opt) {
+	case Opt_errors:
+		opts->errors = result.uint_32;
+		break;
+	case Opt_threads:
+		if (squashfs_parse_param_threads(param->string, opts) != 0)
+			return -EINVAL;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
 
 static const struct squashfs_decompressor *supported_squashfs_filesystem(
 	struct fs_context *fc,
@@ -80,6 +179,7 @@ static const struct squashfs_decompressor *supported_squashfs_filesystem(
 
 static int squashfs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
+	struct squashfs_mount_opts *opts = fc->fs_private;
 	struct squashfs_sb_info *msblk;
 	struct squashfs_super_block *sblk = NULL;
 	struct inode *root;
@@ -92,7 +192,7 @@ static int squashfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	TRACE("Entered squashfs_fill_superblock\n");
 
 	if (!devblksize) {
-		ERROR("unable to set blocksize\n");
+		errorf(fc, "squashfs: unable to set blocksize\n");
 		return -EINVAL;
 	}
 
@@ -102,6 +202,9 @@ static int squashfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		return -ENOMEM;
 	}
 	msblk = sb->s_fs_info;
+	msblk->thread_ops = opts->thread_ops;
+
+	msblk->panic_on_errors = (opts->errors == Opt_errors_panic);
 
 	msblk->devblksize = devblksize;
 	msblk->devblksize_log2 = ffz(~msblk->devblksize);
@@ -135,6 +238,12 @@ static int squashfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto failed_mount;
 	}
 
+	if (opts->thread_num == 0) {
+		msblk->max_thread_num = msblk->thread_ops->max_decompressors();
+	} else {
+		msblk->max_thread_num = opts->thread_num;
+	}
+
 	/* Check the MAJOR & MINOR versions and lookup compression type */
 	msblk->decompressor = supported_squashfs_filesystem(
 			fc,
@@ -147,8 +256,8 @@ static int squashfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	/* Check the filesystem does not extend beyond the end of the
 	   block device */
 	msblk->bytes_used = le64_to_cpu(sblk->bytes_used);
-	if (msblk->bytes_used < 0 || msblk->bytes_used >
-			i_size_read(sb->s_bdev->bd_inode))
+	if (msblk->bytes_used < 0 ||
+	    msblk->bytes_used > bdev_nr_bytes(sb->s_bdev))
 		goto failed_mount;
 
 	/* Check block size for sanity */
@@ -205,22 +314,40 @@ static int squashfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		(u64) le64_to_cpu(sblk->id_table_start));
 
 	sb->s_maxbytes = MAX_LFS_FILESIZE;
+	sb->s_time_min = 0;
+	sb->s_time_max = U32_MAX;
 	sb->s_flags |= SB_RDONLY;
 	sb->s_op = &squashfs_super_ops;
 
-	err = -ENOMEM;
-
 	msblk->block_cache = squashfs_cache_init("metadata",
 			SQUASHFS_CACHED_BLKS, SQUASHFS_METADATA_SIZE);
-	if (msblk->block_cache == NULL)
+	if (IS_ERR(msblk->block_cache)) {
+		err = PTR_ERR(msblk->block_cache);
 		goto failed_mount;
+	}
 
 	/* Allocate read_page block */
 	msblk->read_page = squashfs_cache_init("data",
-		squashfs_max_decompressors(), msblk->block_size);
-	if (msblk->read_page == NULL) {
+		SQUASHFS_READ_PAGES, msblk->block_size);
+	if (IS_ERR(msblk->read_page)) {
 		errorf(fc, "Failed to allocate read_page block");
+		err = PTR_ERR(msblk->read_page);
 		goto failed_mount;
+	}
+
+	if (msblk->devblksize == PAGE_SIZE) {
+		struct inode *cache = new_inode(sb);
+
+		if (cache == NULL) {
+			err = -ENOMEM;
+			goto failed_mount;
+		}
+
+		set_nlink(cache, 1);
+		cache->i_size = OFFSET_MAX;
+		mapping_set_gfp_mask(cache->i_mapping, GFP_NOFS);
+
+		msblk->cache_mapping = cache->i_mapping;
 	}
 
 	msblk->stream = squashfs_decompressor_setup(sb, flags);
@@ -286,9 +413,9 @@ handle_fragments:
 		goto check_directory_table;
 
 	msblk->fragment_cache = squashfs_cache_init("fragment",
-		SQUASHFS_CACHED_FRAGMENTS, msblk->block_size);
-	if (msblk->fragment_cache == NULL) {
-		err = -ENOMEM;
+		min(SQUASHFS_CACHED_FRAGMENTS, fragments), msblk->block_size);
+	if (IS_ERR(msblk->fragment_cache)) {
+		err = PTR_ERR(msblk->fragment_cache);
 		goto failed_mount;
 	}
 
@@ -348,7 +475,9 @@ failed_mount:
 	squashfs_cache_delete(msblk->block_cache);
 	squashfs_cache_delete(msblk->fragment_cache);
 	squashfs_cache_delete(msblk->read_page);
-	squashfs_decompressor_destroy(msblk);
+	if (msblk->cache_mapping)
+		iput(msblk->cache_mapping->host);
+	msblk->thread_ops->destroy(msblk);
 	kfree(msblk->inode_lookup_table);
 	kfree(msblk->fragment_index);
 	kfree(msblk->id_table);
@@ -366,18 +495,75 @@ static int squashfs_get_tree(struct fs_context *fc)
 
 static int squashfs_reconfigure(struct fs_context *fc)
 {
+	struct super_block *sb = fc->root->d_sb;
+	struct squashfs_sb_info *msblk = sb->s_fs_info;
+	struct squashfs_mount_opts *opts = fc->fs_private;
+
 	sync_filesystem(fc->root->d_sb);
 	fc->sb_flags |= SB_RDONLY;
+
+	msblk->panic_on_errors = (opts->errors == Opt_errors_panic);
+
 	return 0;
+}
+
+static void squashfs_free_fs_context(struct fs_context *fc)
+{
+	kfree(fc->fs_private);
 }
 
 static const struct fs_context_operations squashfs_context_ops = {
 	.get_tree	= squashfs_get_tree,
+	.free		= squashfs_free_fs_context,
+	.parse_param	= squashfs_parse_param,
 	.reconfigure	= squashfs_reconfigure,
 };
 
+static int squashfs_show_options(struct seq_file *s, struct dentry *root)
+{
+	struct super_block *sb = root->d_sb;
+	struct squashfs_sb_info *msblk = sb->s_fs_info;
+
+	if (msblk->panic_on_errors)
+		seq_puts(s, ",errors=panic");
+	else
+		seq_puts(s, ",errors=continue");
+
+#ifdef CONFIG_SQUASHFS_CHOICE_DECOMP_BY_MOUNT
+	if (msblk->thread_ops == &squashfs_decompressor_single) {
+		seq_puts(s, ",threads=single");
+		return 0;
+	}
+	if (msblk->thread_ops == &squashfs_decompressor_percpu) {
+		seq_puts(s, ",threads=percpu");
+		return 0;
+	}
+#endif
+#ifdef CONFIG_SQUASHFS_MOUNT_DECOMP_THREADS
+	seq_printf(s, ",threads=%d", msblk->max_thread_num);
+#endif
+	return 0;
+}
+
 static int squashfs_init_fs_context(struct fs_context *fc)
 {
+	struct squashfs_mount_opts *opts;
+
+	opts = kzalloc(sizeof(*opts), GFP_KERNEL);
+	if (!opts)
+		return -ENOMEM;
+
+#ifdef CONFIG_SQUASHFS_DECOMP_SINGLE
+	opts->thread_ops = &squashfs_decompressor_single;
+#elif defined(CONFIG_SQUASHFS_DECOMP_MULTI)
+	opts->thread_ops = &squashfs_decompressor_multi;
+#elif defined(CONFIG_SQUASHFS_DECOMP_MULTI_PERCPU)
+	opts->thread_ops = &squashfs_decompressor_percpu;
+#else
+#error "fail: unknown squashfs decompression thread mode?"
+#endif
+	opts->thread_num = 0;
+	fc->fs_private = opts;
 	fc->ops = &squashfs_context_ops;
 	return 0;
 }
@@ -396,8 +582,7 @@ static int squashfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_files = msblk->inodes;
 	buf->f_ffree = 0;
 	buf->f_namelen = SQUASHFS_NAME_LEN;
-	buf->f_fsid.val[0] = (u32)id;
-	buf->f_fsid.val[1] = (u32)(id >> 32);
+	buf->f_fsid = u64_to_fsid(id);
 
 	return 0;
 }
@@ -410,7 +595,9 @@ static void squashfs_put_super(struct super_block *sb)
 		squashfs_cache_delete(sbi->block_cache);
 		squashfs_cache_delete(sbi->fragment_cache);
 		squashfs_cache_delete(sbi->read_page);
-		squashfs_decompressor_destroy(sbi);
+		if (sbi->cache_mapping)
+			iput(sbi->cache_mapping->host);
+		sbi->thread_ops->destroy(sbi);
 		kfree(sbi->id_table);
 		kfree(sbi->fragment_index);
 		kfree(sbi->meta_index);
@@ -483,38 +670,33 @@ static void __exit exit_squashfs_fs(void)
 static struct inode *squashfs_alloc_inode(struct super_block *sb)
 {
 	struct squashfs_inode_info *ei =
-		kmem_cache_alloc(squashfs_inode_cachep, GFP_KERNEL);
+		alloc_inode_sb(sb, squashfs_inode_cachep, GFP_KERNEL);
 
 	return ei ? &ei->vfs_inode : NULL;
 }
 
 
-static void squashfs_i_callback(struct rcu_head *head)
+static void squashfs_free_inode(struct inode *inode)
 {
-	struct inode *inode = container_of(head, struct inode, i_rcu);
 	kmem_cache_free(squashfs_inode_cachep, squashfs_i(inode));
 }
-
-static void squashfs_destroy_inode(struct inode *inode)
-{
-	call_rcu(&inode->i_rcu, squashfs_i_callback);
-}
-
 
 static struct file_system_type squashfs_fs_type = {
 	.owner = THIS_MODULE,
 	.name = "squashfs",
 	.init_fs_context = squashfs_init_fs_context,
+	.parameters = squashfs_fs_parameters,
 	.kill_sb = kill_block_super,
-	.fs_flags = FS_REQUIRES_DEV
+	.fs_flags = FS_REQUIRES_DEV | FS_ALLOW_IDMAP,
 };
 MODULE_ALIAS_FS("squashfs");
 
 static const struct super_operations squashfs_super_ops = {
 	.alloc_inode = squashfs_alloc_inode,
-	.destroy_inode = squashfs_destroy_inode,
+	.free_inode = squashfs_free_inode,
 	.statfs = squashfs_statfs,
 	.put_super = squashfs_put_super,
+	.show_options = squashfs_show_options,
 };
 
 module_init(init_squashfs_fs);

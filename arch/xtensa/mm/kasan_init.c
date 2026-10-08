@@ -8,20 +8,17 @@
  * Copyright (C) 2017 Cadence Design Systems Inc.
  */
 
-#include <linux/bootmem.h>
+#include <linux/memblock.h>
 #include <linux/init_task.h>
 #include <linux/kasan.h>
 #include <linux/kernel.h>
-#include <linux/memblock.h>
 #include <asm/initialize_mmu.h>
 #include <asm/tlbflush.h>
-#include <asm/traps.h>
 
 void __init kasan_early_init(void)
 {
 	unsigned long vaddr = KASAN_SHADOW_START;
-	pgd_t *pgd = pgd_offset_k(vaddr);
-	pmd_t *pmd = pmd_offset(pgd, vaddr);
+	pmd_t *pmd = pmd_off_k(vaddr);
 	int i;
 
 	for (i = 0; i < PTRS_PER_PTE; ++i)
@@ -33,7 +30,6 @@ void __init kasan_early_init(void)
 		BUG_ON(!pmd_none(*pmd));
 		set_pmd(pmd, __pmd((unsigned long)kasan_early_shadow_pte));
 	}
-	early_trap_init();
 }
 
 static void __init populate(void *start, void *end)
@@ -42,9 +38,8 @@ static void __init populate(void *start, void *end)
 	unsigned long n_pmds = n_pages / PTRS_PER_PTE;
 	unsigned long i, j;
 	unsigned long vaddr = (unsigned long)start;
-	pgd_t *pgd = pgd_offset_k(vaddr);
-	pmd_t *pmd = pmd_offset(pgd, vaddr);
-	pte_t *pte = memblock_virt_alloc(n_pages * sizeof(pte_t), PAGE_SIZE);
+	pmd_t *pmd = pmd_off_k(vaddr);
+	pte_t *pte = memblock_alloc_or_panic(n_pages * sizeof(pte_t), PAGE_SIZE);
 
 	pr_debug("%s: %p - %p\n", __func__, start, end);
 
@@ -53,8 +48,12 @@ static void __init populate(void *start, void *end)
 
 		for (k = 0; k < PTRS_PER_PTE; ++k, ++j) {
 			phys_addr_t phys =
-				memblock_alloc_base(PAGE_SIZE, PAGE_SIZE,
-						    MEMBLOCK_ALLOC_ANYWHERE);
+				memblock_phys_alloc_range(PAGE_SIZE, PAGE_SIZE,
+							  0,
+							  MEMBLOCK_ALLOC_ANYWHERE);
+
+			if (!phys)
+				panic("Failed to allocate page table page\n");
 
 			set_pte(pte + j, pfn_pte(PHYS_PFN(phys), PAGE_KERNEL));
 		}
@@ -95,5 +94,5 @@ void __init kasan_init(void)
 
 	/* At this point kasan is fully initialized. Enable error messages. */
 	current->kasan_depth = 0;
-	pr_info("KernelAddressSanitizer initialized\n");
+	kasan_init_generic();
 }

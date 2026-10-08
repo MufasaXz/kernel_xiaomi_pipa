@@ -1,19 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2002,2003 Broadcom Corporation
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  */
 
 /*
@@ -37,7 +24,7 @@
 #include <asm/sibyte/sb1250_regs.h>
 #include <asm/sibyte/sb1250_int.h>
 #include <asm/sibyte/sb1250_scd.h>
-#if defined(CONFIG_SIBYTE_BCM1x55) || defined(CONFIG_SIBYTE_BCM1x80)
+#ifdef CONFIG_SIBYTE_BCM1x80
 #include <asm/sibyte/bcm1480_regs.h>
 #endif
 
@@ -84,7 +71,7 @@ void check_bus_watcher(void)
 #if defined(CONFIG_SIBYTE_BCM112X) || defined(CONFIG_SIBYTE_SB1250)
 	/* Use non-destructive register */
 	status = csr_in32(IOADDR(A_SCD_BUS_ERR_STATUS_DEBUG));
-#elif defined(CONFIG_SIBYTE_BCM1x55) || defined(CONFIG_SIBYTE_BCM1x80)
+#elif defined(CONFIG_SIBYTE_BCM1x80)
 	/* Use non-destructive register */
 	/* Same as 1250 except BUS_ERR_STATUS_DEBUG is in a different place. */
 	status = csr_in32(IOADDR(A_BCM1480_BUS_ERR_STATUS_DEBUG));

@@ -26,7 +26,7 @@ static ssize_t _name##_show(struct device *dev,				\
 {									\
 	struct wakeup_source *ws = dev_get_drvdata(dev);		\
 									\
-	return sprintf(buf, "%lu\n", ws->_name);			\
+	return sysfs_emit(buf, "%lu\n", ws->_name);			\
 }									\
 static DEVICE_ATTR_RO(_name)
 
@@ -34,6 +34,7 @@ wakeup_attr(active_count);
 wakeup_attr(event_count);
 wakeup_attr(wakeup_count);
 wakeup_attr(expire_count);
+wakeup_attr(relax_count);
 
 static ssize_t active_time_ms_show(struct device *dev,
 				   struct device_attribute *attr, char *buf)
@@ -57,6 +58,7 @@ static ssize_t total_time_ms_show(struct device *dev,
 		active_time = ktime_sub(ktime_get(), ws->last_time);
 		total_time = ktime_add(total_time, active_time);
 	}
+
 	return sysfs_emit(buf, "%lld\n", ktime_to_ms(total_time));
 }
 static DEVICE_ATTR_RO(total_time_ms);
@@ -73,6 +75,7 @@ static ssize_t max_time_ms_show(struct device *dev,
 		if (active_time > max_time)
 			max_time = active_time;
 	}
+
 	return sysfs_emit(buf, "%lld\n", ktime_to_ms(max_time));
 }
 static DEVICE_ATTR_RO(max_time_ms);
@@ -106,6 +109,7 @@ static ssize_t prevent_suspend_time_ms_show(struct device *dev,
 		prevent_sleep_time = ktime_add(prevent_sleep_time,
 			ktime_sub(ktime_get(), ws->start_prevent_time));
 	}
+
 	return sysfs_emit(buf, "%lld\n", ktime_to_ms(prevent_sleep_time));
 }
 static DEVICE_ATTR_RO(prevent_suspend_time_ms);
@@ -116,6 +120,7 @@ static struct attribute *wakeup_source_attrs[] = {
 	&dev_attr_event_count.attr,
 	&dev_attr_wakeup_count.attr,
 	&dev_attr_expire_count.attr,
+	&dev_attr_relax_count.attr,
 	&dev_attr_active_time_ms.attr,
 	&dev_attr_total_time_ms.attr,
 	&dev_attr_max_time_ms.attr,
@@ -134,7 +139,7 @@ static struct device *wakeup_source_device_create(struct device *parent,
 						  struct wakeup_source *ws)
 {
 	struct device *dev = NULL;
-	int retval = -ENODEV;
+	int retval;
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
 	if (!dev) {
@@ -151,7 +156,7 @@ static struct device *wakeup_source_device_create(struct device *parent,
 	dev_set_drvdata(dev, ws);
 	device_set_pm_not_required(dev);
 
-	retval = kobject_set_name(&dev->kobj, "wakeup%d", ws->id);
+	retval = dev_set_name(dev, "wakeup%d", ws->id);
 	if (retval)
 		goto error;
 
@@ -207,7 +212,7 @@ void wakeup_source_sysfs_remove(struct wakeup_source *ws)
 
 static int __init wakeup_sources_sysfs_init(void)
 {
-	wakeup_class = class_create(THIS_MODULE, "wakeup");
+	wakeup_class = class_create("wakeup");
 
 	return PTR_ERR_OR_ZERO(wakeup_class);
 }

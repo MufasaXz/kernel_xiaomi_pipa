@@ -9,10 +9,12 @@
 
 #include <linux/interrupt.h>
 #include <linux/irqchip/chained_irq.h>
+#include <linux/irqchip/irq-msi-lib.h>
+#include <linux/irqdomain.h>
 #include <linux/init.h>
+#include <linux/module.h>
 #include <linux/msi.h>
 #include <linux/of_address.h>
-#include <linux/of_irq.h>
 #include <linux/of_pci.h>
 #include <linux/pci.h>
 #include <linux/platform_device.h>
@@ -28,7 +30,6 @@ struct altera_msi {
 	DECLARE_BITMAP(used, MAX_MSI_VECTORS);
 	struct mutex		lock;	/* protect "used" bitmap */
 	struct platform_device	*pdev;
-	struct irq_domain	*msi_domain;
 	struct irq_domain	*inner_domain;
 	void __iomem		*csr_base;
 	void __iomem		*vector_base;
@@ -54,7 +55,7 @@ static void altera_msi_isr(struct irq_desc *desc)
 	struct altera_msi *msi;
 	unsigned long status;
 	u32 bit;
-	u32 virq;
+	int ret;
 
 	chained_irq_enter(chip, desc);
 	msi = irq_desc_get_handler_data(desc);
@@ -64,29 +65,29 @@ static void altera_msi_isr(struct irq_desc *desc)
 			/* Dummy read from vector to clear the interrupt */
 			readl_relaxed(msi->vector_base + (bit * sizeof(u32)));
 
-			virq = irq_find_mapping(msi->inner_domain, bit);
-			if (virq)
-				generic_handle_irq(virq);
-			else
-				dev_err(&msi->pdev->dev, "unexpected MSI\n");
+			ret = generic_handle_domain_irq(msi->inner_domain, bit);
+			if (ret)
+				dev_err_ratelimited(&msi->pdev->dev, "unexpected MSI\n");
 		}
 	}
 
 	chained_irq_exit(chip, desc);
 }
 
-static struct irq_chip altera_msi_irq_chip = {
-	.name = "Altera PCIe MSI",
-	.irq_mask = pci_msi_mask_irq,
-	.irq_unmask = pci_msi_unmask_irq,
-};
+#define ALTERA_MSI_FLAGS_REQUIRED (MSI_FLAG_USE_DEF_DOM_OPS		| \
+				   MSI_FLAG_USE_DEF_CHIP_OPS		| \
+				   MSI_FLAG_NO_AFFINITY)
 
-static struct msi_domain_info altera_msi_domain_info = {
-	.flags	= (MSI_FLAG_USE_DEF_DOM_OPS | MSI_FLAG_USE_DEF_CHIP_OPS |
-		     MSI_FLAG_PCI_MSIX),
-	.chip	= &altera_msi_irq_chip,
-};
+#define ALTERA_MSI_FLAGS_SUPPORTED (MSI_GENERIC_FLAGS_MASK		| \
+				    MSI_FLAG_PCI_MSIX)
 
+static const struct msi_parent_ops altera_msi_parent_ops = {
+	.required_flags		= ALTERA_MSI_FLAGS_REQUIRED,
+	.supported_flags	= ALTERA_MSI_FLAGS_SUPPORTED,
+	.bus_select_token	= DOMAIN_BUS_PCI_MSI,
+	.prefix			= "Altera-",
+	.init_dev_msi_info	= msi_lib_init_dev_msi_info,
+};
 static void altera_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
 {
 	struct altera_msi *msi = irq_data_get_irq_chip_data(data);
@@ -100,16 +101,9 @@ static void altera_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
 		(int)data->hwirq, msg->address_hi, msg->address_lo);
 }
 
-static int altera_msi_set_affinity(struct irq_data *irq_data,
-				   const struct cpumask *mask, bool force)
-{
-	 return -EINVAL;
-}
-
 static struct irq_chip altera_msi_bottom_irq_chip = {
 	.name			= "Altera MSI",
 	.irq_compose_msi_msg	= altera_compose_msi_msg,
-	.irq_set_affinity	= altera_msi_set_affinity,
 };
 
 static int altera_irq_domain_alloc(struct irq_domain *domain, unsigned int virq,
@@ -172,20 +166,16 @@ static const struct irq_domain_ops msi_domain_ops = {
 
 static int altera_allocate_domains(struct altera_msi *msi)
 {
-	struct fwnode_handle *fwnode = of_node_to_fwnode(msi->pdev->dev.of_node);
+	struct irq_domain_info info = {
+		.fwnode		= dev_fwnode(&msi->pdev->dev),
+		.ops		= &msi_domain_ops,
+		.host_data	= msi,
+		.size		= msi->num_of_vectors,
+	};
 
-	msi->inner_domain = irq_domain_add_linear(NULL, msi->num_of_vectors,
-					     &msi_domain_ops, msi);
+	msi->inner_domain = msi_create_parent_irq_domain(&info, &altera_msi_parent_ops);
 	if (!msi->inner_domain) {
-		dev_err(&msi->pdev->dev, "failed to create IRQ domain\n");
-		return -ENOMEM;
-	}
-
-	msi->msi_domain = pci_msi_create_irq_domain(fwnode,
-				&altera_msi_domain_info, msi->inner_domain);
-	if (!msi->msi_domain) {
 		dev_err(&msi->pdev->dev, "failed to create MSI domain\n");
-		irq_domain_remove(msi->inner_domain);
 		return -ENOMEM;
 	}
 
@@ -194,22 +184,19 @@ static int altera_allocate_domains(struct altera_msi *msi)
 
 static void altera_free_domains(struct altera_msi *msi)
 {
-	irq_domain_remove(msi->msi_domain);
 	irq_domain_remove(msi->inner_domain);
 }
 
-static int altera_msi_remove(struct platform_device *pdev)
+static void altera_msi_remove(struct platform_device *pdev)
 {
 	struct altera_msi *msi = platform_get_drvdata(pdev);
 
 	msi_writel(msi, 0, MSI_INTMASK);
-	irq_set_chained_handler(msi->irq, NULL);
-	irq_set_handler_data(msi->irq, NULL);
+	irq_set_chained_handler_and_data(msi->irq, NULL, NULL);
 
 	altera_free_domains(msi);
 
 	platform_set_drvdata(pdev, NULL);
-	return 0;
 }
 
 static int altera_msi_probe(struct platform_device *pdev)
@@ -227,8 +214,7 @@ static int altera_msi_probe(struct platform_device *pdev)
 	mutex_init(&msi->lock);
 	msi->pdev = pdev;
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "csr");
-	msi->csr_base = devm_ioremap_resource(&pdev->dev, res);
+	msi->csr_base = devm_platform_ioremap_resource_byname(pdev, "csr");
 	if (IS_ERR(msi->csr_base)) {
 		dev_err(&pdev->dev, "failed to map csr memory\n");
 		return PTR_ERR(msi->csr_base);
@@ -237,10 +223,8 @@ static int altera_msi_probe(struct platform_device *pdev)
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
 					   "vector_slave");
 	msi->vector_base = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(msi->vector_base)) {
-		dev_err(&pdev->dev, "failed to map vector_slave memory\n");
+	if (IS_ERR(msi->vector_base))
 		return PTR_ERR(msi->vector_base);
-	}
 
 	msi->vector_phy = res->start;
 
@@ -255,7 +239,6 @@ static int altera_msi_probe(struct platform_device *pdev)
 
 	msi->irq = platform_get_irq(pdev, 0);
 	if (msi->irq < 0) {
-		dev_err(&pdev->dev, "failed to map IRQ: %d\n", msi->irq);
 		ret = msi->irq;
 		goto err;
 	}
@@ -288,4 +271,14 @@ static int __init altera_msi_init(void)
 {
 	return platform_driver_register(&altera_msi_driver);
 }
+
+static void __exit altera_msi_exit(void)
+{
+	platform_driver_unregister(&altera_msi_driver);
+}
+
 subsys_initcall(altera_msi_init);
+MODULE_DEVICE_TABLE(of, altera_msi_of_match);
+module_exit(altera_msi_exit);
+MODULE_DESCRIPTION("Altera PCIe MSI support driver");
+MODULE_LICENSE("GPL v2");

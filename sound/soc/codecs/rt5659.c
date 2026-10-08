@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * rt5659.c  --  RT5659/RT5658 ALSA SoC audio codec driver
  *
  * Copyright 2015 Realtek Semiconductor Corp.
  * Author: Bard Liao <bardliao@realtek.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/clk.h>
@@ -19,7 +16,6 @@
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
 #include <linux/acpi.h>
-#include <linux/gpio.h>
 #include <linux/gpio/consumer.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -1198,50 +1194,13 @@ static const struct snd_kcontrol_new rt5659_if3_dac_swap_mux =
 static const struct snd_kcontrol_new rt5659_if3_adc_swap_mux =
 	SOC_DAPM_ENUM("IF3 ADC Swap Source", rt5659_if3_adc_enum);
 
-static const char * const rt5659_asrc_clk_src[] = {
-	"clk_sysy_div_out", "clk_i2s1_track", "clk_i2s2_track",
-	"clk_i2s3_track", "clk_sys2", "clk_sys3"
-};
-
-static unsigned int rt5659_asrc_clk_map_values[] = {
-	0, 1, 2, 3, 5, 6,
-};
-
-static SOC_VALUE_ENUM_SINGLE_DECL(
-	rt5659_da_sto_asrc_enum, RT5659_ASRC_2, RT5659_DA_STO_T_SFT, 0x7,
-	rt5659_asrc_clk_src, rt5659_asrc_clk_map_values);
-
-static SOC_VALUE_ENUM_SINGLE_DECL(
-	rt5659_da_monol_asrc_enum, RT5659_ASRC_2, RT5659_DA_MONO_L_T_SFT, 0x7,
-	rt5659_asrc_clk_src, rt5659_asrc_clk_map_values);
-
-static SOC_VALUE_ENUM_SINGLE_DECL(
-	rt5659_da_monor_asrc_enum, RT5659_ASRC_2, RT5659_DA_MONO_R_T_SFT, 0x7,
-	rt5659_asrc_clk_src, rt5659_asrc_clk_map_values);
-
-static SOC_VALUE_ENUM_SINGLE_DECL(
-	rt5659_ad_sto1_asrc_enum, RT5659_ASRC_2, RT5659_AD_STO1_T_SFT, 0x7,
-	rt5659_asrc_clk_src, rt5659_asrc_clk_map_values);
-
-static SOC_VALUE_ENUM_SINGLE_DECL(
-	rt5659_ad_sto2_asrc_enum, RT5659_ASRC_3, RT5659_AD_STO2_T_SFT, 0x7,
-	rt5659_asrc_clk_src, rt5659_asrc_clk_map_values);
-
-static SOC_VALUE_ENUM_SINGLE_DECL(
-	rt5659_ad_monol_asrc_enum, RT5659_ASRC_3, RT5659_AD_MONO_L_T_SFT, 0x7,
-	rt5659_asrc_clk_src, rt5659_asrc_clk_map_values);
-
-static SOC_VALUE_ENUM_SINGLE_DECL(
-	rt5659_ad_monor_asrc_enum, RT5659_ASRC_3, RT5659_AD_MONO_R_T_SFT, 0x7,
-	rt5659_asrc_clk_src, rt5659_asrc_clk_map_values);
-
 static int rt5659_hp_vol_put(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
 	int ret = snd_soc_put_volsw(kcontrol, ucontrol);
 
-	if (snd_soc_component_read32(component, RT5659_STO_NG2_CTRL_1) & RT5659_NG2_EN) {
+	if (snd_soc_component_read(component, RT5659_STO_NG2_CTRL_1) & RT5659_NG2_EN) {
 		snd_soc_component_update_bits(component, RT5659_STO_NG2_CTRL_1,
 			RT5659_NG2_EN_MASK, RT5659_NG2_DIS);
 		snd_soc_component_update_bits(component, RT5659_STO_NG2_CTRL_1,
@@ -1308,7 +1267,7 @@ static int rt5659_headset_detect(struct snd_soc_component *component, int jack_i
 		snd_soc_dapm_force_enable_pin(dapm,
 			"Mic Det Power");
 		snd_soc_dapm_sync(dapm);
-		reg_63 = snd_soc_component_read32(component, RT5659_PWR_ANLG_1);
+		reg_63 = snd_soc_component_read(component, RT5659_PWR_ANLG_1);
 
 		snd_soc_component_update_bits(component, RT5659_PWR_ANLG_1,
 			RT5659_PWR_VREF2 | RT5659_PWR_MB,
@@ -1326,7 +1285,7 @@ static int rt5659_headset_detect(struct snd_soc_component *component, int jack_i
 
 		while (i < 5) {
 			msleep(sleep_time[i]);
-			val = snd_soc_component_read32(component, RT5659_EJD_CTRL_2) & 0x0003;
+			val = snd_soc_component_read(component, RT5659_EJD_CTRL_2) & 0x0003;
 			i++;
 			if (val == 0x1 || val == 0x2 || val == 0x3)
 				break;
@@ -1360,7 +1319,7 @@ static int rt5659_button_detect(struct snd_soc_component *component)
 {
 	int btn_type, val;
 
-	val = snd_soc_component_read32(component, RT5659_4BTN_IL_CMD_1);
+	val = snd_soc_component_read(component, RT5659_4BTN_IL_CMD_1);
 	btn_type = val & 0xfff0;
 	snd_soc_component_write(component, RT5659_4BTN_IL_CMD_1, val);
 
@@ -1399,7 +1358,7 @@ static void rt5659_jack_detect_work(struct work_struct *work)
 	if (!rt5659->component)
 		return;
 
-	val = snd_soc_component_read32(rt5659->component, RT5659_INT_ST_1) & 0x0080;
+	val = snd_soc_component_read(rt5659->component, RT5659_INT_ST_1) & 0x0080;
 	if (!val) {
 		/* jack in */
 		if (rt5659->jack_type == 0) {
@@ -1607,7 +1566,7 @@ static int set_dmic_clk(struct snd_soc_dapm_widget *w,
 {
 	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
 	struct rt5659_priv *rt5659 = snd_soc_component_get_drvdata(component);
-	int pd, idx = -EINVAL;
+	int pd, idx;
 
 	pd = rl6231_get_pre_div(rt5659->regmap,
 		RT5659_ADDA_CLK_1, RT5659_I2S_PD1_SFT);
@@ -1699,7 +1658,7 @@ static int is_sys_clk_from_pll(struct snd_soc_dapm_widget *w,
 	unsigned int val;
 	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
 
-	val = snd_soc_component_read32(component, RT5659_GLB_CLK);
+	val = snd_soc_component_read(component, RT5659_GLB_CLK);
 	val &= RT5659_SCLK_SRC_MASK;
 	if (val == RT5659_SCLK_SRC_PLL1)
 		return 1;
@@ -1742,7 +1701,7 @@ static int is_using_asrc(struct snd_soc_dapm_widget *w,
 		return 0;
 	}
 
-	val = (snd_soc_component_read32(component, reg) >> shift) & 0xf;
+	val = (snd_soc_component_read(component, reg) >> shift) & 0xf;
 	switch (val) {
 	case 1:
 	case 2:
@@ -3404,10 +3363,10 @@ static int rt5659_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	unsigned int reg_val = 0;
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		rt5659->master[dai->id] = 1;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		reg_val |= RT5659_I2S_MS_S;
 		rt5659->master[dai->id] = 0;
 		break;
@@ -3549,7 +3508,7 @@ static int rt5659_set_component_pll(struct snd_soc_component *component, int pll
 
 	ret = rl6231_pll_calc(freq_in, freq_out, &pll_code);
 	if (ret < 0) {
-		dev_err(component->dev, "Unsupport input clock %d\n", freq_in);
+		dev_err(component->dev, "Unsupported input clock %d\n", freq_in);
 		return ret;
 	}
 
@@ -3560,8 +3519,8 @@ static int rt5659_set_component_pll(struct snd_soc_component *component, int pll
 	snd_soc_component_write(component, RT5659_PLL_CTRL_1,
 		pll_code.n_code << RT5659_PLL_N_SFT | pll_code.k_code);
 	snd_soc_component_write(component, RT5659_PLL_CTRL_2,
-		(pll_code.m_bp ? 0 : pll_code.m_code) << RT5659_PLL_M_SFT |
-		pll_code.m_bp << RT5659_PLL_M_BP_SFT);
+		((pll_code.m_bp ? 0 : pll_code.m_code) << RT5659_PLL_M_SFT) |
+		(pll_code.m_bp << RT5659_PLL_M_BP_SFT));
 
 	rt5659->pll_in = freq_in;
 	rt5659->pll_out = freq_out;
@@ -3841,7 +3800,6 @@ static const struct snd_soc_component_driver soc_component_dev_rt5659 = {
 	.set_pll		= rt5659_set_component_pll,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
-	.non_legacy_dai_naming	= 1,
 };
 
 
@@ -3857,8 +3815,8 @@ static const struct regmap_config rt5659_regmap = {
 };
 
 static const struct i2c_device_id rt5659_i2c_id[] = {
-	{ "rt5658", 0 },
-	{ "rt5659", 0 },
+	{ "rt5658" },
+	{ "rt5659" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rt5659_i2c_id);
@@ -4133,8 +4091,7 @@ static void rt5659_intel_hd_header_probe_setup(struct rt5659_priv *rt5659)
 		RT5659_IL_IRQ_MASK, RT5659_IL_IRQ_EN);
 }
 
-static int rt5659_i2c_probe(struct i2c_client *i2c,
-		    const struct i2c_device_id *id)
+static int rt5659_i2c_probe(struct i2c_client *i2c)
 {
 	struct rt5659_platform_data *pdata = dev_get_platdata(&i2c->dev);
 	struct rt5659_priv *rt5659;
@@ -4183,13 +4140,9 @@ static int rt5659_i2c_probe(struct i2c_client *i2c,
 	regmap_write(rt5659->regmap, RT5659_RESET, 0);
 
 	/* Check if MCLK provided */
-	rt5659->mclk = devm_clk_get(&i2c->dev, "mclk");
-	if (IS_ERR(rt5659->mclk)) {
-		if (PTR_ERR(rt5659->mclk) != -ENOENT)
-			return PTR_ERR(rt5659->mclk);
-		/* Otherwise mark the mclk pointer to NULL */
-		rt5659->mclk = NULL;
-	}
+	rt5659->mclk = devm_clk_get_optional(&i2c->dev, "mclk");
+	if (IS_ERR(rt5659->mclk))
+		return PTR_ERR(rt5659->mclk);
 
 	rt5659_calibrate(rt5659);
 
@@ -4339,7 +4292,7 @@ static int rt5659_i2c_probe(struct i2c_client *i2c,
 			rt5659_irq, IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING
 			| IRQF_ONESHOT, "rt5659", rt5659);
 		if (ret)
-			dev_err(&i2c->dev, "Failed to reguest IRQ: %d\n", ret);
+			dev_err(&i2c->dev, "Failed to request IRQ: %d\n", ret);
 
 		/* Enable IRQ output for GPIO1 pin any way */
 		regmap_update_bits(rt5659->regmap, RT5659_GPIO_CTRL_1,
@@ -4362,16 +4315,16 @@ static void rt5659_i2c_shutdown(struct i2c_client *client)
 static const struct of_device_id rt5659_of_match[] = {
 	{ .compatible = "realtek,rt5658", },
 	{ .compatible = "realtek,rt5659", },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, rt5659_of_match);
 #endif
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id rt5659_acpi_match[] = {
-	{ "10EC5658", 0, },
-	{ "10EC5659", 0, },
-	{ },
+	{ "10EC5658" },
+	{ "10EC5659" },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, rt5659_acpi_match);
 #endif

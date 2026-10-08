@@ -15,7 +15,7 @@
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 
 #include <crypto/internal/rng.h>
@@ -268,7 +268,6 @@ static struct rng_alg exynos_rng_alg = {
 static int exynos_rng_probe(struct platform_device *pdev)
 {
 	struct exynos_rng_dev *rng;
-	struct resource *res;
 	int ret;
 
 	if (exynos_rng_dev)
@@ -278,7 +277,7 @@ static int exynos_rng_probe(struct platform_device *pdev)
 	if (!rng)
 		return -ENOMEM;
 
-	rng->type = (enum exynos_prng_type)of_device_get_match_data(&pdev->dev);
+	rng->type = (uintptr_t)of_device_get_match_data(&pdev->dev);
 
 	mutex_init(&rng->lock);
 
@@ -289,8 +288,7 @@ static int exynos_rng_probe(struct platform_device *pdev)
 		return PTR_ERR(rng->clk);
 	}
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	rng->mem = devm_ioremap_resource(&pdev->dev, res);
+	rng->mem = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(rng->mem))
 		return PTR_ERR(rng->mem);
 
@@ -308,13 +306,11 @@ static int exynos_rng_probe(struct platform_device *pdev)
 	return ret;
 }
 
-static int exynos_rng_remove(struct platform_device *pdev)
+static void exynos_rng_remove(struct platform_device *pdev)
 {
 	crypto_unregister_rng(&exynos_rng_alg);
 
 	exynos_rng_dev = NULL;
-
-	return 0;
 }
 
 static int __maybe_unused exynos_rng_suspend(struct device *dev)

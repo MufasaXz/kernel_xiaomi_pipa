@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver code for Tegra's Legacy Interrupt Controller
  *
@@ -10,16 +11,6 @@
  *	Colin Cross <ccross@android.com>
  *
  * Copyright (C) 2010,2013, NVIDIA Corporation
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #include <linux/io.h>
@@ -339,9 +330,8 @@ static int __init tegra_ictlr_init(struct device_node *node,
 	     node, num_ictlrs, soc->num_ictlrs);
 
 
-	domain = irq_domain_add_hierarchy(parent_domain, 0, num_ictlrs * 32,
-					  node, &tegra_ictlr_domain_ops,
-					  lic);
+	domain = irq_domain_create_hierarchy(parent_domain, 0, num_ictlrs * 32,
+					     of_fwnode_handle(node), &tegra_ictlr_domain_ops, lic);
 	if (!domain) {
 		pr_err("%pOF: failed to allocated domain\n", node);
 		err = -ENOMEM;

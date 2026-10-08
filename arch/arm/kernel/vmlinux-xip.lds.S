@@ -9,14 +9,11 @@
 
 #include <linux/sizes.h>
 
-#include <asm-generic/vmlinux.lds.h>
+#include <asm/vmlinux.lds.h>
 #include <asm/cache.h>
 #include <asm/thread_info.h>
-#include <asm/memory.h>
-#include <asm/mpu.h>
 #include <asm/page.h>
-
-#include "vmlinux.lds.h"
+#include <asm/mpu.h>
 
 OUTPUT_ARCH(arm)
 ENTRY(stext)
@@ -42,6 +39,10 @@ SECTIONS
 		ARM_DISCARD
 		*(.alt.smp.init)
 		*(.pv_table)
+#ifndef CONFIG_ARM_UNWIND
+		*(.ARM.exidx) *(.ARM.exidx.*)
+		*(.ARM.extab) *(.ARM.extab.*)
+#endif
 	}
 
 	. = XIP_VIRT_ADDR(CONFIG_XIP_PHYS_ADDR);
@@ -70,8 +71,6 @@ SECTIONS
 	ARM_UNWIND_SECTIONS
 #endif
 
-	NOTES
-
 	_etext = .;			/* End of text and rodata section */
 
 	ARM_VECTORS
@@ -84,7 +83,7 @@ SECTIONS
 	}
 	.init.arch.info : {
 		__arch_info_begin = .;
-		*(.arch.info.init)
+		KEEP(*(.arch.info.init))
 		__arch_info_end = .;
 	}
 	.init.tagtable : {
@@ -114,7 +113,7 @@ SECTIONS
 
 	. = ALIGN(THREAD_SIZE);
 	_sdata = .;
-	RW_DATA_SECTION(L1_CACHE_BYTES, PAGE_SIZE, THREAD_SIZE)
+	RW_DATA(L1_CACHE_BYTES, PAGE_SIZE, THREAD_SIZE)
 	.data.ro_after_init : AT(ADDR(.data.ro_after_init) - LOAD_OFFSET) {
 		*(.data..ro_after_init)
 	}
@@ -154,6 +153,11 @@ SECTIONS
 	_end = .;
 
 	STABS_DEBUG
+	DWARF_DEBUG
+	MODINFO
+	ARM_DETAILS
+
+	ARM_ASSERTS
 }
 
 /*
@@ -162,15 +166,9 @@ SECTIONS
  * binutils is too old (for other reasons as well)
  */
 ASSERT((__proc_info_end - __proc_info_begin), "missing CPU support")
+#ifndef CONFIG_COMPILE_TEST
 ASSERT((__arch_info_end - __arch_info_begin), "no machine record defined")
-
-/*
- * The HYP init code can't be more than a page long,
- * and should not cross a page boundary.
- * The above comment applies as well.
- */
-ASSERT(__hyp_idmap_text_end - (__hyp_idmap_text_start & PAGE_MASK) <= PAGE_SIZE,
-	"HYP init code too big or misaligned")
+#endif
 
 #ifdef CONFIG_XIP_DEFLATED_DATA
 /*

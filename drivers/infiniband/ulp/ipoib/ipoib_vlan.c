@@ -30,7 +30,6 @@
  * SOFTWARE.
  */
 
-#include <linux/module.h>
 #include <linux/sched/signal.h>
 
 #include <linux/init.h>
@@ -40,22 +39,21 @@
 
 #include "ipoib.h"
 
-static ssize_t show_parent(struct device *d, struct device_attribute *attr,
+static ssize_t parent_show(struct device *d, struct device_attribute *attr,
 			   char *buf)
 {
 	struct net_device *dev = to_net_dev(d);
 	struct ipoib_dev_priv *priv = ipoib_priv(dev);
 
-	return sprintf(buf, "%s\n", priv->parent->name);
+	return sysfs_emit(buf, "%s\n", priv->parent->name);
 }
-static DEVICE_ATTR(parent, S_IRUGO, show_parent, NULL);
+static DEVICE_ATTR_RO(parent);
 
 static bool is_child_unique(struct ipoib_dev_priv *ppriv,
 			    struct ipoib_dev_priv *priv)
 {
 	struct ipoib_dev_priv *tpriv;
-
-	ASSERT_RTNL();
+	bool result = true;
 
 	/*
 	 * Since the legacy sysfs interface uses pkey for deletion it cannot
@@ -74,18 +72,22 @@ static bool is_child_unique(struct ipoib_dev_priv *ppriv,
 	if (ppriv->pkey == priv->pkey)
 		return false;
 
+	netdev_lock(ppriv->dev);
 	list_for_each_entry(tpriv, &ppriv->child_intfs, list) {
 		if (tpriv->pkey == priv->pkey &&
-		    tpriv->child_type == IPOIB_LEGACY_CHILD)
-			return false;
+		    tpriv->child_type == IPOIB_LEGACY_CHILD) {
+			result = false;
+			break;
+		}
 	}
+	netdev_unlock(ppriv->dev);
 
-	return true;
+	return result;
 }
 
 /*
  * NOTE: If this function fails then the priv->dev will remain valid, however
- * priv can have been freed and must not be touched by caller in the error
+ * priv will have been freed and must not be touched by caller in the error
  * case.
  *
  * If (ndev->reg_state == NETREG_UNINITIALIZED) then it is up to the caller to
@@ -97,8 +99,13 @@ int __ipoib_vlan_add(struct ipoib_dev_priv *ppriv, struct ipoib_dev_priv *priv,
 {
 	struct net_device *ndev = priv->dev;
 	int result;
+	struct rdma_netdev *rn = netdev_priv(ndev);
 
-	ASSERT_RTNL();
+	/*
+	 * We do not need to touch priv if register_netdevice fails, so just
+	 * always use this flow.
+	 */
+	ndev->priv_destructor = ipoib_intf_free;
 
 	/*
 	 * Racing with unregister of the parent must be prevented by the
@@ -111,6 +118,8 @@ int __ipoib_vlan_add(struct ipoib_dev_priv *ppriv, struct ipoib_dev_priv *priv,
 		goto out_early;
 	}
 
+	rn->mtu = priv->mcast_mtu;
+
 	priv->parent = ppriv->dev;
 	priv->pkey = pkey;
 	priv->child_type = type;
@@ -119,9 +128,6 @@ int __ipoib_vlan_add(struct ipoib_dev_priv *ppriv, struct ipoib_dev_priv *priv,
 		result = -ENOTUNIQ;
 		goto out_early;
 	}
-
-	/* We do not need to touch priv if register_netdevice fails */
-	ndev->priv_destructor = ipoib_intf_free;
 
 	result = register_netdevice(ndev);
 	if (result) {
@@ -186,12 +192,14 @@ int ipoib_vlan_add(struct net_device *pdev, unsigned short pkey)
 	snprintf(intf_name, sizeof(intf_name), "%.10s.%04x", ppriv->dev->name,
 		 pkey);
 
-	priv = ipoib_intf_alloc(ppriv->ca, ppriv->port, intf_name);
-	if (!priv) {
-		result = -ENOMEM;
+	ndev = ipoib_intf_alloc(ppriv->ca, ppriv->port, intf_name);
+	if (IS_ERR(ndev)) {
+		result = PTR_ERR(ndev);
 		goto out;
 	}
-	ndev = priv->dev;
+	priv = ipoib_priv(ndev);
+
+	ndev->rtnl_link_ops = ipoib_get_link_ops();
 
 	result = __ipoib_vlan_add(ppriv, priv, pkey, IPOIB_LEGACY_CHILD);
 
@@ -260,6 +268,7 @@ int ipoib_vlan_delete(struct net_device *pdev, unsigned short pkey)
 	ppriv = ipoib_priv(pdev);
 
 	rc = -ENODEV;
+	netdev_lock(ppriv->dev);
 	list_for_each_entry_safe(priv, tpriv, &ppriv->child_intfs, list) {
 		if (priv->pkey == pkey &&
 		    priv->child_type == IPOIB_LEGACY_CHILD) {
@@ -271,9 +280,7 @@ int ipoib_vlan_delete(struct net_device *pdev, unsigned short pkey)
 				goto out;
 			}
 
-			down_write(&ppriv->vlan_rwsem);
 			list_del_init(&priv->list);
-			up_write(&ppriv->vlan_rwsem);
 			work->dev = priv->dev;
 			INIT_WORK(&work->work, ipoib_vlan_delete_task);
 			queue_work(ipoib_workqueue, &work->work);
@@ -284,6 +291,7 @@ int ipoib_vlan_delete(struct net_device *pdev, unsigned short pkey)
 	}
 
 out:
+	netdev_unlock(ppriv->dev);
 	rtnl_unlock();
 
 	return rc;

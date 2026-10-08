@@ -19,6 +19,7 @@
 
 #include "privcmd.h"
 
+MODULE_DESCRIPTION("Xen Mmap of hypercall buffers");
 MODULE_LICENSE("GPL");
 
 struct privcmd_buf_private {
@@ -140,8 +141,7 @@ static int privcmd_buf_mmap(struct file *file, struct vm_area_struct *vma)
 	if (!(vma->vm_flags & VM_SHARED))
 		return -EINVAL;
 
-	vma_priv = kzalloc(sizeof(*vma_priv) + count * sizeof(void *),
-			   GFP_KERNEL);
+	vma_priv = kzalloc(struct_size(vma_priv, pages, count), GFP_KERNEL);
 	if (!vma_priv)
 		return -ENOMEM;
 
@@ -157,7 +157,7 @@ static int privcmd_buf_mmap(struct file *file, struct vm_area_struct *vma)
 	vma_priv->file_priv = file_priv;
 	vma_priv->users = 1;
 
-	vma->vm_flags |= VM_IO | VM_DONTEXPAND;
+	vm_flags_set(vma, VM_IO | VM_DONTEXPAND);
 	vma->vm_ops = &privcmd_buf_vm_ops;
 	vma->vm_private_data = vma_priv;
 
@@ -166,12 +166,8 @@ static int privcmd_buf_mmap(struct file *file, struct vm_area_struct *vma)
 	if (vma_priv->n_pages != count)
 		ret = -ENOMEM;
 	else
-		for (i = 0; i < vma_priv->n_pages; i++) {
-			ret = vm_insert_page(vma, vma->vm_start + i * PAGE_SIZE,
-					     vma_priv->pages[i]);
-			if (ret)
-				break;
-		}
+		ret = vm_map_pages_zero(vma, vma_priv->pages,
+						vma_priv->n_pages);
 
 	if (ret)
 		privcmd_buf_vmapriv_free(vma_priv);

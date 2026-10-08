@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * NXP TDA10071 + Conexant CX24118A DVB-S/S2 demodulator + tuner driver
  *
  * Copyright (C) 2011 Antti Palosaari <crope@iki.fi>
- *
- *    This program is free software; you can redistribute it and/or modify
- *    it under the terms of the GNU General Public License as published by
- *    the Free Software Foundation; either version 2 of the License, or
- *    (at your option) any later version.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU General Public License for more details.
- *
- *    You should have received a copy of the GNU General Public License along
- *    with this program; if not, write to the Free Software Foundation, Inc.,
- *    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
 #include "tda10071_priv.h"
@@ -1158,8 +1145,7 @@ static struct dvb_frontend *tda10071_get_dvb_frontend(struct i2c_client *client)
 	return &dev->fe;
 }
 
-static int tda10071_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int tda10071_probe(struct i2c_client *client)
 {
 	struct tda10071_dev *dev;
 	struct tda10071_platform_data *pdata = client->dev.platform_data;
@@ -1234,18 +1220,17 @@ err:
 	return ret;
 }
 
-static int tda10071_remove(struct i2c_client *client)
+static void tda10071_remove(struct i2c_client *client)
 {
 	struct tda10071_dev *dev = i2c_get_clientdata(client);
 
 	dev_dbg(&client->dev, "\n");
 
 	kfree(dev);
-	return 0;
 }
 
 static const struct i2c_device_id tda10071_id_table[] = {
-	{"tda10071_cx24118", 0},
+	{ "tda10071_cx24118" },
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, tda10071_id_table);

@@ -2,19 +2,19 @@
 /*
  * Low level suspend code for AM33XX SoCs
  *
- * Copyright (C) 2012-2018 Texas Instruments Incorporated - http://www.ti.com/
+ * Copyright (C) 2012-2018 Texas Instruments Incorporated - https://www.ti.com/
  *	Dave Gerlach, Vaibhav Bedia
  */
 
-#include <generated/ti-pm-asm-offsets.h>
 #include <linux/linkage.h>
 #include <linux/platform_data/pm33xx.h>
 #include <linux/ti-emif-sram.h>
 #include <asm/assembler.h>
-#include <asm/memory.h>
+#include <asm/page.h>
 
 #include "iomap.h"
 #include "cm33xx.h"
+#include "pm-asm-offsets.h"
 
 #define AM33XX_CM_CLKCTRL_MODULESTATE_DISABLED			0x00030000
 #define AM33XX_CM_CLKCTRL_MODULEMODE_DISABLE			0x0003
@@ -24,6 +24,7 @@
 #define BIT(nr)			(1 << (nr))
 
 	.arm
+	.arch armv7-a
 	.align 3
 
 ENTRY(am33xx_do_wfi)

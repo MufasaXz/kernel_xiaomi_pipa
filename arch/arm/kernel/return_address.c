@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * arch/arm/kernel/return_address.c
  *
  * Copyright (C) 2009 Uwe Kleine-Koenig <u.kleine-koenig@pengutronix.de>
  * for Pengutronix
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  */
 #include <linux/export.h>
 #include <linux/ftrace.h>
@@ -19,17 +16,17 @@ struct return_address_data {
 	void *addr;
 };
 
-static int save_return_addr(struct stackframe *frame, void *d)
+static bool save_return_addr(void *d, unsigned long pc)
 {
 	struct return_address_data *data = d;
 
 	if (!data->level) {
-		data->addr = (void *)frame->pc;
+		data->addr = (void *)pc;
 
-		return 1;
+		return false;
 	} else {
 		--data->level;
-		return 0;
+		return true;
 	}
 }
 
@@ -44,7 +41,13 @@ void *return_address(unsigned int level)
 	frame.fp = (unsigned long)__builtin_frame_address(0);
 	frame.sp = current_stack_pointer;
 	frame.lr = (unsigned long)__builtin_return_address(0);
-	frame.pc = (unsigned long)return_address;
+here:
+	frame.pc = (unsigned long)&&here;
+#ifdef CONFIG_KRETPROBES
+	frame.kr_cur = NULL;
+	frame.tsk = current;
+#endif
+	frame.ex_frame = false;
 
 	walk_stackframe(&frame, save_return_addr, &data);
 

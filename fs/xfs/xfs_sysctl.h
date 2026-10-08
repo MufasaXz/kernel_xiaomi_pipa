@@ -19,9 +19,6 @@ typedef struct xfs_sysctl_val {
 } xfs_sysctl_val_t;
 
 typedef struct xfs_param {
-	xfs_sysctl_val_t sgid_inherit;	/* Inherit S_ISGID if process' GID is
-					 * not a member of parent dir GID. */
-	xfs_sysctl_val_t symlink_mode;	/* Link creat mode affected by umask */
 	xfs_sysctl_val_t panic_mask;	/* bitmask to cause panic on errors. */
 	xfs_sysctl_val_t error_level;	/* Degree of reporting for problems  */
 	xfs_sysctl_val_t syncd_timer;	/* Interval between xfssyncd wakeups */
@@ -29,14 +26,11 @@ typedef struct xfs_param {
 	xfs_sysctl_val_t inherit_sync;	/* Inherit the "sync" inode flag. */
 	xfs_sysctl_val_t inherit_nodump;/* Inherit the "nodump" inode flag. */
 	xfs_sysctl_val_t inherit_noatim;/* Inherit the "noatime" inode flag. */
-	xfs_sysctl_val_t xfs_buf_timer;	/* Interval between xfsbufd wakeups. */
-	xfs_sysctl_val_t xfs_buf_age;	/* Metadata buffer age before flush. */
 	xfs_sysctl_val_t inherit_nosym;	/* Inherit the "nosymlinks" flag. */
 	xfs_sysctl_val_t rotorstep;	/* inode32 AG rotoring control knob */
 	xfs_sysctl_val_t inherit_nodfrg;/* Inherit the "nodefrag" inode flag. */
 	xfs_sysctl_val_t fstrm_timer;	/* Filestream dir-AG assoc'n timeout. */
-	xfs_sysctl_val_t eofb_timer;	/* Interval between eofb scan wakeups */
-	xfs_sysctl_val_t cowb_timer;	/* Interval between cowb scan wakeups */
+	xfs_sysctl_val_t blockgc_timer;	/* Interval between blockgc scans */
 } xfs_param_t;
 
 /*
@@ -82,9 +76,16 @@ enum {
 extern xfs_param_t	xfs_params;
 
 struct xfs_globals {
+#ifdef DEBUG
+	int	pwork_threads;		/* parallel workqueue threads */
+	bool	larp;			/* log attribute replay */
+#endif
+	int	bload_leaf_slack;	/* btree bulk load leaf slack */
+	int	bload_node_slack;	/* btree bulk load node slack */
 	int	log_recovery_delay;	/* log recovery delay (secs) */
 	int	mount_delay;		/* mount setup delay (secs) */
 	bool	bug_on_assert;		/* BUG() the kernel on assert failure */
+	bool	always_cow;		/* use COW fork for all overwrites */
 };
 extern struct xfs_globals	xfs_globals;
 

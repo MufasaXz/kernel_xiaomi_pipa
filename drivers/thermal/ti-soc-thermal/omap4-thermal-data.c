@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * OMAP4 thermal driver.
  *
  * Copyright (C) 2011-2012 Texas Instruments Inc.
  * Contact:
  *	Eduardo Valentin <eduardo.valentin@ti.com>
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
  */
 
 #include "ti-thermal.h"
@@ -33,7 +24,7 @@ omap4430_mpu_temp_sensor_registers = {
 	.bgap_dtemp_mask = OMAP4430_BGAP_TEMP_SENSOR_DTEMP_MASK,
 
 	.bgap_mode_ctrl = OMAP4430_TEMP_SENSOR_CTRL_OFFSET,
-	.mode_ctrl_mask = OMAP4430_SINGLE_MODE_MASK,
+	.mode_ctrl_mask = OMAP4430_CONTINUOUS_MODE_MASK,
 
 	.bgap_efuse = OMAP4430_FUSE_OPP_BGAP,
 };
@@ -67,7 +58,8 @@ omap4430_adc_to_temp[OMAP4430_ADC_END_VALUE - OMAP4430_ADC_START_VALUE + 1] = {
 const struct ti_bandgap_data omap4430_data = {
 	.features = TI_BANDGAP_FEATURE_MODE_CONFIG |
 			TI_BANDGAP_FEATURE_CLK_CTRL |
-			TI_BANDGAP_FEATURE_POWER_SWITCH,
+			TI_BANDGAP_FEATURE_POWER_SWITCH |
+			TI_BANDGAP_FEATURE_CONT_MODE_ONLY,
 	.fclock_name = "bandgap_fclk",
 	.div_ck_name = "bandgap_fclk",
 	.conv_table = omap4430_adc_to_temp,
@@ -105,7 +97,7 @@ omap4460_mpu_temp_sensor_registers = {
 	.mask_cold_mask = OMAP4460_MASK_COLD_MASK,
 
 	.bgap_mode_ctrl = OMAP4460_BGAP_CTRL_OFFSET,
-	.mode_ctrl_mask = OMAP4460_SINGLE_MODE_MASK,
+	.mode_ctrl_mask = OMAP4460_CONTINUOUS_MODE_MASK,
 
 	.bgap_counter = OMAP4460_BGAP_COUNTER_OFFSET,
 	.counter_mask = OMAP4460_COUNTER_MASK,

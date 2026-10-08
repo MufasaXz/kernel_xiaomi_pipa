@@ -16,7 +16,6 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
-#include <soc/imx/timer.h>
 
 /*
  * There are 4 versions of the timer hardware on Freescale MXC hardware.
@@ -25,6 +24,12 @@
  *  - MX25, MX31, MX35, MX37, MX51, MX6Q(rev1.0)
  *  - MX6DL, MX6SX, MX6Q(rev1.1+)
  */
+enum imx_gpt_type {
+	GPT_TYPE_IMX1,		/* i.MX1 */
+	GPT_TYPE_IMX21,		/* i.MX21/27 */
+	GPT_TYPE_IMX31,		/* i.MX31/35/25/37/51/6Q */
+	GPT_TYPE_IMX6DL,	/* i.MX6DL/SX/SL */
+};
 
 /* defines common for all i.MX */
 #define MXC_TCTL		0x00
@@ -67,7 +72,6 @@ struct imx_timer {
 	struct clk *clk_ipg;
 	const struct imx_gpt_data *gpt;
 	struct clock_event_device ced;
-	struct irqaction act;
 };
 
 struct imx_gpt_data {
@@ -94,13 +98,11 @@ static void imx1_gpt_irq_disable(struct imx_timer *imxtm)
 	tmp = readl_relaxed(imxtm->base + MXC_TCTL);
 	writel_relaxed(tmp & ~MX1_2_TCTL_IRQEN, imxtm->base + MXC_TCTL);
 }
-#define imx21_gpt_irq_disable imx1_gpt_irq_disable
 
 static void imx31_gpt_irq_disable(struct imx_timer *imxtm)
 {
 	writel_relaxed(0, imxtm->base + V2_IR);
 }
-#define imx6dl_gpt_irq_disable imx31_gpt_irq_disable
 
 static void imx1_gpt_irq_enable(struct imx_timer *imxtm)
 {
@@ -109,13 +111,11 @@ static void imx1_gpt_irq_enable(struct imx_timer *imxtm)
 	tmp = readl_relaxed(imxtm->base + MXC_TCTL);
 	writel_relaxed(tmp | MX1_2_TCTL_IRQEN, imxtm->base + MXC_TCTL);
 }
-#define imx21_gpt_irq_enable imx1_gpt_irq_enable
 
 static void imx31_gpt_irq_enable(struct imx_timer *imxtm)
 {
 	writel_relaxed(1<<0, imxtm->base + V2_IR);
 }
-#define imx6dl_gpt_irq_enable imx31_gpt_irq_enable
 
 static void imx1_gpt_irq_acknowledge(struct imx_timer *imxtm)
 {
@@ -132,7 +132,6 @@ static void imx31_gpt_irq_acknowledge(struct imx_timer *imxtm)
 {
 	writel_relaxed(V2_TSTAT_OF1, imxtm->base + V2_TSTAT);
 }
-#define imx6dl_gpt_irq_acknowledge imx31_gpt_irq_acknowledge
 
 static void __iomem *sched_clock_reg;
 
@@ -141,21 +140,25 @@ static u64 notrace mxc_read_sched_clock(void)
 	return sched_clock_reg ? readl_relaxed(sched_clock_reg) : 0;
 }
 
+#if defined(CONFIG_ARM)
 static struct delay_timer imx_delay_timer;
 
 static unsigned long imx_read_current_timer(void)
 {
 	return readl_relaxed(sched_clock_reg);
 }
+#endif
 
 static int __init mxc_clocksource_init(struct imx_timer *imxtm)
 {
 	unsigned int c = clk_get_rate(imxtm->clk_per);
 	void __iomem *reg = imxtm->base + imxtm->gpt->reg_tcn;
 
+#if defined(CONFIG_ARM)
 	imx_delay_timer.read_current_timer = &imx_read_current_timer;
 	imx_delay_timer.freq = c;
 	register_current_timer_delay(&imx_delay_timer);
+#endif
 
 	sched_clock_reg = reg;
 
@@ -198,14 +201,7 @@ static int v2_set_next_event(unsigned long evt,
 static int mxc_shutdown(struct clock_event_device *ced)
 {
 	struct imx_timer *imxtm = to_imx_timer(ced);
-	unsigned long flags;
 	u32 tcn;
-
-	/*
-	 * The timer interrupt generation is disabled at least
-	 * for enough time to call mxc_set_next_event()
-	 */
-	local_irq_save(flags);
 
 	/* Disable interrupt in GPT module */
 	imxtm->gpt->gpt_irq_disable(imxtm);
@@ -221,21 +217,12 @@ static int mxc_shutdown(struct clock_event_device *ced)
 	printk(KERN_INFO "%s: changing mode\n", __func__);
 #endif /* DEBUG */
 
-	local_irq_restore(flags);
-
 	return 0;
 }
 
 static int mxc_set_oneshot(struct clock_event_device *ced)
 {
 	struct imx_timer *imxtm = to_imx_timer(ced);
-	unsigned long flags;
-
-	/*
-	 * The timer interrupt generation is disabled at least
-	 * for enough time to call mxc_set_next_event()
-	 */
-	local_irq_save(flags);
 
 	/* Disable interrupt in GPT module */
 	imxtm->gpt->gpt_irq_disable(imxtm);
@@ -260,7 +247,6 @@ static int mxc_set_oneshot(struct clock_event_device *ced)
 	 * mode switching
 	 */
 	imxtm->gpt->gpt_irq_enable(imxtm);
-	local_irq_restore(flags);
 
 	return 0;
 }
@@ -272,9 +258,8 @@ static irqreturn_t mxc_timer_interrupt(int irq, void *dev_id)
 {
 	struct clock_event_device *ced = dev_id;
 	struct imx_timer *imxtm = to_imx_timer(ced);
-	uint32_t tstat;
 
-	tstat = readl_relaxed(imxtm->base + imxtm->gpt->reg_tstat);
+	readl_relaxed(imxtm->base + imxtm->gpt->reg_tstat);
 
 	imxtm->gpt->gpt_irq_acknowledge(imxtm);
 
@@ -286,7 +271,6 @@ static irqreturn_t mxc_timer_interrupt(int irq, void *dev_id)
 static int __init mxc_clockevent_init(struct imx_timer *imxtm)
 {
 	struct clock_event_device *ced = &imxtm->ced;
-	struct irqaction *act = &imxtm->act;
 
 	ced->name = "mxc_timer1";
 	ced->features = CLOCK_EVT_FEAT_ONESHOT | CLOCK_EVT_FEAT_DYNIRQ;
@@ -300,12 +284,8 @@ static int __init mxc_clockevent_init(struct imx_timer *imxtm)
 	clockevents_config_and_register(ced, clk_get_rate(imxtm->clk_per),
 					0xff, 0xfffffffe);
 
-	act->name = "i.MX Timer Tick";
-	act->flags = IRQF_TIMER | IRQF_IRQPOLL;
-	act->handler = mxc_timer_interrupt;
-	act->dev_id = ced;
-
-	return setup_irq(imxtm->irq, act);
+	return request_irq(imxtm->irq, mxc_timer_interrupt,
+			   IRQF_TIMER | IRQF_IRQPOLL, "i.MX Timer Tick", ced);
 }
 
 static void imx1_gpt_setup_tctl(struct imx_timer *imxtm)
@@ -315,7 +295,6 @@ static void imx1_gpt_setup_tctl(struct imx_timer *imxtm)
 	tctl_val = MX1_2_TCTL_FRR | MX1_2_TCTL_CLK_PCLK1 | MXC_TCTL_TEN;
 	writel_relaxed(tctl_val, imxtm->base + MXC_TCTL);
 }
-#define imx21_gpt_setup_tctl imx1_gpt_setup_tctl
 
 static void imx31_gpt_setup_tctl(struct imx_timer *imxtm)
 {
@@ -362,10 +341,10 @@ static const struct imx_gpt_data imx21_gpt_data = {
 	.reg_tstat = MX1_2_TSTAT,
 	.reg_tcn = MX1_2_TCN,
 	.reg_tcmp = MX1_2_TCMP,
-	.gpt_irq_enable = imx21_gpt_irq_enable,
-	.gpt_irq_disable = imx21_gpt_irq_disable,
+	.gpt_irq_enable = imx1_gpt_irq_enable,
+	.gpt_irq_disable = imx1_gpt_irq_disable,
 	.gpt_irq_acknowledge = imx21_gpt_irq_acknowledge,
-	.gpt_setup_tctl = imx21_gpt_setup_tctl,
+	.gpt_setup_tctl = imx1_gpt_setup_tctl,
 	.set_next_event = mx1_2_set_next_event,
 };
 
@@ -384,9 +363,9 @@ static const struct imx_gpt_data imx6dl_gpt_data = {
 	.reg_tstat = V2_TSTAT,
 	.reg_tcn = V2_TCN,
 	.reg_tcmp = V2_TCMP,
-	.gpt_irq_enable = imx6dl_gpt_irq_enable,
-	.gpt_irq_disable = imx6dl_gpt_irq_disable,
-	.gpt_irq_acknowledge = imx6dl_gpt_irq_acknowledge,
+	.gpt_irq_enable = imx31_gpt_irq_enable,
+	.gpt_irq_disable = imx31_gpt_irq_disable,
+	.gpt_irq_acknowledge = imx31_gpt_irq_acknowledge,
 	.gpt_setup_tctl = imx6dl_gpt_setup_tctl,
 	.set_next_event = v2_set_next_event,
 };
@@ -437,25 +416,6 @@ static int __init _mxc_timer_init(struct imx_timer *imxtm)
 		return ret;
 
 	return mxc_clockevent_init(imxtm);
-}
-
-void __init mxc_timer_init(unsigned long pbase, int irq, enum imx_gpt_type type)
-{
-	struct imx_timer *imxtm;
-
-	imxtm = kzalloc(sizeof(*imxtm), GFP_KERNEL);
-	BUG_ON(!imxtm);
-
-	imxtm->clk_per = clk_get_sys("imx-gpt.0", "per");
-	imxtm->clk_ipg = clk_get_sys("imx-gpt.0", "ipg");
-
-	imxtm->base = ioremap(pbase, SZ_4K);
-	BUG_ON(!imxtm->base);
-
-	imxtm->type = type;
-	imxtm->irq = irq;
-
-	_mxc_timer_init(imxtm);
 }
 
 static int __init mxc_timer_init_dt(struct device_node *np,  enum imx_gpt_type type)

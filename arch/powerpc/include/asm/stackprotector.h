@@ -7,10 +7,9 @@
 #ifndef _ASM_STACKPROTECTOR_H
 #define _ASM_STACKPROTECTOR_H
 
-#include <linux/random.h>
-#include <linux/version.h>
 #include <asm/reg.h>
 #include <asm/current.h>
+#include <asm/paca.h>
 
 /*
  * Initialize the stackprotector canary value.
@@ -20,15 +19,12 @@
  */
 static __always_inline void boot_init_stack_canary(void)
 {
-	unsigned long canary;
-
-	/* Try to get a semi random initial value. */
-	canary = get_random_canary();
-	canary ^= mftb();
-	canary ^= LINUX_VERSION_CODE;
-	canary &= CANARY_MASK;
+	unsigned long canary = get_random_canary();
 
 	current->stack_canary = canary;
+#ifdef CONFIG_PPC64
+	get_paca()->canary = canary;
+#endif
 }
 
 #endif	/* _ASM_STACKPROTECTOR_H */

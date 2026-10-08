@@ -1,9 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * raid_class.h - a generic raid visualisation class
  *
  * Copyright (c) 2005 - James Bottomley <James.Bottomley@steeleye.com>
- *
- * This file is licensed under GPLv2
  */
 #include <linux/transport_class.h>
 
@@ -12,7 +11,7 @@ struct raid_template {
 };
 
 struct raid_function_template {
-	void *cookie;
+	const void *cookie;
 	int (*is_raid)(struct device *);
 	void (*get_resync)(struct device *);
 	void (*get_state)(struct device *);

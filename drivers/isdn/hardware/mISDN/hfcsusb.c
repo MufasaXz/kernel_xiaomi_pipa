@@ -1,23 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* hfcsusb.c
  * mISDN driver for Colognechip HFC-S USB chip
  *
  * Copyright 2001 by Peter Sprenger (sprenger@moving-bytes.de)
  * Copyright 2008 by Martin Bachem (info@bachem-it.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  *
  * module params
  *   debug=<n>, default=0, with n=0xHHHHGGGG
@@ -45,6 +31,7 @@ static DEFINE_RWLOCK(HFClock);
 
 
 MODULE_AUTHOR("Martin Bachem");
+MODULE_DESCRIPTION("mISDN driver for Colognechip HFC-S USB chip");
 MODULE_LICENSE("GPL");
 module_param(debug, uint, S_IRUGO | S_IWUSR);
 module_param(poll, int, 0);
@@ -60,7 +47,7 @@ static void hfcsusb_start_endpoint(struct hfcsusb *hw, int channel);
 static void hfcsusb_stop_endpoint(struct hfcsusb *hw, int channel);
 static int  hfcsusb_setup_bch(struct bchannel *bch, int protocol);
 static void deactivate_bchannel(struct bchannel *bch);
-static void hfcsusb_ph_info(struct hfcsusb *hw);
+static int  hfcsusb_ph_info(struct hfcsusb *hw);
 
 /* start next background transfer for control channel */
 static void
@@ -255,15 +242,17 @@ hfcusb_l2l1B(struct mISDNchannel *ch, struct sk_buff *skb)
  * send full D/B channel status information
  * as MPH_INFORMATION_IND
  */
-static void
+static int
 hfcsusb_ph_info(struct hfcsusb *hw)
 {
 	struct ph_info *phi;
 	struct dchannel *dch = &hw->dch;
 	int i;
 
-	phi = kzalloc(sizeof(struct ph_info) +
-		      dch->dev.nrbchan * sizeof(struct ph_info_ch), GFP_ATOMIC);
+	phi = kzalloc(struct_size(phi, bch, dch->dev.nrbchan), GFP_ATOMIC);
+	if (!phi)
+		return -ENOMEM;
+
 	phi->dch.ch.protocol = hw->protocol;
 	phi->dch.ch.Flags = dch->Flags;
 	phi->dch.state = dch->state;
@@ -273,9 +262,10 @@ hfcsusb_ph_info(struct hfcsusb *hw)
 		phi->bch[i].Flags = hw->bch[i].Flags;
 	}
 	_queue_data(&dch->dev.D, MPH_INFORMATION_IND, MISDN_ID_ANY,
-		    sizeof(struct ph_info_dch) + dch->dev.nrbchan *
-		    sizeof(struct ph_info_ch), phi, GFP_ATOMIC);
+		    struct_size(phi, bch, dch->dev.nrbchan), phi, GFP_ATOMIC);
 	kfree(phi);
+
+	return 0;
 }
 
 /*
@@ -364,8 +354,7 @@ hfcusb_l2l1D(struct mISDNchannel *ch, struct sk_buff *skb)
 			ret = l1_event(dch->l1, hh->prim);
 		break;
 	case MPH_INFORMATION_REQ:
-		hfcsusb_ph_info(hw);
-		ret = 0;
+		ret = hfcsusb_ph_info(hw);
 		break;
 	}
 
@@ -420,8 +409,7 @@ hfc_l1callback(struct dchannel *dch, u_int cmd)
 			       hw->name, __func__, cmd);
 		return -1;
 	}
-	hfcsusb_ph_info(hw);
-	return 0;
+	return hfcsusb_ph_info(hw);
 }
 
 static int
@@ -691,7 +679,7 @@ ph_state(struct dchannel *dch)
 }
 
 /*
- * disable/enable BChannel for desired protocoll
+ * disable/enable BChannel for desired protocol
  */
 static int
 hfcsusb_setup_bch(struct bchannel *bch, int protocol)
@@ -712,7 +700,7 @@ hfcsusb_setup_bch(struct bchannel *bch, int protocol)
 	switch (protocol) {
 	case (-1):	/* used for init */
 		bch->state = -1;
-		/* fall through */
+		fallthrough;
 	case (ISDN_P_NONE):
 		if (bch->state == ISDN_P_NONE)
 			return 0; /* already in idle state */
@@ -763,8 +751,7 @@ hfcsusb_setup_bch(struct bchannel *bch, int protocol)
 			handle_led(hw, (bch->nr == 1) ? LED_B1_OFF :
 				   LED_B2_OFF);
 	}
-	hfcsusb_ph_info(hw);
-	return 0;
+	return hfcsusb_ph_info(hw);
 }
 
 static void
@@ -857,8 +844,8 @@ hfcsusb_rx_frame(struct usb_fifo *fifo, __u8 *data, unsigned int len,
 		if (maxlen < 0) {
 			if (rx_skb)
 				skb_trim(rx_skb, 0);
-			pr_warning("%s.B%d: No bufferspace for %d bytes\n",
-				   hw->name, fifo->bch->nr, len);
+			pr_warn("%s.B%d: No bufferspace for %d bytes\n",
+				hw->name, fifo->bch->nr, len);
 			spin_unlock_irqrestore(&hw->lock, flags);
 			return;
 		}
@@ -1575,7 +1562,7 @@ reset_hfcsusb(struct hfcsusb *hw)
 	write_reg(hw, HFCUSB_USB_SIZE, (hw->packet_size / 8) |
 		  ((hw->packet_size / 8) << 4));
 
-	/* set USB_SIZE_I to match the the wMaxPacketSize for ISO transfers */
+	/* set USB_SIZE_I to match the wMaxPacketSize for ISO transfers */
 	write_reg(hw, HFCUSB_USB_SIZE_I, hw->iso_packet_size);
 
 	/* enable PCM/GCI master mode */
@@ -1917,13 +1904,13 @@ out:
 	mISDN_freebchannel(&hw->bch[1]);
 	mISDN_freebchannel(&hw->bch[0]);
 	mISDN_freedchannel(&hw->dch);
-	kfree(hw);
 	return err;
 }
 
 static int
 hfcsusb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 {
+	int err;
 	struct hfcsusb			*hw;
 	struct usb_device		*dev = interface_to_usbdev(intf);
 	struct usb_host_interface	*iface = intf->cur_altsetting;
@@ -2114,20 +2101,28 @@ hfcsusb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	if (!hw->ctrl_urb) {
 		pr_warn("%s: No memory for control urb\n",
 			driver_info->vend_name);
-		kfree(hw);
-		return -ENOMEM;
+		err = -ENOMEM;
+		goto err_free_hw;
 	}
 
 	pr_info("%s: %s: detected \"%s\" (%s, if=%d alt=%d)\n",
 		hw->name, __func__, driver_info->vend_name,
 		conf_str[small_match], ifnum, alt_used);
 
-	if (setup_instance(hw, dev->dev.parent))
-		return -EIO;
+	if (setup_instance(hw, dev->dev.parent)) {
+		err = -EIO;
+		goto err_free_urb;
+	}
 
 	hw->intf = intf;
 	usb_set_intfdata(hw->intf, hw);
 	return 0;
+
+err_free_urb:
+	usb_free_urb(hw->ctrl_urb);
+err_free_hw:
+	kfree(hw);
+	return err;
 }
 
 /* function called when an active device is removed */

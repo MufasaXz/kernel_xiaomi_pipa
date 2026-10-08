@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 # Please keep these build lists sorted!
 
 # core driver code
@@ -8,8 +9,12 @@ v3d-y := \
 	v3d_gem.o \
 	v3d_irq.o \
 	v3d_mmu.o \
+	v3d_perfmon.o \
 	v3d_trace_points.o \
-	v3d_sched.o
+	v3d_sched.o \
+	v3d_sysfs.o \
+	v3d_submit.o \
+	v3d_gemfs.o
 
 v3d-$(CONFIG_DEBUG_FS) += v3d_debugfs.o
 

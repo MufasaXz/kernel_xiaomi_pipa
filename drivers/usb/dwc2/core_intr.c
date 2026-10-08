@@ -3,36 +3,6 @@
  * core_intr.c - DesignWare HS OTG Controller common interrupt handling
  *
  * Copyright (C) 2004-2013 Synopsys, Inc.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. The names of the above-listed copyright holders may not be used
- *    to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * ALTERNATIVELY, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") as published by the Free Software
- * Foundation; either version 2 of the License, or (at your option) any
- * later version.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
- * IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
- * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR
- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
- * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
- * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
- * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 /*
@@ -114,6 +84,7 @@ static void dwc2_handle_otg_intr(struct dwc2_hsotg *hsotg)
 	u32 gotgint;
 	u32 gotgctl;
 	u32 gintmsk;
+	u32 pcgctl;
 
 	gotgint = dwc2_readl(hsotg, GOTGINT);
 	gotgctl = dwc2_readl(hsotg, GOTGCTL);
@@ -126,8 +97,22 @@ static void dwc2_handle_otg_intr(struct dwc2_hsotg *hsotg)
 			dwc2_op_state_str(hsotg));
 		gotgctl = dwc2_readl(hsotg, GOTGCTL);
 
-		if (dwc2_is_device_mode(hsotg))
+		if (dwc2_is_device_mode(hsotg)) {
+			if (hsotg->params.eusb2_disc) {
+				/* Clear the Gate hclk. */
+				pcgctl = dwc2_readl(hsotg, PCGCTL);
+				pcgctl &= ~PCGCTL_GATEHCLK;
+				dwc2_writel(hsotg, pcgctl, PCGCTL);
+				udelay(5);
+
+				/* Clear Phy Clock bit. */
+				pcgctl = dwc2_readl(hsotg, PCGCTL);
+				pcgctl &= ~PCGCTL_STOPPCLK;
+				dwc2_writel(hsotg, pcgctl, PCGCTL);
+				udelay(5);
+			}
 			dwc2_hsotg_disconnect(hsotg);
+		}
 
 		if (hsotg->op_state == OTG_STATE_B_HOST) {
 			hsotg->op_state = OTG_STATE_B_PERIPHERAL;
@@ -147,7 +132,7 @@ static void dwc2_handle_otg_intr(struct dwc2_hsotg *hsotg)
 			 * disconnected
 			 */
 			/* Reset to a clean state */
-			hsotg->lx_state = DWC2_L0;
+			hsotg->lx_state = DWC2_L3;
 		}
 
 		gotgctl = dwc2_readl(hsotg, GOTGCTL);
@@ -288,14 +273,9 @@ static void dwc2_handle_conn_id_status_change_intr(struct dwc2_hsotg *hsotg)
 
 	/*
 	 * Need to schedule a work, as there are possible DELAY function calls.
-	 * Release lock before scheduling workq as it holds spinlock during
-	 * scheduling.
 	 */
-	if (hsotg->wq_otg) {
-		spin_unlock(&hsotg->lock);
+	if (hsotg->wq_otg)
 		queue_work(hsotg->wq_otg, &hsotg->wf_otg);
-		spin_lock(&hsotg->lock);
-	}
 }
 
 /**
@@ -321,11 +301,20 @@ static void dwc2_handle_session_req_intr(struct dwc2_hsotg *hsotg)
 		hsotg->lx_state);
 
 	if (dwc2_is_device_mode(hsotg)) {
-		if (hsotg->lx_state == DWC2_L2) {
-			ret = dwc2_exit_partial_power_down(hsotg, true);
-			if (ret && (ret != -ENOTSUPP))
-				dev_err(hsotg->dev,
-					"exit power_down failed\n");
+		if (hsotg->lx_state != DWC2_L0) {
+			if (hsotg->in_ppd) {
+				ret = dwc2_exit_partial_power_down(hsotg, 0,
+								   true);
+				if (ret)
+					dev_err(hsotg->dev,
+						"exit power_down failed\n");
+			}
+
+			/* Exit gadget mode clock gating. */
+			if (hsotg->params.power_down ==
+			    DWC2_POWER_DOWN_PARAM_NONE && hsotg->bus_suspended &&
+			    !hsotg->params.no_clock_gating)
+				dwc2_gadget_exit_clock_gating(hsotg, 0);
 		}
 
 		/*
@@ -441,32 +430,54 @@ static void dwc2_handle_wakeup_detected_intr(struct dwc2_hsotg *hsotg)
 		dev_dbg(hsotg->dev, "DSTS=0x%0x\n",
 			dwc2_readl(hsotg, DSTS));
 		if (hsotg->lx_state == DWC2_L2) {
-			u32 dctl = dwc2_readl(hsotg, DCTL);
+			if (hsotg->in_ppd) {
+				u32 dctl = dwc2_readl(hsotg, DCTL);
+				/* Clear Remote Wakeup Signaling */
+				dctl &= ~DCTL_RMTWKUPSIG;
+				dwc2_writel(hsotg, dctl, DCTL);
+				ret = dwc2_exit_partial_power_down(hsotg, 1,
+								   true);
+				if (ret)
+					dev_err(hsotg->dev,
+						"exit partial_power_down failed\n");
+				call_gadget(hsotg, resume);
+			}
 
-			/* Clear Remote Wakeup Signaling */
-			dctl &= ~DCTL_RMTWKUPSIG;
-			dwc2_writel(hsotg, dctl, DCTL);
-			ret = dwc2_exit_partial_power_down(hsotg, true);
-			if (ret && (ret != -ENOTSUPP))
-				dev_err(hsotg->dev, "exit power_down failed\n");
-
-			/* Change to L0 state */
-			hsotg->lx_state = DWC2_L0;
-			call_gadget(hsotg, resume);
+			/* Exit gadget mode clock gating. */
+			if (hsotg->params.power_down ==
+			    DWC2_POWER_DOWN_PARAM_NONE && hsotg->bus_suspended &&
+			    !hsotg->params.no_clock_gating)
+				dwc2_gadget_exit_clock_gating(hsotg, 0);
 		} else {
 			/* Change to L0 state */
 			hsotg->lx_state = DWC2_L0;
 		}
 	} else {
-		if (hsotg->params.power_down)
-			return;
+		if (hsotg->lx_state == DWC2_L2) {
+			if (hsotg->in_ppd) {
+				ret = dwc2_exit_partial_power_down(hsotg, 1,
+								   true);
+				if (ret)
+					dev_err(hsotg->dev,
+						"exit partial_power_down failed\n");
+			}
 
-		if (hsotg->lx_state != DWC2_L1) {
-			u32 pcgcctl = dwc2_readl(hsotg, PCGCTL);
+			if (hsotg->params.power_down ==
+			    DWC2_POWER_DOWN_PARAM_NONE && hsotg->bus_suspended &&
+			    !hsotg->params.no_clock_gating)
+				dwc2_host_exit_clock_gating(hsotg, 1);
 
-			/* Restart the Phy Clock */
-			pcgcctl &= ~PCGCTL_STOPPCLK;
-			dwc2_writel(hsotg, pcgcctl, PCGCTL);
+			/*
+			 * If we've got this quirk then the PHY is stuck upon
+			 * wakeup.  Assert reset.  This will propagate out and
+			 * eventually we'll re-enumerate the device.  Not great
+			 * but the best we can do.  We can't call phy_reset()
+			 * at interrupt time but there's no hurry, so we'll
+			 * schedule it for later.
+			 */
+			if (hsotg->reset_phy_on_wake)
+				dwc2_host_schedule_phy_reset(hsotg);
+
 			mod_timer(&hsotg->wkp_timer,
 				  jiffies + msecs_to_jiffies(71));
 		} else {
@@ -530,31 +541,34 @@ static void dwc2_handle_usb_suspend_intr(struct dwc2_hsotg *hsotg)
 			return;
 		}
 		if (dsts & DSTS_SUSPSTS) {
-			if (hsotg->hw_params.power_optimized) {
+			switch (hsotg->params.power_down) {
+			case DWC2_POWER_DOWN_PARAM_PARTIAL:
 				ret = dwc2_enter_partial_power_down(hsotg);
-				if (ret) {
-					if (ret != -ENOTSUPP)
-						dev_err(hsotg->dev,
-							"%s: enter partial_power_down failed\n",
-							__func__);
-					goto skip_power_saving;
-				}
+				if (ret)
+					dev_err(hsotg->dev,
+						"enter partial_power_down failed\n");
 
 				udelay(100);
 
 				/* Ask phy to be suspended */
 				if (!IS_ERR_OR_NULL(hsotg->uphy))
 					usb_phy_set_suspend(hsotg->uphy, true);
+				break;
+			case DWC2_POWER_DOWN_PARAM_HIBERNATION:
+				ret = dwc2_enter_hibernation(hsotg, 0);
+				if (ret)
+					dev_err(hsotg->dev,
+						"enter hibernation failed\n");
+				break;
+			case DWC2_POWER_DOWN_PARAM_NONE:
+				/*
+				 * If neither hibernation nor partial power down are supported,
+				 * clock gating is used to save power.
+				 */
+				if (!hsotg->params.no_clock_gating)
+					dwc2_gadget_enter_clock_gating(hsotg);
 			}
 
-			if (hsotg->hw_params.hibernation) {
-				ret = dwc2_enter_hibernation(hsotg, 0);
-				if (ret && ret != -ENOTSUPP)
-					dev_err(hsotg->dev,
-						"%s: enter hibernation failed\n",
-						__func__);
-			}
-skip_power_saving:
 			/*
 			 * Change to L2 (suspend) state before releasing
 			 * spinlock
@@ -715,17 +729,18 @@ static inline void dwc_handle_gpwrdn_disc_det(struct dwc2_hsotg *hsotg,
 	gpwrdn_tmp &= ~GPWRDN_PMUINTSEL;
 	dwc2_writel(hsotg, gpwrdn_tmp, GPWRDN);
 
+	/* Reset ULPI latch */
+	gpwrdn = dwc2_readl(hsotg, GPWRDN);
+	gpwrdn &= ~GPWRDN_ULPI_LATCH_EN_DURING_HIB_ENTRY;
+	dwc2_writel(hsotg, gpwrdn, GPWRDN);
+
 	/* De-assert Wakeup Logic */
 	gpwrdn_tmp = dwc2_readl(hsotg, GPWRDN);
 	gpwrdn_tmp &= ~GPWRDN_PMUACTV;
 	dwc2_writel(hsotg, gpwrdn_tmp, GPWRDN);
 
 	hsotg->hibernated = 0;
-
-#if IS_ENABLED(CONFIG_USB_DWC2_HOST) ||	\
-	IS_ENABLED(CONFIG_USB_DWC2_DUAL_ROLE)
 	hsotg->bus_suspended = 0;
-#endif
 
 	if (gpwrdn & GPWRDN_IDSTS) {
 		hsotg->op_state = OTG_STATE_B_PERIPHERAL;
@@ -749,10 +764,11 @@ static inline void dwc_handle_gpwrdn_disc_det(struct dwc2_hsotg *hsotg,
  * The GPWRDN interrupts are those that occur in both Host and
  * Device mode while core is in hibernated state.
  */
-static void dwc2_handle_gpwrdn_intr(struct dwc2_hsotg *hsotg)
+static int dwc2_handle_gpwrdn_intr(struct dwc2_hsotg *hsotg)
 {
 	u32 gpwrdn;
 	int linestate;
+	int ret = 0;
 
 	gpwrdn = dwc2_readl(hsotg, GPWRDN);
 	/* clear all interrupt */
@@ -776,17 +792,27 @@ static void dwc2_handle_gpwrdn_intr(struct dwc2_hsotg *hsotg)
 		if (hsotg->hw_params.hibernation &&
 		    hsotg->hibernated) {
 			if (gpwrdn & GPWRDN_IDSTS) {
-				dwc2_exit_hibernation(hsotg, 0, 0, 0);
+				ret = dwc2_exit_hibernation(hsotg, 0, 0, 0);
+				if (ret)
+					dev_err(hsotg->dev,
+						"exit hibernation failed.\n");
 				call_gadget(hsotg, resume);
 			} else {
-				dwc2_exit_hibernation(hsotg, 1, 0, 1);
+				ret = dwc2_exit_hibernation(hsotg, 1, 0, 1);
+				if (ret)
+					dev_err(hsotg->dev,
+						"exit hibernation failed.\n");
 			}
 		}
 	} else if ((gpwrdn & GPWRDN_RST_DET) &&
 		   (gpwrdn & GPWRDN_RST_DET_MSK)) {
 		dev_dbg(hsotg->dev, "%s: GPWRDN_RST_DET\n", __func__);
-		if (!linestate && (gpwrdn & GPWRDN_BSESSVLD))
-			dwc2_exit_hibernation(hsotg, 0, 1, 0);
+		if (!linestate) {
+			ret = dwc2_exit_hibernation(hsotg, 0, 1, 0);
+			if (ret)
+				dev_err(hsotg->dev,
+					"exit hibernation failed.\n");
+		}
 	} else if ((gpwrdn & GPWRDN_STS_CHGINT) &&
 		   (gpwrdn & GPWRDN_STS_CHGINT_MSK)) {
 		dev_dbg(hsotg->dev, "%s: GPWRDN_STS_CHGINT\n", __func__);
@@ -798,6 +824,8 @@ static void dwc2_handle_gpwrdn_intr(struct dwc2_hsotg *hsotg)
 		 */
 		dwc_handle_gpwrdn_disc_det(hsotg, gpwrdn);
 	}
+
+	return ret;
 }
 
 /*

@@ -1,18 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright(c) 2007 - 2008 Intel Corporation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
  *
  * Maintained at www.Open-FCoE.org
  */
@@ -36,9 +24,9 @@
 #include <linux/slab.h>
 #include <linux/err.h>
 #include <linux/export.h>
-#include <linux/rculist.h>
+#include <linux/list.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <scsi/fc/fc_gs.h>
 
@@ -87,7 +75,6 @@ static void fc_disc_recv_rscn_req(struct fc_disc *disc, struct fc_frame *fp)
 	struct fc_seq_els_data rjt_data;
 	unsigned int len;
 	int redisc = 0;
-	enum fc_els_rscn_ev_qual ev_qual;
 	enum fc_els_rscn_addr_fmt fmt;
 	LIST_HEAD(disc_ports);
 	struct fc_disc_port *dp, *next;
@@ -119,8 +106,6 @@ static void fc_disc_recv_rscn_req(struct fc_disc *disc, struct fc_frame *fp)
 		goto reject;
 
 	for (pp = (void *)(rp + 1); len > 0; len -= sizeof(*pp), pp++) {
-		ev_qual = pp->rscn_page_flags >> ELS_RSCN_EV_QUAL_BIT;
-		ev_qual &= ELS_RSCN_EV_QUAL_MASK;
 		fmt = pp->rscn_page_flags >> ELS_RSCN_ADDR_FMT_BIT;
 		fmt &= ELS_RSCN_ADDR_FMT_MASK;
 		/*
@@ -313,8 +298,8 @@ static void fc_disc_error(struct fc_disc *disc, struct fc_frame *fp)
 	struct fc_lport *lport = fc_disc_lport(disc);
 	unsigned long delay = 0;
 
-	FC_DISC_DBG(disc, "Error %ld, retries %d/%d\n",
-		    PTR_ERR(fp), disc->retry_count,
+	FC_DISC_DBG(disc, "Error %d, retries %d/%d\n",
+		    PTR_ERR_OR_ZERO(fp), disc->retry_count,
 		    FC_DISC_RETRY_LIMIT);
 
 	if (!fp || PTR_ERR(fp) == -FC_EX_TIMEOUT) {
@@ -349,7 +334,7 @@ static void fc_disc_error(struct fc_disc *disc, struct fc_frame *fp)
 
 /**
  * fc_disc_gpn_ft_req() - Send Get Port Names by FC-4 type (GPN_FT) request
- * @lport: The discovery context
+ * @disc: The discovery context
  */
 static void fc_disc_gpn_ft_req(struct fc_disc *disc)
 {
@@ -382,7 +367,7 @@ err:
 
 /**
  * fc_disc_gpn_ft_parse() - Parse the body of the dNS GPN_FT response.
- * @lport: The local port the GPN_FT was received on
+ * @disc:  The discovery context
  * @buf:   The GPN_FT response buffer
  * @len:   The size of response buffer
  *
@@ -500,7 +485,7 @@ static void fc_disc_timeout(struct work_struct *work)
  * fc_disc_gpn_ft_resp() - Handle a response frame from Get Port Names (GPN_FT)
  * @sp:	    The sequence that the GPN_FT response was received on
  * @fp:	    The GPN_FT response frame
- * @lp_arg: The discovery context
+ * @disc_arg: The discovery context
  *
  * Locking Note: This function is called without disc mutex held, and
  *		 should do all its processing with the mutex held

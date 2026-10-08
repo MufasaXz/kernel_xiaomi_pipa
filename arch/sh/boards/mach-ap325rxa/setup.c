@@ -13,19 +13,21 @@
 
 #include <cpu/sh7723.h>
 
+#include <linux/dma-map-ops.h>
 #include <linux/clkdev.h>
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/gpio/machine.h>
 #include <linux/i2c.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/memblock.h>
-#include <linux/mfd/tmio.h>
 #include <linux/mmc/host.h>
 #include <linux/mtd/physmap.h>
 #include <linux/mtd/sh_flctl.h>
+#include <linux/platform_data/tmio.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/fixed.h>
 #include <linux/regulator/machine.h>
@@ -410,16 +412,16 @@ static int __init ap325rxa_devices_setup(void)
 	/* LD3 and LD4 LEDs */
 	gpio_request(GPIO_PTX5, NULL); /* RUN */
 	gpio_direction_output(GPIO_PTX5, 1);
-	gpio_export(GPIO_PTX5, 0);
+	gpiod_export(gpio_to_desc(GPIO_PTX5), 0);
 
 	gpio_request(GPIO_PTX4, NULL); /* INDICATOR */
 	gpio_direction_output(GPIO_PTX4, 0);
-	gpio_export(GPIO_PTX4, 0);
+	gpiod_export(gpio_to_desc(GPIO_PTX4), 0);
 
 	/* SW1 input */
 	gpio_request(GPIO_PTF7, NULL); /* MODE */
 	gpio_direction_input(GPIO_PTF7);
-	gpio_export(GPIO_PTF7, 0);
+	gpiod_export(gpio_to_desc(GPIO_PTF7), 0);
 
 	/* LCDC */
 	gpio_request(GPIO_FN_LCDD15, NULL);
@@ -527,11 +529,9 @@ static int __init ap325rxa_devices_setup(void)
 
 	/* Initialize CEU platform device separately to map memory first */
 	device_initialize(&ap325rxa_ceu_device.dev);
-	arch_setup_pdev_archdata(&ap325rxa_ceu_device);
 	dma_declare_coherent_memory(&ap325rxa_ceu_device.dev,
-				    ceu_dma_membase, ceu_dma_membase,
-				    ceu_dma_membase + CEU_BUFFER_MEMORY_SIZE - 1,
-				    DMA_MEMORY_EXCLUSIVE);
+			ceu_dma_membase, ceu_dma_membase,
+			CEU_BUFFER_MEMORY_SIZE);
 
 	platform_device_add(&ap325rxa_ceu_device);
 
@@ -557,8 +557,11 @@ static void __init ap325rxa_mv_mem_reserve(void)
 	phys_addr_t phys;
 	phys_addr_t size = CEU_BUFFER_MEMORY_SIZE;
 
-	phys = memblock_alloc_base(size, PAGE_SIZE, MEMBLOCK_ALLOC_ANYWHERE);
-	memblock_free(phys, size);
+	phys = memblock_phys_alloc(size, PAGE_SIZE);
+	if (!phys)
+		panic("Failed to allocate CEU memory\n");
+
+	memblock_phys_free(phys, size);
 	memblock_remove(phys, size);
 
 	ceu_dma_membase = phys;

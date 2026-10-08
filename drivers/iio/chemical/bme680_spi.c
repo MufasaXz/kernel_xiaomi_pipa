@@ -4,7 +4,7 @@
  *
  * Copyright (C) 2018 Himanshu Jha <himanshujha199640@gmail.com>
  */
-#include <linux/acpi.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <linux/spi/spi.h>
@@ -100,7 +100,7 @@ static int bme680_regmap_spi_read(void *context, const void *reg,
 	return spi_write_then_read(spi, &addr, 1, val, val_size);
 }
 
-static struct regmap_bus bme680_regmap_bus = {
+static const struct regmap_bus bme680_regmap_bus = {
 	.write = bme680_regmap_spi_write,
 	.read = bme680_regmap_spi_read,
 	.reg_format_endian_default = REGMAP_ENDIAN_BIG,
@@ -112,14 +112,6 @@ static int bme680_spi_probe(struct spi_device *spi)
 	const struct spi_device_id *id = spi_get_device_id(spi);
 	struct bme680_spi_bus_context *bus_context;
 	struct regmap *regmap;
-	int ret;
-
-	spi->bits_per_word = 8;
-	ret = spi_setup(spi);
-	if (ret < 0) {
-		dev_err(&spi->dev, "spi_setup failed!\n");
-		return ret;
-	}
 
 	bus_context = devm_kzalloc(&spi->dev, sizeof(*bus_context), GFP_KERNEL);
 	if (!bus_context)
@@ -131,8 +123,7 @@ static int bme680_spi_probe(struct spi_device *spi)
 	regmap = devm_regmap_init(&spi->dev, &bme680_regmap_bus,
 				  bus_context, &bme680_regmap_config);
 	if (IS_ERR(regmap)) {
-		dev_err(&spi->dev, "Failed to register spi regmap %d\n",
-				(int)PTR_ERR(regmap));
+		dev_err(&spi->dev, "Failed to register spi regmap %ld\n", PTR_ERR(regmap));
 		return PTR_ERR(regmap);
 	}
 
@@ -141,20 +132,21 @@ static int bme680_spi_probe(struct spi_device *spi)
 
 static const struct spi_device_id bme680_spi_id[] = {
 	{"bme680", 0},
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, bme680_spi_id);
 
-static const struct acpi_device_id bme680_acpi_match[] = {
-	{"BME0680", 0},
-	{},
+static const struct of_device_id bme680_of_spi_match[] = {
+	{ .compatible = "bosch,bme680", },
+	{ }
 };
-MODULE_DEVICE_TABLE(acpi, bme680_acpi_match);
+MODULE_DEVICE_TABLE(of, bme680_of_spi_match);
 
 static struct spi_driver bme680_spi_driver = {
 	.driver = {
 		.name			= "bme680_spi",
-		.acpi_match_table	= ACPI_PTR(bme680_acpi_match),
+		.of_match_table		= bme680_of_spi_match,
+		.pm = pm_ptr(&bme680_dev_pm_ops),
 	},
 	.probe = bme680_spi_probe,
 	.id_table = bme680_spi_id,
@@ -164,3 +156,4 @@ module_spi_driver(bme680_spi_driver);
 MODULE_AUTHOR("Himanshu Jha <himanshujha199640@gmail.com>");
 MODULE_DESCRIPTION("Bosch BME680 SPI driver");
 MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("IIO_BME680");

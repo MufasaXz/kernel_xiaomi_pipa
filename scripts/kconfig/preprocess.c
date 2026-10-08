@@ -2,23 +2,28 @@
 //
 // Copyright (C) 2018 Masahiro Yamada <yamada.masahiro@socionext.com>
 
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "list.h"
-
-#define ARRAY_SIZE(arr)		(sizeof(arr) / sizeof((arr)[0]))
+#include <array_size.h>
+#include <list.h>
+#include <xalloc.h>
+#include "internal.h"
+#include "lkc.h"
+#include "preprocess.h"
 
 static char *expand_string_with_args(const char *in, int argc, char *argv[]);
+static char *expand_string(const char *in);
 
 static void __attribute__((noreturn)) pperror(const char *format, ...)
 {
 	va_list ap;
 
-	fprintf(stderr, "%s:%d: ", current_file->name, yylineno);
+	fprintf(stderr, "%s:%d: ", cur_filename, yylineno);
 	va_start(ap, format);
 	vfprintf(stderr, format, ap);
 	va_end(ap);
@@ -84,14 +89,17 @@ static char *env_expand(const char *name)
 	return xstrdup(value);
 }
 
-void env_write_dep(FILE *f, const char *autoconfig_name)
+void env_write_dep(struct gstr *s)
 {
 	struct env *e, *tmp;
 
 	list_for_each_entry_safe(e, tmp, &env_list, node) {
-		fprintf(f, "ifneq \"$(%s)\" \"%s\"\n", e->name, e->value);
-		fprintf(f, "%s: FORCE\n", autoconfig_name);
-		fprintf(f, "endif\n");
+		str_printf(s,
+			   "\n"
+			   "ifneq \"$(%s)\" \"%s\"\n"
+			   "$(autoconfig): FORCE\n"
+			   "endif\n",
+			   e->name, e->value);
 		env_del(e);
 	}
 }
@@ -116,7 +124,7 @@ static char *do_error_if(int argc, char *argv[])
 
 static char *do_filename(int argc, char *argv[])
 {
-	return xstrdup(current_file->name);
+	return xstrdup(cur_filename);
 }
 
 static char *do_info(int argc, char *argv[])
@@ -178,8 +186,7 @@ static char *do_shell(int argc, char *argv[])
 static char *do_warning_if(int argc, char *argv[])
 {
 	if (!strcmp(argv[0], "y"))
-		fprintf(stderr, "%s:%d: %s\n",
-			current_file->name, yylineno, argv[1]);
+		fprintf(stderr, "%s:%d: %s\n", cur_filename, yylineno, argv[1]);
 
 	return xstrdup("");
 }
@@ -551,15 +558,14 @@ static char *expand_string_with_args(const char *in, int argc, char *argv[])
 	return __expand_string(&in, is_end_of_str, argc, argv);
 }
 
-char *expand_string(const char *in)
+static char *expand_string(const char *in)
 {
 	return expand_string_with_args(in, 0, NULL);
 }
 
 static bool is_end_of_token(char c)
 {
-	/* Why are '.' and '/' valid characters for symbols? */
-	return !(isalnum(c) || c == '_' || c == '-' || c == '.' || c == '/');
+	return !(isalnum(c) || c == '_' || c == '-');
 }
 
 /*

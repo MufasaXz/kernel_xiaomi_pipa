@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2007 PA Semi, Inc
  *
@@ -8,21 +9,6 @@
  *
  * Based on arch/powerpc/platforms/cell/cbe_cpufreq.c:
  * (C) Copyright IBM Deutschland Entwicklung GmbH 2005
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  */
 
 #include <linux/cpufreq.h>
@@ -32,9 +18,10 @@
 
 #include <asm/hw_irq.h>
 #include <asm/io.h>
-#include <asm/prom.h>
 #include <asm/time.h>
 #include <asm/smp.h>
+
+#include <platforms/pasemi/pasemi.h>
 
 #define SDCASR_REG		0x0100
 #define SDCASR_REG_STRIDE	0x1000
@@ -208,7 +195,8 @@ static int pas_cpufreq_cpu_init(struct cpufreq_policy *policy)
 	policy->cur = pas_freqs[cur_astate].frequency;
 	ppc_proc_freq = policy->cur * 1000ul;
 
-	return cpufreq_generic_init(policy, pas_freqs, get_gizmo_latency());
+	cpufreq_generic_init(policy, pas_freqs, get_gizmo_latency());
+	return 0;
 
 out_unmap_sdcasr:
 	iounmap(sdcasr_mapbase);
@@ -216,21 +204,19 @@ out:
 	return err;
 }
 
-static int pas_cpufreq_cpu_exit(struct cpufreq_policy *policy)
+static void pas_cpufreq_cpu_exit(struct cpufreq_policy *policy)
 {
 	/*
 	 * We don't support CPU hotplug. Don't unmap after the system
 	 * has already made it to a running state.
 	 */
 	if (system_state >= SYSTEM_RUNNING)
-		return 0;
+		return;
 
 	if (sdcasr_mapbase)
 		iounmap(sdcasr_mapbase);
 	if (sdcpwr_mapbase)
 		iounmap(sdcpwr_mapbase);
-
-	return 0;
 }
 
 static int pas_cpufreq_target(struct cpufreq_policy *policy,
@@ -259,7 +245,6 @@ static struct cpufreq_driver pas_cpufreq_driver = {
 	.exit		= pas_cpufreq_cpu_exit,
 	.verify		= cpufreq_generic_frequency_table_verify,
 	.target_index	= pas_cpufreq_target,
-	.attr		= cpufreq_generic_attr,
 };
 
 /*
@@ -283,5 +268,6 @@ static void __exit pas_cpufreq_exit(void)
 module_init(pas_cpufreq_init);
 module_exit(pas_cpufreq_exit);
 
+MODULE_DESCRIPTION("cpufreq driver for PA Semi PWRficient");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Egor Martovetsky <egor@pasemi.com>, Olof Johansson <olof@lixom.net>");

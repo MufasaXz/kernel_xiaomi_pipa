@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include <linux/types.h>
 #include <linux/ioport.h>
 #include <linux/slab.h>
@@ -6,11 +7,6 @@
 #include <linux/mcb.h>
 
 #include "mcb-internal.h"
-
-struct mcb_parse_priv {
-	phys_addr_t mapbase;
-	void __iomem *base;
-};
 
 #define for_each_chameleon_cell(dtype, p)	\
 	for ((dtype) = get_next_dtype((p));	\
@@ -255,4 +251,4 @@ free_header:
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(chameleon_parse_cells);
+EXPORT_SYMBOL_NS_GPL(chameleon_parse_cells, "MCB");

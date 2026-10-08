@@ -1,10 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * CE4100 PCI-I2C glue code for PXA's driver
  * Author: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
- * License: GPL v2
  *
  * The CE4100's I2C device is more or less the same one as found on PXA.
- * It does not support slave mode, the register slightly moved. This PCI
+ * It does not support target mode, the register slightly moved. This PCI
  * device provides three bars, every contains a single I2C controller.
  */
 #include <linux/init.h>
@@ -12,7 +12,6 @@
 #include <linux/platform_device.h>
 #include <linux/platform_data/i2c-pxa.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/of_address.h>
 
 #define CE4100_PCI_I2C_DEVS	3
@@ -136,7 +135,7 @@ err_dev_add:
 
 static const struct pci_device_id ce4100_i2c_devices[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0x2e68)},
-	{ },
+	{ }
 };
 
 static struct pci_driver ce4100_i2c_driver = {

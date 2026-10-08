@@ -37,6 +37,7 @@
 #include <linux/ssb/ssb.h>
 #include <linux/ssb/ssb_embedded.h>
 #include <linux/bcma/bcma_soc.h>
+#include <asm/bmips.h>
 #include <asm/bootinfo.h>
 #include <asm/idle.h>
 #include <asm/prom.h>
@@ -44,6 +45,13 @@
 #include <asm/time.h>
 #include <bcm47xx.h>
 #include <bcm47xx_board.h>
+
+/*
+ * CBR addr doesn't change and we can cache it.
+ * For broken SoC/Bootloader CBR addr might also be provided via DT
+ * with "brcm,bmips-cbr-reg" in the "cpus" node.
+ */
+void __iomem *bmips_cbr_addr __read_mostly;
 
 union bcm47xx_bus bcm47xx_bus;
 EXPORT_SYMBOL(bcm47xx_bus);
@@ -141,14 +149,14 @@ static void __init bcm47xx_register_bcma(void)
 
 /*
  * Memory setup is done in the early part of MIPS's arch_mem_init. It's supposed
- * to detect memory and record it with add_memory_region.
+ * to detect memory and record it with memblock_add.
  * Any extra initializaion performed here must not use kmalloc or bootmem.
  */
 void __init plat_mem_setup(void)
 {
 	struct cpuinfo_mips *c = &current_cpu_data;
 
-	if ((c->cputype == CPU_74K) || (c->cputype == CPU_1074K)) {
+	if (c->cputype == CPU_74K) {
 		pr_info("Using bcma bus\n");
 #ifdef CONFIG_BCM47XX_BCMA
 		bcm47xx_bus_type = BCM47XX_BUS_TYPE_BCMA;
@@ -248,7 +256,7 @@ static int __init bcm47xx_cpu_fixes(void)
 }
 arch_initcall(bcm47xx_cpu_fixes);
 
-static struct fixed_phy_status bcm47xx_fixed_phy_status __initdata = {
+static const struct fixed_phy_status bcm47xx_fixed_phy_status __initconst = {
 	.link	= 1,
 	.speed	= SPEED_100,
 	.duplex	= DUPLEX_FULL,
@@ -274,7 +282,7 @@ static int __init bcm47xx_register_bus_complete(void)
 	bcm47xx_leds_register();
 	bcm47xx_workarounds();
 
-	fixed_phy_add(PHY_POLL, 0, &bcm47xx_fixed_phy_status, -1);
+	fixed_phy_add(&bcm47xx_fixed_phy_status);
 	return 0;
 }
 device_initcall(bcm47xx_register_bus_complete);

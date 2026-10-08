@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include <linux/etherdevice.h>
 #include <linux/if_macvlan.h>
 #include <linux/if_tap.h>
@@ -34,15 +35,14 @@ struct macvtap_dev {
  */
 static dev_t macvtap_major;
 
-static const void *macvtap_net_namespace(struct device *d)
+static const void *macvtap_net_namespace(const struct device *d)
 {
-	struct net_device *dev = to_net_dev(d->parent);
+	const struct net_device *dev = to_net_dev(d->parent);
 	return dev_net(dev);
 }
 
 static struct class macvtap_class = {
 	.name = "macvtap",
-	.owner = THIS_MODULE,
 	.ns_type = &net_ns_type_operations,
 	.namespace = macvtap_net_namespace,
 };
@@ -77,8 +77,8 @@ static void macvtap_update_features(struct tap_dev *tap,
 	netdev_update_features(vlan->dev);
 }
 
-static int macvtap_newlink(struct net *src_net, struct net_device *dev,
-			   struct nlattr *tb[], struct nlattr *data[],
+static int macvtap_newlink(struct net_device *dev,
+			   struct rtnl_newlink_params *params,
 			   struct netlink_ext_ack *extack)
 {
 	struct macvtap_dev *vlantap = netdev_priv(dev);
@@ -105,7 +105,7 @@ static int macvtap_newlink(struct net *src_net, struct net_device *dev,
 	/* Don't put anything that may fail after macvlan_common_newlink
 	 * because we can't undo what it does.
 	 */
-	err = macvlan_common_newlink(src_net, dev, tb, data, extack);
+	err = macvlan_common_newlink(dev, params, extack);
 	if (err) {
 		netdev_rx_handler_unregister(dev);
 		return err;
@@ -174,7 +174,7 @@ static int macvtap_device_event(struct notifier_block *unused,
 
 		devt = MKDEV(MAJOR(macvtap_major), vlantap->tap.minor);
 		classdev = device_create(&macvtap_class, &dev->dev, devt,
-					 dev, tap_name);
+					 dev, "%s", tap_name);
 		if (IS_ERR(classdev)) {
 			tap_free_minor(macvtap_major, &vlantap->tap);
 			return notifier_from_errno(PTR_ERR(classdev));
@@ -206,7 +206,7 @@ static struct notifier_block macvtap_notifier_block __read_mostly = {
 	.notifier_call	= macvtap_device_event,
 };
 
-static int macvtap_init(void)
+static int __init macvtap_init(void)
 {
 	int err;
 
@@ -240,7 +240,7 @@ out1:
 }
 module_init(macvtap_init);
 
-static void macvtap_exit(void)
+static void __exit macvtap_exit(void)
 {
 	rtnl_link_unregister(&macvtap_link_ops);
 	unregister_netdevice_notifier(&macvtap_notifier_block);
@@ -250,5 +250,6 @@ static void macvtap_exit(void)
 module_exit(macvtap_exit);
 
 MODULE_ALIAS_RTNL_LINK("macvtap");
+MODULE_DESCRIPTION("MAC-VLAN based tap driver");
 MODULE_AUTHOR("Arnd Bergmann <arnd@arndb.de>");
 MODULE_LICENSE("GPL");

@@ -11,7 +11,9 @@
 
 static void devm_component_release(struct device *dev, void *res)
 {
-	snd_soc_unregister_component(*(struct device **)res);
+	const struct snd_soc_component_driver **cmpnt_drv = res;
+
+	snd_soc_unregister_component_by_driver(dev, *cmpnt_drv);
 }
 
 /**
@@ -28,7 +30,7 @@ int devm_snd_soc_register_component(struct device *dev,
 			 const struct snd_soc_component_driver *cmpnt_drv,
 			 struct snd_soc_dai_driver *dai_drv, int num_dai)
 {
-	struct device **ptr;
+	const struct snd_soc_component_driver **ptr;
 	int ret;
 
 	ptr = devres_alloc(devm_component_release, sizeof(*ptr), GFP_KERNEL);
@@ -37,7 +39,7 @@ int devm_snd_soc_register_component(struct device *dev,
 
 	ret = snd_soc_register_component(dev, cmpnt_drv, dai_drv, num_dai);
 	if (ret == 0) {
-		*ptr = dev;
+		*ptr = cmpnt_drv;
 		devres_add(dev, ptr);
 	} else {
 		devres_free(ptr);
@@ -80,6 +82,13 @@ int devm_snd_soc_register_card(struct device *dev, struct snd_soc_card *card)
 	return ret;
 }
 EXPORT_SYMBOL_GPL(devm_snd_soc_register_card);
+
+int devm_snd_soc_register_deferrable_card(struct device *dev, struct snd_soc_card *card)
+{
+	card->devres_dev = dev;
+	return snd_soc_register_card(card);
+}
+EXPORT_SYMBOL_GPL(devm_snd_soc_register_deferrable_card);
 
 #ifdef CONFIG_SND_SOC_GENERIC_DMAENGINE_PCM
 

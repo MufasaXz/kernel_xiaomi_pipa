@@ -1,10 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver for ADAU1381/ADAU1781 CODEC
  *
  * Copyright 2014 Analog Devices Inc.
  *  Author: Lars-Peter Clausen <lars@metafoo.de>
- *
- * Licensed under the GPL-2.
  */
 
 #include <linux/i2c.h>
@@ -15,8 +14,7 @@
 
 #include "adau1781.h"
 
-static int adau1781_i2c_probe(struct i2c_client *client,
-	const struct i2c_device_id *id)
+static int adau1781_i2c_probe(struct i2c_client *client)
 {
 	struct regmap_config config;
 
@@ -26,13 +24,12 @@ static int adau1781_i2c_probe(struct i2c_client *client,
 
 	return adau1781_probe(&client->dev,
 		devm_regmap_init_i2c(client, &config),
-		id->driver_data, NULL);
+		(uintptr_t)i2c_get_match_data(client), NULL);
 }
 
-static int adau1781_i2c_remove(struct i2c_client *client)
+static void adau1781_i2c_remove(struct i2c_client *client)
 {
 	adau17x1_remove(&client->dev);
-	return 0;
 }
 
 static const struct i2c_device_id adau1781_i2c_ids[] = {

@@ -5,6 +5,7 @@
  * Copyright 2007 IBM Corp
  */
 
+#include <linux/bpf-cgroup.h>
 #include <linux/device_cgroup.h>
 #include <linux/cgroup.h>
 #include <linux/ctype.h>
@@ -14,6 +15,8 @@
 #include <linux/slab.h>
 #include <linux/rcupdate.h>
 #include <linux/mutex.h>
+
+#ifdef CONFIG_CGROUP_DEVICE
 
 static DEFINE_MUTEX(devcgroup_mutex);
 
@@ -213,7 +216,7 @@ static void devcgroup_offline(struct cgroup_subsys_state *css)
 }
 
 /*
- * called from kernel/cgroup.c with cgroup_lock() held.
+ * called from kernel/cgroup/cgroup.c with cgroup_lock() held.
  */
 static struct cgroup_subsys_state *
 devcgroup_css_alloc(struct cgroup_subsys_state *parent_css)
@@ -363,7 +366,8 @@ static bool match_exception_partial(struct list_head *exceptions, short type,
 {
 	struct dev_exception_item *ex;
 
-	list_for_each_entry_rcu(ex, exceptions, list) {
+	list_for_each_entry_rcu(ex, exceptions, list,
+				lockdep_is_held(&devcgroup_mutex)) {
 		if ((type & DEVCG_DEV_BLOCK) && !(ex->type & DEVCG_DEV_BLOCK))
 			continue;
 		if ((type & DEVCG_DEV_CHAR) && !(ex->type & DEVCG_DEV_CHAR))
@@ -417,7 +421,7 @@ static bool verify_new_ex(struct dev_cgroup *dev_cgroup,
 		} else {
 			/*
 			 * new exception in the child will add more devices
-			 * that can be acessed, so it can't match any of
+			 * that can be accessed, so it can't match any of
 			 * parent's exceptions, even slightly
 			 */ 
 			match = match_exception_partial(&dev_cgroup->exceptions,
@@ -520,7 +524,7 @@ static inline int may_allow_all(struct dev_cgroup *parent)
  * This is one of the three key functions for hierarchy implementation.
  * This function is responsible for re-evaluating all the cgroup's active
  * exceptions due to a parent's exception change.
- * Refer to Documentation/cgroup-v1/devices.txt for more details.
+ * Refer to Documentation/admin-guide/cgroup-v1/devices.rst for more details.
  */
 static void revalidate_active_exceptions(struct dev_cgroup *devcg)
 {
@@ -817,8 +821,7 @@ struct cgroup_subsys devices_cgrp_subsys = {
 };
 
 /**
- * __devcgroup_check_permission - checks if an inode operation is permitted
- * @dev_cgroup: the dev cgroup to be tested against
+ * devcgroup_legacy_check_permission - checks if an inode operation is permitted
  * @type: device type
  * @major: device major number
  * @minor: device minor number
@@ -826,8 +829,8 @@ struct cgroup_subsys devices_cgrp_subsys = {
  *
  * returns 0 on success, -EPERM case the operation is not permitted
  */
-int __devcgroup_check_permission(short type, u32 major, u32 minor,
-				 short access)
+static int devcgroup_legacy_check_permission(short type, u32 major, u32 minor,
+					short access)
 {
 	struct dev_cgroup *dev_cgroup;
 	bool rc;
@@ -849,3 +852,25 @@ int __devcgroup_check_permission(short type, u32 major, u32 minor,
 
 	return 0;
 }
+
+#endif /* CONFIG_CGROUP_DEVICE */
+
+#if defined(CONFIG_CGROUP_DEVICE) || defined(CONFIG_CGROUP_BPF)
+
+int devcgroup_check_permission(short type, u32 major, u32 minor, short access)
+{
+	int rc = BPF_CGROUP_RUN_PROG_DEVICE_CGROUP(type, major, minor, access);
+
+	if (rc)
+		return rc;
+
+	#ifdef CONFIG_CGROUP_DEVICE
+	return devcgroup_legacy_check_permission(type, major, minor, access);
+
+	#else /* CONFIG_CGROUP_DEVICE */
+	return 0;
+
+	#endif /* CONFIG_CGROUP_DEVICE */
+}
+EXPORT_SYMBOL(devcgroup_check_permission);
+#endif /* defined(CONFIG_CGROUP_DEVICE) || defined(CONFIG_CGROUP_BPF) */

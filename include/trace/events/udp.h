@@ -7,72 +7,43 @@
 
 #include <linux/udp.h>
 #include <linux/tracepoint.h>
+#include <trace/events/net_probe_common.h>
 
 TRACE_EVENT(udp_fail_queue_rcv_skb,
 
-	TP_PROTO(int rc, struct sock *sk),
+	TP_PROTO(int rc, struct sock *sk, struct sk_buff *skb),
 
-	TP_ARGS(rc, sk),
+	TP_ARGS(rc, sk, skb),
 
 	TP_STRUCT__entry(
 		__field(int, rc)
-		__field(__u16, lport)
+
+		__field(__u16, sport)
+		__field(__u16, dport)
+		__field(__u16, family)
+		__array(__u8, saddr, sizeof(struct sockaddr_in6))
+		__array(__u8, daddr, sizeof(struct sockaddr_in6))
 	),
 
 	TP_fast_assign(
+		const struct udphdr *uh = (const struct udphdr *)udp_hdr(skb);
+
 		__entry->rc = rc;
-		__entry->lport = inet_sk(sk)->inet_num;
+
+		/* for filtering use */
+		__entry->sport = ntohs(uh->source);
+		__entry->dport = ntohs(uh->dest);
+		__entry->family = sk->sk_family;
+
+		memset(__entry->saddr, 0, sizeof(struct sockaddr_in6));
+		memset(__entry->daddr, 0, sizeof(struct sockaddr_in6));
+
+		TP_STORE_ADDR_PORTS_SKB(skb, uh, __entry->saddr, __entry->daddr);
 	),
 
-	TP_printk("rc=%d port=%hu", __entry->rc, __entry->lport)
-);
-
-TRACE_EVENT(udpv4_fail_rcv_buf_errors,
-
-	TP_PROTO(struct sk_buff *skb),
-
-	TP_ARGS(skb),
-
-	TP_STRUCT__entry(
-		__field(void *, saddr)
-		__field(void *, daddr)
-		__field(__be16, sport)
-		__field(__be16, dport)
-	),
-
-	TP_fast_assign(
-		__entry->saddr = &ip_hdr(skb)->saddr;
-		__entry->daddr = &ip_hdr(skb)->daddr;
-		__entry->sport = ntohs(udp_hdr(skb)->source);
-		__entry->dport = ntohs(udp_hdr(skb)->dest);
-	),
-
-	TP_printk("src %pI4:%u dst %pI4:%u", __entry->saddr,
-		  __entry->sport, __entry->daddr, __entry->dport)
-);
-
-TRACE_EVENT(udpv6_fail_rcv_buf_errors,
-
-	TP_PROTO(struct sk_buff *skb),
-
-	TP_ARGS(skb),
-
-	TP_STRUCT__entry(
-		__field(void *, saddr)
-		__field(void *, daddr)
-		__field(__be16, sport)
-		__field(__be16, dport)
-	),
-
-	TP_fast_assign(
-		__entry->saddr = &ipv6_hdr(skb)->saddr;
-		__entry->daddr = &ipv6_hdr(skb)->daddr;
-		__entry->sport = ntohs(udp_hdr(skb)->source);
-		__entry->dport = ntohs(udp_hdr(skb)->dest);
-	),
-
-	TP_printk("src %pI6:%u dst %pI6:%u", __entry->saddr,
-		  __entry->sport, __entry->daddr, __entry->dport)
+	TP_printk("rc=%d family=%s src=%pISpc dest=%pISpc", __entry->rc,
+		  show_family_name(__entry->family),
+		  __entry->saddr, __entry->daddr)
 );
 
 #endif /* _TRACE_UDP_H */

@@ -1,22 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * PPS core file
  *
- *
  * Copyright (C) 2005-2009   Rodolfo Giometti <giometti@linux.it>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -356,7 +342,6 @@ static int pps_cdev_release(struct inode *inode, struct file *file)
 
 static const struct file_operations pps_cdev_fops = {
 	.owner		= THIS_MODULE,
-	.llseek		= no_llseek,
 	.poll		= pps_cdev_poll,
 	.fasync		= pps_cdev_fasync,
 	.compat_ioctl	= pps_cdev_compat_ioctl,
@@ -481,7 +466,7 @@ static void __exit pps_exit(void)
 
 static int __init pps_init(void)
 {
-	pps_class = class_create(THIS_MODULE, "pps");
+	pps_class = class_create("pps");
 	if (IS_ERR(pps_class)) {
 		pr_err("failed to allocate class\n");
 		return PTR_ERR(pps_class);

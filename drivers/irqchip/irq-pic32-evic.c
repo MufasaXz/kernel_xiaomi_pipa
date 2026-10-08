@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Cristian Birsan <cristian.birsan@microchip.com>
  * Joshua Henderson <joshua.henderson@microchip.com>
  * Copyright (C) 2016 Microchip Technology Inc.  All rights reserved.
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -46,11 +42,10 @@ static void __iomem *evic_base;
 
 asmlinkage void __weak plat_irq_dispatch(void)
 {
-	unsigned int irq, hwirq;
+	unsigned int hwirq;
 
 	hwirq = readl(evic_base + REG_INTSTAT) & 0xFF;
-	irq = irq_linear_revmap(evic_irq_domain, hwirq);
-	do_IRQ(irq);
+	do_domain_IRQ(evic_irq_domain, hwirq);
 }
 
 static struct evic_chip_data *irqd_to_priv(struct irq_data *data)
@@ -166,9 +161,9 @@ static int pic32_irq_domain_map(struct irq_domain *d, unsigned int virq,
 	return ret;
 }
 
-int pic32_irq_domain_xlate(struct irq_domain *d, struct device_node *ctrlr,
-			   const u32 *intspec, unsigned int intsize,
-			   irq_hw_number_t *out_hwirq, unsigned int *out_type)
+static int pic32_irq_domain_xlate(struct irq_domain *d, struct device_node *ctrlr,
+				  const u32 *intspec, unsigned int intsize,
+				  irq_hw_number_t *out_hwirq, unsigned int *out_type)
 {
 	struct evic_chip_data *priv = d->host_data;
 
@@ -195,13 +190,11 @@ static void __init pic32_ext_irq_of_init(struct irq_domain *domain)
 {
 	struct device_node *node = irq_domain_get_of_node(domain);
 	struct evic_chip_data *priv = domain->host_data;
-	struct property *prop;
-	const __le32 *p;
 	u32 hwirq;
 	int i = 0;
 	const char *pname = "microchip,external-irqs";
 
-	of_property_for_each_u32(node, pname, prop, p, hwirq) {
+	of_property_for_each_u32(node, pname, hwirq) {
 		if (i >= ARRAY_SIZE(priv->ext_irqs)) {
 			pr_warn("More than %d external irq, skip rest\n",
 				ARRAY_SIZE(priv->ext_irqs));
@@ -234,9 +227,9 @@ static int __init pic32_of_init(struct device_node *node,
 		goto err_iounmap;
 	}
 
-	evic_irq_domain = irq_domain_add_linear(node, nchips * 32,
-						&pic32_irq_domain_ops,
-						priv);
+	evic_irq_domain = irq_domain_create_linear(of_fwnode_handle(node), nchips * 32,
+						   &pic32_irq_domain_ops,
+						   priv);
 	if (!evic_irq_domain) {
 		ret = -ENOMEM;
 		goto err_free_priv;
@@ -298,7 +291,7 @@ static int __init pic32_of_init(struct device_node *node,
 		gc->private = &priv[i];
 	}
 
-	irq_set_default_host(evic_irq_domain);
+	irq_set_default_domain(evic_irq_domain);
 
 	/*
 	 * External interrupts have software configurable edge polarity. These

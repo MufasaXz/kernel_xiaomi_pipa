@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Common methods for dibusb-based-receivers.
  *
  * Copyright (C) 2004-5 Patrick Boettcher (patrick.boettcher@posteo.de)
  *
- *	This program is free software; you can redistribute it and/or modify it
- *	under the terms of the GNU General Public License as published by the Free
- *	Software Foundation, version 2.
- *
- * see Documentation/media/dvb-drivers/dvb-usb.rst for more information
+ * see Documentation/driver-api/media/drivers/dvb-usb.rst for more information
  */
 
 #include "dibusb.h"
@@ -17,6 +14,7 @@
 static int debug;
 module_param(debug, int, 0644);
 MODULE_PARM_DESC(debug, "set debugging level (1=info (|-able))." DVB_USB_DEBUG_STATUS);
+MODULE_DESCRIPTION("Common methods for dibusb-based receivers");
 MODULE_LICENSE("GPL");
 
 #define deb_info(args...) dprintk(debug,0x01,args)

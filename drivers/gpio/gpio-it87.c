@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  GPIO interface for IT87xx Super I/O chips
  *
@@ -7,23 +8,11 @@
  *  Based on it87_wdt.c     by Oliver Schuster
  *           gpio-it8761e.c by Denis Turischev
  *           gpio-stmpe.c   by Rabin Vincent
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License 2 as published
- *  by the Free Software Foundation.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; see the file COPYING.  If not, write to
- *  the Free Software Foundation, 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/cleanup.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -59,13 +48,13 @@
 
 /**
  * struct it87_gpio - it87-specific GPIO chip
- * @chip the underlying gpio_chip structure
- * @lock a lock to avoid races between operations
- * @io_base base address for gpio ports
- * @io_size size of the port rage starting from io_base.
- * @output_base Super I/O register address for Output Enable register
- * @simple_base Super I/O 'Simple I/O' Enable register
- * @simple_size Super IO 'Simple I/O' Enable register size; this is
+ * @chip: the underlying gpio_chip structure
+ * @lock: a lock to avoid races between operations
+ * @io_base: base address for gpio ports
+ * @io_size: size of the port rage starting from io_base.
+ * @output_base: Super I/O register address for Output Enable register
+ * @simple_base: Super I/O 'Simple I/O' Enable register
+ * @simple_size: Super IO 'Simple I/O' Enable register size; this is
  *	required because IT87xx chips might only provide Simple I/O
  *	switches on a subset of lines, whereas the others keep the
  *	same status all time.
@@ -135,14 +124,6 @@ static inline int superio_inw(int reg)
 	outb(reg, REG);
 	val |= inb(VAL);
 	return val;
-}
-
-static inline void superio_outw(int val, int reg)
-{
-	outb(reg++, REG);
-	outb(val >> 8, VAL);
-	outb(reg, REG);
-	outb(val, VAL);
 }
 
 static inline void superio_set_mask(int mask, int reg)
@@ -233,8 +214,7 @@ exit:
 	return rc;
 }
 
-static void it87_gpio_set(struct gpio_chip *chip,
-			  unsigned gpio_num, int val)
+static int it87_gpio_set(struct gpio_chip *chip, unsigned int gpio_num, int val)
 {
 	u8 mask, curr_vals;
 	u16 reg;
@@ -248,6 +228,8 @@ static void it87_gpio_set(struct gpio_chip *chip,
 		outb(curr_vals | mask, reg);
 	else
 		outb(curr_vals & ~mask, reg);
+
+	return 0;
 }
 
 static int it87_gpio_direction_out(struct gpio_chip *chip,
@@ -260,21 +242,17 @@ static int it87_gpio_direction_out(struct gpio_chip *chip,
 	mask = 1 << (gpio_num % 8);
 	group = (gpio_num / 8);
 
-	spin_lock(&it87_gpio->lock);
+	guard(spinlock)(&it87_gpio->lock);
 
 	rc = superio_enter();
 	if (rc)
-		goto exit;
+		return rc;
 
 	/* set the output enable bit */
 	superio_set_mask(mask, group + it87_gpio->output_base);
 
-	it87_gpio_set(chip, gpio_num, val);
-
+	rc = it87_gpio_set(chip, gpio_num, val);
 	superio_exit();
-
-exit:
-	spin_unlock(&it87_gpio->lock);
 	return rc;
 }
 

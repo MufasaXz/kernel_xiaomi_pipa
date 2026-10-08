@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * keyspan_remote: USB driver for the Keyspan DMR
  *
  * Copyright (C) 2005 Zymeta Corporation - Michael Downey (downey@zymeta.com)
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License as
- *	published by the Free Software Foundation, version 2.
  *
  * This driver has been put together with the support of Innosys, Inc.
  * and Keyspan, Inc the manufacturers of the Keyspan USB DMR product.
@@ -488,7 +485,7 @@ static int keyspan_probe(struct usb_interface *interface, const struct usb_devic
 	}
 
 	if (udev->manufacturer)
-		strlcpy(remote->name, udev->manufacturer, sizeof(remote->name));
+		strscpy(remote->name, udev->manufacturer, sizeof(remote->name));
 
 	if (udev->product) {
 		if (udev->manufacturer)

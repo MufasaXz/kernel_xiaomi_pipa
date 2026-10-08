@@ -3,7 +3,7 @@
 #ifndef _TOOLS_LINUX_ALIGN_H
 #define _TOOLS_LINUX_ALIGN_H
 
-#include <linux/const.h>
+#include <uapi/linux/const.h>
 
 #define ALIGN(x, a)		__ALIGN_KERNEL((x), (a))
 #define ALIGN_DOWN(x, a)	__ALIGN_KERNEL((x) - ((a) - 1), (a))

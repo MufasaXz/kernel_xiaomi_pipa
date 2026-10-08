@@ -28,7 +28,7 @@
 
 #include "../i915_selftest.h"
 
-static int __i915_sw_fence_call
+static int
 fence_notify(struct i915_sw_fence *fence, enum i915_sw_fence_notify state)
 {
 	switch (state) {
@@ -523,12 +523,19 @@ static void task_ipc(struct work_struct *work)
 static int test_ipc(void *arg)
 {
 	struct task_ipc ipc;
+	struct workqueue_struct *wq;
 	int ret = 0;
+
+	wq = alloc_workqueue("i1915-selftest", 0, 0);
+	if (wq == NULL)
+		return -ENOMEM;
 
 	/* Test use of i915_sw_fence as an interprocess signaling mechanism */
 	ipc.in = alloc_fence();
-	if (!ipc.in)
-		return -ENOMEM;
+	if (!ipc.in) {
+		ret = -ENOMEM;
+		goto err_work;
+	}
 	ipc.out = alloc_fence();
 	if (!ipc.out) {
 		ret = -ENOMEM;
@@ -540,7 +547,7 @@ static int test_ipc(void *arg)
 
 	ipc.value = 0;
 	INIT_WORK_ONSTACK(&ipc.work, task_ipc);
-	schedule_work(&ipc.work);
+	queue_work(wq, &ipc.work);
 
 	wait_for_completion(&ipc.started);
 
@@ -563,6 +570,9 @@ static int test_ipc(void *arg)
 	free_fence(ipc.out);
 err_in:
 	free_fence(ipc.in);
+err_work:
+	destroy_workqueue(wq);
+
 	return ret;
 }
 
@@ -571,21 +581,27 @@ static int test_timer(void *arg)
 	unsigned long target, delay;
 	struct timed_fence tf;
 
+	preempt_disable();
 	timed_fence_init(&tf, target = jiffies);
 	if (!i915_sw_fence_done(&tf.fence)) {
 		pr_err("Fence with immediate expiration not signaled\n");
 		goto err;
 	}
+	preempt_enable();
 	timed_fence_fini(&tf);
 
 	for_each_prime_number(delay, i915_selftest.timeout_jiffies/2) {
+		preempt_disable();
 		timed_fence_init(&tf, target = jiffies + delay);
 		if (i915_sw_fence_done(&tf.fence)) {
 			pr_err("Fence with future expiration (%lu jiffies) already signaled\n", delay);
 			goto err;
 		}
+		preempt_enable();
 
 		i915_sw_fence_wait(&tf.fence);
+
+		preempt_disable();
 		if (!i915_sw_fence_done(&tf.fence)) {
 			pr_err("Fence not signaled after wait\n");
 			goto err;
@@ -595,13 +611,14 @@ static int test_timer(void *arg)
 			       target, jiffies);
 			goto err;
 		}
-
+		preempt_enable();
 		timed_fence_fini(&tf);
 	}
 
 	return 0;
 
 err:
+	preempt_enable();
 	timed_fence_fini(&tf);
 	return -EINVAL;
 }
@@ -611,17 +628,9 @@ static const char *mock_name(struct dma_fence *fence)
 	return "mock";
 }
 
-static bool mock_enable_signaling(struct dma_fence *fence)
-{
-	return true;
-}
-
 static const struct dma_fence_ops mock_fence_ops = {
 	.get_driver_name = mock_name,
 	.get_timeline_name = mock_name,
-	.enable_signaling = mock_enable_signaling,
-	.wait = dma_fence_default_wait,
-	.release = dma_fence_free,
 };
 
 static DEFINE_SPINLOCK(mock_fence_lock);

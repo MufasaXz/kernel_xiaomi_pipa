@@ -16,6 +16,8 @@
 #include <linux/blockgroup_lock.h>
 #include <linux/percpu_counter.h>
 #include <linux/rbtree.h>
+#include <linux/mm.h>
+#include <linux/highmem.h>
 
 /* XXX Here for now... not interested in restructing headers JUST now */
 
@@ -52,8 +54,8 @@ struct ext2_block_alloc_info {
 	/*
 	 * Was i_next_alloc_goal in ext2_inode_info
 	 * is the *physical* companion to i_next_alloc_block.
-	 * it the the physical block number of the block which was most-recentl
-	 * allocated to this file.  This give us the goal (target) for the next
+	 * it is the physical block number of the block which was most-recently
+	 * allocated to this file.  This gives us the goal (target) for the next
 	 * allocation when we detect linearly ascending requests.
 	 */
 	ext2_fsblk_t		last_alloc_physical_block;
@@ -113,6 +115,7 @@ struct ext2_sb_info {
 	spinlock_t s_lock;
 	struct mb_cache *s_ea_block_cache;
 	struct dax_device *s_daxdev;
+	u64 s_dax_part_off;
 };
 
 static inline spinlock_t *
@@ -172,7 +175,7 @@ static inline struct ext2_sb_info *EXT2_SB(struct super_block *sb)
  * Macro-instructions used to manage several block sizes
  */
 #define EXT2_MIN_BLOCK_SIZE		1024
-#define	EXT2_MAX_BLOCK_SIZE		4096
+#define	EXT2_MAX_BLOCK_SIZE		65536
 #define EXT2_MIN_BLOCK_LOG_SIZE		  10
 #define EXT2_MAX_BLOCK_LOG_SIZE		  16
 #define EXT2_BLOCK_SIZE(s)		((s)->s_blocksize)
@@ -270,8 +273,6 @@ static inline __u32 ext2_mask_flags(umode_t mode, __u32 flags)
 /*
  * ioctl commands
  */
-#define	EXT2_IOC_GETFLAGS		FS_IOC_GETFLAGS
-#define	EXT2_IOC_SETFLAGS		FS_IOC_SETFLAGS
 #define	EXT2_IOC_GETVERSION		FS_IOC_GETVERSION
 #define	EXT2_IOC_SETVERSION		FS_IOC_SETVERSION
 #define	EXT2_IOC_GETRSVSZ		_IOR('f', 5, long)
@@ -280,8 +281,6 @@ static inline __u32 ext2_mask_flags(umode_t mode, __u32 flags)
 /*
  * ioctl commands in 32 bit emulation
  */
-#define EXT2_IOC32_GETFLAGS		FS_IOC32_GETFLAGS
-#define EXT2_IOC32_SETFLAGS		FS_IOC32_SETFLAGS
 #define EXT2_IOC32_GETVERSION		FS_IOC32_GETVERSION
 #define EXT2_IOC32_SETVERSION		FS_IOC32_SETVERSION
 
@@ -363,13 +362,13 @@ struct ext2_inode {
 /*
  * Mount flags
  */
-#define EXT2_MOUNT_CHECK		0x000001  /* Do mount-time checks */
 #define EXT2_MOUNT_OLDALLOC		0x000002  /* Don't use the new Orlov allocator */
 #define EXT2_MOUNT_GRPID		0x000004  /* Create files with directory's group */
 #define EXT2_MOUNT_DEBUG		0x000008  /* Some debugging messages */
 #define EXT2_MOUNT_ERRORS_CONT		0x000010  /* Continue on errors */
 #define EXT2_MOUNT_ERRORS_RO		0x000020  /* Remount fs ro on errors */
 #define EXT2_MOUNT_ERRORS_PANIC		0x000040  /* Panic on errors */
+#define EXT2_MOUNT_ERRORS_MASK		0x000070
 #define EXT2_MOUNT_MINIX_DF		0x000080  /* Mimics the Minix statfs */
 #define EXT2_MOUNT_NOBH			0x000100  /* No buffer_heads */
 #define EXT2_MOUNT_NO_UID32		0x000200  /* Disable 32-bit UIDs */
@@ -379,11 +378,7 @@ struct ext2_inode {
 #define EXT2_MOUNT_USRQUOTA		0x020000  /* user quota */
 #define EXT2_MOUNT_GRPQUOTA		0x040000  /* group quota */
 #define EXT2_MOUNT_RESERVATION		0x080000  /* Preallocation */
-#ifdef CONFIG_FS_DAX
 #define EXT2_MOUNT_DAX			0x100000  /* Direct Access */
-#else
-#define EXT2_MOUNT_DAX			0
-#endif
 
 
 #define clear_opt(o, opt)		o &= ~EXT2_MOUNT_##opt
@@ -403,6 +398,12 @@ struct ext2_inode {
 #define EXT2_ERRORS_RO			2	/* Remount fs read-only */
 #define EXT2_ERRORS_PANIC		3	/* Panic */
 #define EXT2_ERRORS_DEFAULT		EXT2_ERRORS_CONTINUE
+
+/*
+ * Allocation flags
+ */
+#define EXT2_ALLOC_NORESERVE            0x1	/* Do not use reservation
+						 * window for allocation */
 
 /*
  * Structure of the super block
@@ -597,22 +598,6 @@ struct ext2_dir_entry_2 {
 };
 
 /*
- * Ext2 directory file types.  Only the low 3 bits are used.  The
- * other bits are reserved for now.
- */
-enum {
-	EXT2_FT_UNKNOWN		= 0,
-	EXT2_FT_REG_FILE	= 1,
-	EXT2_FT_DIR		= 2,
-	EXT2_FT_CHRDEV		= 3,
-	EXT2_FT_BLKDEV		= 4,
-	EXT2_FT_FIFO		= 5,
-	EXT2_FT_SOCK		= 6,
-	EXT2_FT_SYMLINK		= 7,
-	EXT2_FT_MAX
-};
-
-/*
  * EXT2_DIR_PAD defines the directory entries boundaries
  *
  * NOTE: It must be a multiple of 4
@@ -679,9 +664,6 @@ struct ext2_inode_info {
 	struct rw_semaphore xattr_sem;
 #endif
 	rwlock_t i_meta_lock;
-#ifdef CONFIG_FS_DAX
-	struct rw_semaphore dax_sem;
-#endif
 
 	/*
 	 * truncate_mutex is for serialising ext2_truncate() against
@@ -693,17 +675,9 @@ struct ext2_inode_info {
 	struct inode	vfs_inode;
 	struct list_head i_orphan;	/* unlinked but open inodes */
 #ifdef CONFIG_QUOTA
-	struct dquot *i_dquot[MAXQUOTAS];
+	struct dquot __rcu *i_dquot[MAXQUOTAS];
 #endif
 };
-
-#ifdef CONFIG_FS_DAX
-#define dax_sem_down_write(ext2_inode)	down_write(&(ext2_inode)->dax_sem)
-#define dax_sem_up_write(ext2_inode)	up_write(&(ext2_inode)->dax_sem)
-#else
-#define dax_sem_down_write(ext2_inode)
-#define dax_sem_up_write(ext2_inode)
-#endif
 
 /*
  * Inode dynamic state flags
@@ -728,13 +702,11 @@ static inline struct ext2_inode_info *EXT2_I(struct inode *inode)
 /* balloc.c */
 extern int ext2_bg_has_super(struct super_block *sb, int group);
 extern unsigned long ext2_bg_num_gdb(struct super_block *sb, int group);
-extern ext2_fsblk_t ext2_new_block(struct inode *, unsigned long, int *);
-extern ext2_fsblk_t ext2_new_blocks(struct inode *, unsigned long,
-				unsigned long *, int *);
+extern ext2_fsblk_t ext2_new_blocks(struct inode *, ext2_fsblk_t,
+				unsigned long *, int *, unsigned int);
 extern int ext2_data_block_valid(struct ext2_sb_info *sbi, ext2_fsblk_t start_blk,
 				 unsigned int count);
-extern void ext2_free_blocks (struct inode *, unsigned long,
-			      unsigned long);
+extern void ext2_free_blocks(struct inode *, ext2_fsblk_t, unsigned long);
 extern unsigned long ext2_count_free_blocks (struct super_block *);
 extern unsigned long ext2_count_dirs (struct super_block *);
 extern struct ext2_group_desc * ext2_get_group_desc(struct super_block * sb,
@@ -746,14 +718,17 @@ extern void ext2_init_block_alloc_info(struct inode *);
 extern void ext2_rsv_window_add(struct super_block *sb, struct ext2_reserve_window_node *rsv);
 
 /* dir.c */
-extern int ext2_add_link (struct dentry *, struct inode *);
-extern ino_t ext2_inode_by_name(struct inode *, const struct qstr *);
-extern int ext2_make_empty(struct inode *, struct inode *);
-extern struct ext2_dir_entry_2 * ext2_find_entry (struct inode *,const struct qstr *, struct page **);
-extern int ext2_delete_entry (struct ext2_dir_entry_2 *, struct page *);
-extern int ext2_empty_dir (struct inode *);
-extern struct ext2_dir_entry_2 * ext2_dotdot (struct inode *, struct page **);
-extern void ext2_set_link(struct inode *, struct ext2_dir_entry_2 *, struct page *, struct inode *, int);
+int ext2_add_link(struct dentry *, struct inode *);
+int ext2_inode_by_name(struct inode *dir,
+			      const struct qstr *child, ino_t *ino);
+int ext2_make_empty(struct inode *, struct inode *);
+struct ext2_dir_entry_2 *ext2_find_entry(struct inode *, const struct qstr *,
+		struct folio **foliop);
+int ext2_delete_entry(struct ext2_dir_entry_2 *dir, struct folio *folio);
+int ext2_empty_dir(struct inode *);
+struct ext2_dir_entry_2 *ext2_dotdot(struct inode *dir, struct folio **foliop);
+int ext2_set_link(struct inode *dir, struct ext2_dir_entry_2 *de,
+		struct folio *folio, struct inode *inode, bool update_times);
 
 /* ialloc.c */
 extern struct inode * ext2_new_inode (struct inode *, umode_t, const struct qstr *);
@@ -765,13 +740,19 @@ extern unsigned long ext2_count_free (struct buffer_head *, unsigned);
 extern struct inode *ext2_iget (struct super_block *, unsigned long);
 extern int ext2_write_inode (struct inode *, struct writeback_control *);
 extern void ext2_evict_inode(struct inode *);
+void ext2_write_failed(struct address_space *mapping, loff_t to);
 extern int ext2_get_block(struct inode *, sector_t, struct buffer_head *, int);
-extern int ext2_setattr (struct dentry *, struct iattr *);
+extern int ext2_setattr (struct mnt_idmap *, struct dentry *, struct iattr *);
+extern int ext2_getattr (struct mnt_idmap *, const struct path *,
+			 struct kstat *, u32, unsigned int);
 extern void ext2_set_inode_flags(struct inode *inode);
 extern int ext2_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 		       u64 start, u64 len);
 
 /* ioctl.c */
+extern int ext2_fileattr_get(struct dentry *dentry, struct file_kattr *fa);
+extern int ext2_fileattr_set(struct mnt_idmap *idmap,
+			     struct dentry *dentry, struct file_kattr *fa);
 extern long ext2_ioctl(struct file *, unsigned int, unsigned long);
 extern long ext2_compat_ioctl(struct file *, unsigned int, unsigned long);
 
@@ -803,7 +784,6 @@ extern const struct file_operations ext2_file_operations;
 /* inode.c */
 extern void ext2_set_file_ops(struct inode *inode);
 extern const struct address_space_operations ext2_aops;
-extern const struct address_space_operations ext2_nobh_aops;
 extern const struct iomap_ops ext2_iomap_ops;
 
 /* namei.c */
@@ -819,6 +799,18 @@ ext2_group_first_block_no(struct super_block *sb, unsigned long group_no)
 {
 	return group_no * (ext2_fsblk_t)EXT2_BLOCKS_PER_GROUP(sb) +
 		le32_to_cpu(EXT2_SB(sb)->s_es->s_first_data_block);
+}
+
+static inline ext2_fsblk_t
+ext2_group_last_block_no(struct super_block *sb, unsigned long group_no)
+{
+	struct ext2_sb_info *sbi = EXT2_SB(sb);
+
+	if (group_no == sbi->s_groups_count - 1)
+		return le32_to_cpu(sbi->s_es->s_blocks_count) - 1;
+	else
+		return ext2_group_first_block_no(sb, group_no) +
+			EXT2_BLOCKS_PER_GROUP(sb) - 1;
 }
 
 #define ext2_set_bit	__test_and_set_bit_le

@@ -7,7 +7,6 @@
  *  Copyright (C) 1999  Niibe Yutaka
  *  Copyright (C) 2002 - 2010 Paul Mundt
  */
-#include <linux/screen_info.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/initrd.h>
@@ -32,6 +31,7 @@
 #include <linux/of.h>
 #include <linux/of_fdt.h>
 #include <linux/uaccess.h>
+#include <uapi/linux/mount.h>
 #include <asm/io.h>
 #include <asm/page.h>
 #include <asm/elf.h>
@@ -44,6 +44,7 @@
 #include <asm/mmzone.h>
 #include <asm/processor.h>
 #include <asm/sparsemem.h>
+#include <asm/platform_early.h>
 
 /*
  * Initialize loops_per_jiffy as 10000000 (1000MIPS).
@@ -66,10 +67,6 @@ EXPORT_SYMBOL(cpu_data);
  */
 struct sh_machine_vector sh_mv = { .mv_name = "generic", };
 EXPORT_SYMBOL(sh_mv);
-
-#ifdef CONFIG_VT
-struct screen_info screen_info;
-#endif
 
 extern int root_mountflags;
 
@@ -223,7 +220,7 @@ void __init __add_active_range(unsigned int nid, unsigned long start_pfn,
 	request_resource(res, &code_resource);
 	request_resource(res, &data_resource);
 	request_resource(res, &bss_resource);
-#ifdef CONFIG_KEXEC
+#ifdef CONFIG_CRASH_RESERVE
 	request_resource(res, &crashk_res);
 #endif
 
@@ -252,13 +249,13 @@ void __ref sh_fdt_init(phys_addr_t dt_phys)
 	/* Avoid calling an __init function on secondary cpus. */
 	if (done) return;
 
-#ifdef CONFIG_USE_BUILTIN_DTB
+#ifdef CONFIG_BUILTIN_DTB
 	dt_virt = __dtb_start;
 #else
 	dt_virt = phys_to_virt(dt_phys);
 #endif
 
-	if (!dt_virt || !early_init_dt_scan(dt_virt)) {
+	if (!dt_virt || !early_init_dt_scan(dt_virt, __pa(dt_virt))) {
 		pr_crit("Error: invalid device tree blob"
 			" at physical address %p\n", (void *)dt_phys);
 
@@ -289,16 +286,11 @@ void __init setup_arch(char **cmdline_p)
 
 #ifdef CONFIG_BLK_DEV_RAM
 	rd_image_start = RAMDISK_FLAGS & RAMDISK_IMAGE_START_MASK;
-	rd_prompt = ((RAMDISK_FLAGS & RAMDISK_PROMPT_FLAG) != 0);
-	rd_doload = ((RAMDISK_FLAGS & RAMDISK_LOAD_FLAG) != 0);
 #endif
 
 	if (!MOUNT_ROOT_RDONLY)
 		root_mountflags &= ~MS_RDONLY;
-	init_mm.start_code = (unsigned long) _text;
-	init_mm.end_code = (unsigned long) _etext;
-	init_mm.end_data = (unsigned long) _edata;
-	init_mm.brk = (unsigned long) _end;
+	setup_initial_init_mm(_text, _etext, _edata, _end);
 
 	code_resource.start = virt_to_phys(_text);
 	code_resource.end = virt_to_phys(_etext)-1;
@@ -308,9 +300,9 @@ void __init setup_arch(char **cmdline_p)
 	bss_resource.end = virt_to_phys(__bss_stop)-1;
 
 #ifdef CONFIG_CMDLINE_OVERWRITE
-	strlcpy(command_line, CONFIG_CMDLINE, sizeof(command_line));
+	strscpy(command_line, CONFIG_CMDLINE, sizeof(command_line));
 #else
-	strlcpy(command_line, COMMAND_LINE, sizeof(command_line));
+	strscpy(command_line, COMMAND_LINE, sizeof(command_line));
 #ifdef CONFIG_CMDLINE_EXTEND
 	strlcat(command_line, " ", sizeof(command_line));
 	strlcat(command_line, CONFIG_CMDLINE, sizeof(command_line));
@@ -328,10 +320,10 @@ void __init setup_arch(char **cmdline_p)
 	sh_mv_setup();
 
 	/* Let earlyprintk output early console messages */
-	early_platform_driver_probe("earlyprintk", 1, 1);
+	sh_early_platform_driver_probe("earlyprintk", 1, 1);
 
 #ifdef CONFIG_OF_EARLY_FLATTREE
-#ifdef CONFIG_USE_BUILTIN_DTB
+#ifdef CONFIG_BUILTIN_DTB
 	unflatten_and_copy_device_tree();
 #else
 	unflatten_device_tree();
@@ -339,10 +331,6 @@ void __init setup_arch(char **cmdline_p)
 #endif
 
 	paging_init();
-
-#ifdef CONFIG_DUMMY_CONSOLE
-	conswitchp = &dummy_con;
-#endif
 
 	/* Perform the machine specific initialisation */
 	if (likely(sh_mv.mv_setup))
@@ -354,7 +342,7 @@ void __init setup_arch(char **cmdline_p)
 /* processor boot mode configuration */
 int generic_mode_pins(void)
 {
-	pr_warning("generic_mode_pins(): missing mode pin configuration\n");
+	pr_warn("generic_mode_pins(): missing mode pin configuration\n");
 	return 0;
 }
 

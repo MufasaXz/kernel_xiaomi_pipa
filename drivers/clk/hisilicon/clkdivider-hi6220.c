@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Hisilicon hi6220 SoC divider clock driver
  *
  * Copyright (c) 2015 Hisilicon Limited.
  *
  * Author: Bintian Wang <bintian.wang@huawei.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 
 #include <linux/kernel.h>
@@ -59,13 +55,13 @@ static unsigned long hi6220_clkdiv_recalc_rate(struct clk_hw *hw,
 				   CLK_DIVIDER_ROUND_CLOSEST, dclk->width);
 }
 
-static long hi6220_clkdiv_round_rate(struct clk_hw *hw, unsigned long rate,
-					unsigned long *prate)
+static int hi6220_clkdiv_determine_rate(struct clk_hw *hw,
+					struct clk_rate_request *req)
 {
 	struct hi6220_clk_divider *dclk = to_hi6220_clk_divider(hw);
 
-	return divider_round_rate(hw, rate, prate, dclk->table,
-				  dclk->width, CLK_DIVIDER_ROUND_CLOSEST);
+	return divider_determine_rate(hw, req, dclk->table, dclk->width,
+				      CLK_DIVIDER_ROUND_CLOSEST);
 }
 
 static int hi6220_clkdiv_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -97,7 +93,7 @@ static int hi6220_clkdiv_set_rate(struct clk_hw *hw, unsigned long rate,
 
 static const struct clk_ops hi6220_clkdiv_ops = {
 	.recalc_rate = hi6220_clkdiv_recalc_rate,
-	.round_rate = hi6220_clkdiv_round_rate,
+	.determine_rate = hi6220_clkdiv_determine_rate,
 	.set_rate = hi6220_clkdiv_set_rate,
 };
 
@@ -107,7 +103,7 @@ struct clk *hi6220_register_clkdiv(struct device *dev, const char *name,
 {
 	struct hi6220_clk_divider *div;
 	struct clk *clk;
-	struct clk_init_data init = {};
+	struct clk_init_data init;
 	struct clk_div_table *table;
 	u32 max_div, min_div;
 	int i;

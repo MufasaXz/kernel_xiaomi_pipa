@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* net/atm/clip.c - RFC1577 Classical IP over ATM */
 
 /* Written 1995-2000 by Werner Almesberger, EPFL LRC/ICA */
@@ -100,7 +101,7 @@ static void unlink_clip_vcc(struct clip_vcc *clip_vcc)
 	struct clip_vcc **walk;
 
 	if (!entry) {
-		pr_crit("!clip_vcc->entry (clip_vcc %p)\n", clip_vcc);
+		pr_err("!clip_vcc->entry (clip_vcc %p)\n", clip_vcc);
 		return;
 	}
 	netif_tx_lock_bh(entry->neigh->dev);	/* block clip_start_xmit() */
@@ -120,10 +121,10 @@ static void unlink_clip_vcc(struct clip_vcc *clip_vcc)
 			error = neigh_update(entry->neigh, NULL, NUD_NONE,
 					     NEIGH_UPDATE_F_ADMIN, 0);
 			if (error)
-				pr_crit("neigh_update failed with %d\n", error);
+				pr_err("neigh_update failed with %d\n", error);
 			goto out;
 		}
-	pr_crit("ATMARP: failed (entry %p, vcc 0x%p)\n", entry, clip_vcc);
+	pr_err("ATMARP: failed (entry %p, vcc 0x%p)\n", entry, clip_vcc);
 out:
 	netif_tx_unlock_bh(entry->neigh->dev);
 }
@@ -204,12 +205,6 @@ static void clip_push(struct atm_vcc *vcc, struct sk_buff *skb)
 
 	pr_debug("\n");
 
-	if (!clip_devs) {
-		atm_return(vcc, skb->truesize);
-		kfree_skb(skb);
-		return;
-	}
-
 	if (!skb) {
 		pr_debug("removing VCC %p\n", clip_vcc);
 		if (clip_vcc->entry)
@@ -219,6 +214,11 @@ static void clip_push(struct atm_vcc *vcc, struct sk_buff *skb)
 		return;
 	}
 	atm_return(vcc, skb->truesize);
+	if (!clip_devs) {
+		kfree_skb(skb);
+		return;
+	}
+
 	skb->dev = clip_vcc->entry ? clip_vcc->entry->neigh->dev : clip_devs;
 	/* clip_vcc->entry == NULL if we don't have an IP address yet */
 	if (!skb->dev) {
@@ -356,7 +356,7 @@ static netdev_tx_t clip_start_xmit(struct sk_buff *skb,
 		dev->stats.tx_dropped++;
 		return NETDEV_TX_OK;
 	}
-	rt = (struct rtable *) dst;
+	rt = dst_rtable(dst);
 	if (rt->rt_gw_family == AF_INET)
 		daddr = &rt->rt_gw4;
 	else
@@ -476,7 +476,7 @@ static int clip_setentry(struct atm_vcc *vcc, __be32 ip)
 		unlink_clip_vcc(clip_vcc);
 		return 0;
 	}
-	rt = ip_route_output(&init_net, ip, 0, 1, 0);
+	rt = ip_route_output(&init_net, ip, 0, 0, 0, RT_SCOPE_LINK);
 	if (IS_ERR(rt))
 		return PTR_ERR(rt);
 	neigh = __neigh_lookup(&arp_tbl, &ip, rt->dst.dev, 1);
@@ -935,7 +935,7 @@ static void atm_clip_exit_noproc(void)
 	/* First, stop the idle timer, so it stops banging
 	 * on the table.
 	 */
-	del_timer_sync(&idle_timer);
+	timer_delete_sync(&idle_timer);
 
 	dev = clip_devs;
 	while (dev) {

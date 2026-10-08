@@ -2,24 +2,46 @@
 #ifndef __TRACE_HELPER_H
 #define __TRACE_HELPER_H
 
-#include <libbpf.h>
-#include <linux/perf_event.h>
+#include <bpf/libbpf.h>
+
+#define __ALIGN_MASK(x, mask)	(((x)+(mask))&~(mask))
+#define ALIGN(x, a)		__ALIGN_MASK(x, (typeof(x))(a)-1)
 
 struct ksym {
 	long addr;
 	char *name;
 };
+struct ksyms;
+
+typedef int (*ksym_cmp_t)(const void *p1, const void *p2);
+typedef int (*ksym_search_cmp_t)(const void *p1, const struct ksym *p2);
 
 int load_kallsyms(void);
 struct ksym *ksym_search(long key);
 long ksym_get_addr(const char *name);
 
-typedef enum bpf_perf_event_ret (*perf_event_print_fn)(void *data, int size);
+struct ksyms *load_kallsyms_local(void);
+struct ksym *ksym_search_local(struct ksyms *ksyms, long key);
+long ksym_get_addr_local(struct ksyms *ksyms, const char *name);
+void free_kallsyms_local(struct ksyms *ksyms);
 
-int perf_event_mmap(int fd);
-int perf_event_mmap_header(int fd, struct perf_event_mmap_page **header);
-/* return LIBBPF_PERF_EVENT_DONE or LIBBPF_PERF_EVENT_ERROR */
-int perf_event_poller(int fd, perf_event_print_fn output_fn);
-int perf_event_poller_multi(int *fds, struct perf_event_mmap_page **headers,
-			    int num_fds, perf_event_print_fn output_fn);
+struct ksyms *load_kallsyms_custom_local(ksym_cmp_t cmp_cb);
+struct ksym *search_kallsyms_custom_local(struct ksyms *ksyms, const void *p1,
+					  ksym_search_cmp_t cmp_cb);
+
+/* open kallsyms and find addresses on the fly, faster than load + search. */
+int kallsyms_find(const char *sym, unsigned long long *addr);
+
+void read_trace_pipe(void);
+int read_trace_pipe_iter(void (*cb)(const char *str, void *data),
+			 void *data, int iter);
+
+ssize_t get_uprobe_offset(const void *addr);
+ssize_t get_rel_offset(uintptr_t addr);
+
+int read_build_id(const char *path, char *build_id, size_t size);
+
+int bpf_get_ksyms(char ***symsp, size_t *cntp, bool kernel);
+int bpf_get_addrs(unsigned long **addrsp, size_t *cntp, bool kernel);
+
 #endif

@@ -1,18 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2011-2015 Xilinx Inc.
  * Copyright (c) 2015, National Instruments Corp.
  *
  * FPGA Manager Driver for Xilinx Zynq, heavily based on xdevcfg driver
  * in their vendor tree.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
  */
 
 #include <linux/clk.h>
@@ -200,7 +192,7 @@ static void zynq_step_dma(struct zynq_fpga_priv *priv)
 
 	/* Once the first transfer is queued we can turn on the ISR, future
 	 * calls to zynq_step_dma will happen from the ISR context. The
-	 * dma_lock spinlock guarentees this handover is done coherently, the
+	 * dma_lock spinlock guarantees this handover is done coherently, the
 	 * ISR enable is put at the end to avoid another CPU spinning in the
 	 * ISR on this lock.
 	 */
@@ -275,7 +267,7 @@ static int zynq_fpga_ops_write_init(struct fpga_manager *mgr,
 		ctrl = zynq_fpga_read(priv, CTRL_OFFSET);
 		if (!(ctrl & CTRL_SEC_EN_MASK)) {
 			dev_err(&mgr->dev,
-				"System not secure, can't use crypted bitstreams\n");
+				"System not secure, can't use encrypted bitstreams\n");
 			err = -EINVAL;
 			goto out_err;
 		}
@@ -352,7 +344,7 @@ static int zynq_fpga_ops_write_init(struct fpga_manager *mgr,
 
 	/* set configuration register with following options:
 	 * - enable PCAP interface
-	 * - set throughput for maximum speed (if bistream not crypted)
+	 * - set throughput for maximum speed (if bistream not encrypted)
 	 * - set CPU in user mode
 	 */
 	ctrl = zynq_fpga_read(priv, CTRL_OFFSET);
@@ -395,7 +387,7 @@ static int zynq_fpga_ops_write(struct fpga_manager *mgr, struct sg_table *sgt)
 	const char *why;
 	int err;
 	u32 intr_status;
-	unsigned long timeout;
+	unsigned long time_left;
 	unsigned long flags;
 	struct scatterlist *sg;
 	int i;
@@ -435,8 +427,8 @@ static int zynq_fpga_ops_write(struct fpga_manager *mgr, struct sg_table *sgt)
 	zynq_step_dma(priv);
 	spin_unlock_irqrestore(&priv->dma_lock, flags);
 
-	timeout = wait_for_completion_timeout(&priv->dma_done,
-					      msecs_to_jiffies(DMA_TIMEOUT_MS));
+	time_left = wait_for_completion_timeout(&priv->dma_done,
+						msecs_to_jiffies(DMA_TIMEOUT_MS));
 
 	spin_lock_irqsave(&priv->dma_lock, flags);
 	zynq_fpga_set_irq(priv, 0);
@@ -460,7 +452,7 @@ static int zynq_fpga_ops_write(struct fpga_manager *mgr, struct sg_table *sgt)
 
 	if (priv->cur_sg ||
 	    !((intr_status & IXR_D_P_DONE_MASK) == IXR_D_P_DONE_MASK)) {
-		if (timeout == 0)
+		if (time_left == 0)
 			why = "DMA timed out";
 		else
 			why = "DMA did not complete";
@@ -505,6 +497,10 @@ static int zynq_fpga_ops_write_complete(struct fpga_manager *mgr,
 				     intr_status & IXR_PCFG_DONE_MASK,
 				     INIT_POLL_DELAY,
 				     INIT_POLL_TIMEOUT);
+
+	/* Release 'PR' control back to the ICAP */
+	zynq_fpga_write(priv, CTRL_OFFSET,
+			zynq_fpga_read(priv, CTRL_OFFSET) & ~CTRL_PCAP_PR_MASK);
 
 	clk_disable(priv->clk);
 
@@ -559,7 +555,6 @@ static int zynq_fpga_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct zynq_fpga_priv *priv;
 	struct fpga_manager *mgr;
-	struct resource *res;
 	int err;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
@@ -567,8 +562,7 @@ static int zynq_fpga_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	spin_lock_init(&priv->dma_lock);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	priv->io_base = devm_ioremap_resource(dev, res);
+	priv->io_base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(priv->io_base))
 		return PTR_ERR(priv->io_base);
 
@@ -582,16 +576,13 @@ static int zynq_fpga_probe(struct platform_device *pdev)
 	init_completion(&priv->dma_done);
 
 	priv->irq = platform_get_irq(pdev, 0);
-	if (priv->irq < 0) {
-		dev_err(dev, "No IRQ available\n");
+	if (priv->irq < 0)
 		return priv->irq;
-	}
 
 	priv->clk = devm_clk_get(dev, "ref_clk");
-	if (IS_ERR(priv->clk)) {
-		dev_err(dev, "input clock not found\n");
-		return PTR_ERR(priv->clk);
-	}
+	if (IS_ERR(priv->clk))
+		return dev_err_probe(dev, PTR_ERR(priv->clk),
+				     "input clock not found\n");
 
 	err = clk_prepare_enable(priv->clk);
 	if (err) {
@@ -614,25 +605,20 @@ static int zynq_fpga_probe(struct platform_device *pdev)
 
 	clk_disable(priv->clk);
 
-	mgr = fpga_mgr_create(dev, "Xilinx Zynq FPGA Manager",
-			      &zynq_fpga_ops, priv);
-	if (!mgr)
-		return -ENOMEM;
+	mgr = fpga_mgr_register(dev, "Xilinx Zynq FPGA Manager",
+				&zynq_fpga_ops, priv);
+	if (IS_ERR(mgr)) {
+		dev_err(dev, "unable to register FPGA manager\n");
+		clk_unprepare(priv->clk);
+		return PTR_ERR(mgr);
+	}
 
 	platform_set_drvdata(pdev, mgr);
-
-	err = fpga_mgr_register(mgr);
-	if (err) {
-		dev_err(dev, "unable to register FPGA manager\n");
-		fpga_mgr_free(mgr);
-		clk_unprepare(priv->clk);
-		return err;
-	}
 
 	return 0;
 }
 
-static int zynq_fpga_remove(struct platform_device *pdev)
+static void zynq_fpga_remove(struct platform_device *pdev)
 {
 	struct zynq_fpga_priv *priv;
 	struct fpga_manager *mgr;
@@ -643,8 +629,6 @@ static int zynq_fpga_remove(struct platform_device *pdev)
 	fpga_mgr_unregister(mgr);
 
 	clk_unprepare(priv->clk);
-
-	return 0;
 }
 
 #ifdef CONFIG_OF

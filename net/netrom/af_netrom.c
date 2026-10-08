@@ -1,8 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * Copyright Jonathan Naylor G4KLX (g4klx@g4klx.demon.co.uk)
  * Copyright Alan Cox GW4PTS (alan@lxorguk.ukuu.org.uk)
@@ -243,7 +240,7 @@ void nr_destroy_socket(struct sock *);
  */
 static void nr_destroy_timer(struct timer_list *t)
 {
-	struct sock *sk = from_timer(sk, t, sk_timer);
+	struct sock *sk = timer_container_of(sk, t, sk_timer);
 	bh_lock_sock(sk);
 	sock_hold(sk);
 	nr_destroy_socket(sk);
@@ -297,11 +294,11 @@ void nr_destroy_socket(struct sock *sk)
  */
 
 static int nr_setsockopt(struct socket *sock, int level, int optname,
-	char __user *optval, unsigned int optlen)
+		sockptr_t optval, unsigned int optlen)
 {
 	struct sock *sk = sock->sk;
 	struct nr_sock *nr = nr_sk(sk);
-	unsigned long opt;
+	unsigned int opt;
 
 	if (level != SOL_NETROM)
 		return -ENOPROTOOPT;
@@ -309,18 +306,18 @@ static int nr_setsockopt(struct socket *sock, int level, int optname,
 	if (optlen < sizeof(unsigned int))
 		return -EINVAL;
 
-	if (get_user(opt, (unsigned int __user *)optval))
+	if (copy_from_sockptr(&opt, optval, sizeof(opt)))
 		return -EFAULT;
 
 	switch (optname) {
 	case NETROM_T1:
-		if (opt < 1 || opt > ULONG_MAX / HZ)
+		if (opt < 1 || opt > UINT_MAX / HZ)
 			return -EINVAL;
 		nr->t1 = opt * HZ;
 		return 0;
 
 	case NETROM_T2:
-		if (opt < 1 || opt > ULONG_MAX / HZ)
+		if (opt < 1 || opt > UINT_MAX / HZ)
 			return -EINVAL;
 		nr->t2 = opt * HZ;
 		return 0;
@@ -332,13 +329,13 @@ static int nr_setsockopt(struct socket *sock, int level, int optname,
 		return 0;
 
 	case NETROM_T4:
-		if (opt < 1 || opt > ULONG_MAX / HZ)
+		if (opt < 1 || opt > UINT_MAX / HZ)
 			return -EINVAL;
 		nr->t4 = opt * HZ;
 		return 0;
 
 	case NETROM_IDLE:
-		if (opt > ULONG_MAX / (60 * HZ))
+		if (opt > UINT_MAX / (60 * HZ))
 			return -EINVAL;
 		nr->idle = opt * 60 * HZ;
 		return 0;
@@ -490,7 +487,7 @@ static struct sock *nr_make_new(struct sock *osk)
 	sock_init_data(NULL, sk);
 
 	sk->sk_type     = osk->sk_type;
-	sk->sk_priority = osk->sk_priority;
+	sk->sk_priority = READ_ONCE(osk->sk_priority);
 	sk->sk_protocol = osk->sk_protocol;
 	sk->sk_rcvbuf   = osk->sk_rcvbuf;
 	sk->sk_sndbuf   = osk->sk_sndbuf;
@@ -641,7 +638,7 @@ static int nr_connect(struct socket *sock, struct sockaddr *uaddr,
 	struct sock *sk = sock->sk;
 	struct nr_sock *nr = nr_sk(sk);
 	struct sockaddr_ax25 *addr = (struct sockaddr_ax25 *)uaddr;
-	ax25_address *source = NULL;
+	const ax25_address *source = NULL;
 	ax25_uid_assoc *user;
 	struct net_device *dev;
 	int err = 0;
@@ -686,7 +683,7 @@ static int nr_connect(struct socket *sock, struct sockaddr *uaddr,
 			err = -ENETUNREACH;
 			goto out_release;
 		}
-		source = (ax25_address *)dev->dev_addr;
+		source = (const ax25_address *)dev->dev_addr;
 
 		user = ax25_findbyuid(current_euid());
 		if (user) {
@@ -775,8 +772,8 @@ out_release:
 	return err;
 }
 
-static int nr_accept(struct socket *sock, struct socket *newsock, int flags,
-		     bool kern)
+static int nr_accept(struct socket *sock, struct socket *newsock,
+		     struct proto_accept_arg *arg)
 {
 	struct sk_buff *skb;
 	struct sock *newsk;
@@ -808,7 +805,7 @@ static int nr_accept(struct socket *sock, struct socket *newsock, int flags,
 		if (skb)
 			break;
 
-		if (flags & O_NONBLOCK) {
+		if (arg->flags & O_NONBLOCK) {
 			err = -EWOULDBLOCK;
 			break;
 		}
@@ -1172,7 +1169,8 @@ static int nr_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 	}
 
 	/* Now we can treat all alike */
-	if ((skb = skb_recv_datagram(sk, flags & ~MSG_DONTWAIT, flags & MSG_DONTWAIT, &er)) == NULL) {
+	skb = skb_recv_datagram(sk, flags, &er);
+	if (!skb) {
 		release_sock(sk);
 		return er;
 	}
@@ -1211,7 +1209,6 @@ static int nr_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
 	struct sock *sk = sock->sk;
 	void __user *argp = (void __user *)arg;
-	int ret;
 
 	switch (cmd) {
 	case TIOCOUTQ: {
@@ -1236,18 +1233,6 @@ static int nr_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		release_sock(sk);
 		return put_user(amount, (int __user *)argp);
 	}
-
-	case SIOCGSTAMP:
-		lock_sock(sk);
-		ret = sock_get_timestamp(sk, argp);
-		release_sock(sk);
-		return ret;
-
-	case SIOCGSTAMPNS:
-		lock_sock(sk);
-		ret = sock_get_timestampns(sk, argp);
-		release_sock(sk);
-		return ret;
 
 	case SIOCGIFADDR:
 	case SIOCSIFADDR:
@@ -1278,6 +1263,7 @@ static int nr_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 #ifdef CONFIG_PROC_FS
 
 static void *nr_info_start(struct seq_file *seq, loff_t *pos)
+	__acquires(&nr_list_lock)
 {
 	spin_lock_bh(&nr_list_lock);
 	return seq_hlist_start_head(&nr_list, *pos);
@@ -1289,6 +1275,7 @@ static void *nr_info_next(struct seq_file *seq, void *v, loff_t *pos)
 }
 
 static void nr_info_stop(struct seq_file *seq, void *v)
+	__releases(&nr_list_lock)
 {
 	spin_unlock_bh(&nr_list_lock);
 }
@@ -1374,6 +1361,7 @@ static const struct proto_ops nr_proto_ops = {
 	.getname	=	nr_getname,
 	.poll		=	datagram_poll,
 	.ioctl		=	nr_ioctl,
+	.gettstamp	=	sock_gettstamp,
 	.listen		=	nr_listen,
 	.shutdown	=	sock_no_shutdown,
 	.setsockopt	=	nr_setsockopt,
@@ -1381,7 +1369,6 @@ static const struct proto_ops nr_proto_ops = {
 	.sendmsg	=	nr_sendmsg,
 	.recvmsg	=	nr_recvmsg,
 	.mmap		=	sock_no_mmap,
-	.sendpage	=	sock_no_sendpage,
 };
 
 static struct notifier_block nr_dev_notifier = {

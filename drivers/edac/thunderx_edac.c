@@ -35,12 +35,6 @@ enum {
 	ERR_UNKNOWN	= 3,
 };
 
-#define MAX_SYNDROME_REGS 4
-
-struct error_syndrome {
-	u64 reg[MAX_SYNDROME_REGS];
-};
-
 struct error_descr {
 	int	type;
 	u64	mask;
@@ -454,7 +448,7 @@ DEBUGFS_STRUCT(inject_int, 0200, thunderx_lmc_inject_int_write, NULL);
 DEBUGFS_STRUCT(inject_ecc, 0200, thunderx_lmc_inject_ecc_write, NULL);
 DEBUGFS_STRUCT(int_w1c, 0400, NULL, thunderx_lmc_int_read);
 
-struct debugfs_entry *lmc_dfs_ents[] = {
+static struct debugfs_entry *lmc_dfs_ents[] = {
 	&debugfs_mask0,
 	&debugfs_mask2,
 	&debugfs_parity_test,
@@ -481,7 +475,7 @@ static int thunderx_create_debugfs_nodes(struct dentry *parent,
 		ent = edac_debugfs_create_file(attrs[i]->name, attrs[i]->mode,
 					       parent, data, &attrs[i]->fops);
 
-		if (!ent)
+		if (IS_ERR(ent))
 			break;
 	}
 
@@ -1278,7 +1272,7 @@ OCX_DEBUGFS_ATTR(lne23_badcnt, OCX_LNE_BAD_CNT(23));
 
 OCX_DEBUGFS_ATTR(com_int, OCX_COM_INT_W1S);
 
-struct debugfs_entry *ocx_dfs_ents[] = {
+static struct debugfs_entry *ocx_dfs_ents[] = {
 	&debugfs_tlk0_ecc_ctl,
 	&debugfs_tlk1_ecc_ctl,
 	&debugfs_tlk2_ecc_ctl,
@@ -1365,10 +1359,9 @@ static int thunderx_ocx_probe(struct pci_dev *pdev,
 	idx = edac_device_alloc_index();
 	snprintf(name, sizeof(name), "OCX%d", idx);
 	edac_dev = edac_device_alloc_ctl_info(sizeof(struct thunderx_ocx),
-					      name, 1, "CCPI", 1,
-					      0, NULL, 0, idx);
+					      name, 1, "CCPI", 1, 0, idx);
 	if (!edac_dev) {
-		dev_err(&pdev->dev, "Cannot allocate EDAC device: %d\n", ret);
+		dev_err(&pdev->dev, "Cannot allocate EDAC device\n");
 		return -ENOMEM;
 	}
 	ocx = edac_dev->pvt_info;
@@ -1380,7 +1373,7 @@ static int thunderx_ocx_probe(struct pci_dev *pdev,
 
 	ocx->regs = pcim_iomap_table(pdev)[0];
 	if (!ocx->regs) {
-		dev_err(&pdev->dev, "Cannot map PCI resources: %d\n", ret);
+		dev_err(&pdev->dev, "Cannot map PCI resources\n");
 		ret = -ENODEV;
 		goto err_free;
 	}
@@ -1919,19 +1912,19 @@ err_free:
 
 L2C_DEBUGFS_ATTR(tad_int, L2C_TAD_INT_W1S);
 
-struct debugfs_entry *l2c_tad_dfs_ents[] = {
+static struct debugfs_entry *l2c_tad_dfs_ents[] = {
 	&debugfs_tad_int,
 };
 
 L2C_DEBUGFS_ATTR(cbc_int, L2C_CBC_INT_W1S);
 
-struct debugfs_entry *l2c_cbc_dfs_ents[] = {
+static struct debugfs_entry *l2c_cbc_dfs_ents[] = {
 	&debugfs_cbc_int,
 };
 
 L2C_DEBUGFS_ATTR(mci_int, L2C_MCI_INT_W1S);
 
-struct debugfs_entry *l2c_mci_dfs_ents[] = {
+static struct debugfs_entry *l2c_mci_dfs_ents[] = {
 	&debugfs_mci_int,
 };
 
@@ -2004,8 +1997,7 @@ static int thunderx_l2c_probe(struct pci_dev *pdev,
 	snprintf(name, sizeof(name), fmt, idx);
 
 	edac_dev = edac_device_alloc_ctl_info(sizeof(struct thunderx_l2c),
-					      name, 1, "L2C", 1, 0,
-					      NULL, 0, idx);
+					      name, 1, "L2C", 1, 0, idx);
 	if (!edac_dev) {
 		dev_err(&pdev->dev, "Cannot allocate EDAC device\n");
 		return -ENOMEM;
@@ -2113,6 +2105,9 @@ static struct pci_driver thunderx_l2c_driver = {
 static int __init thunderx_edac_init(void)
 {
 	int rc = 0;
+
+	if (ghes_get_devices())
+		return -EBUSY;
 
 	rc = pci_register_driver(&thunderx_lmc_driver);
 	if (rc)

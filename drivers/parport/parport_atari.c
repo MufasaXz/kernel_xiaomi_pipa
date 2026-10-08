@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Low-level parallel port routines for the Atari builtin port
  *
  * Author: Andreas Schwab <schwab@issan.informatik.uni-dortmund.de>
@@ -217,7 +218,6 @@ static void __exit parport_atari_exit(void)
 
 MODULE_AUTHOR("Andreas Schwab");
 MODULE_DESCRIPTION("Parport Driver for Atari builtin Port");
-MODULE_SUPPORTED_DEVICE("Atari builtin Parallel Port");
 MODULE_LICENSE("GPL");
 
 module_init(parport_atari_init)

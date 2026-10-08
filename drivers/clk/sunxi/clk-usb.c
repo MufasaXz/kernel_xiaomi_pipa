@@ -1,21 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2013-2015 Emilio López
  *
  * Emilio López <emilio@elopez.com.ar>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
+#include <linux/io.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/reset-controller.h>
@@ -23,7 +15,7 @@
 #include <linux/spinlock.h>
 
 
-/**
+/*
  * sunxi_usb_reset... - reset bits in usb clk registers handling
  */
 
@@ -81,9 +73,6 @@ static const struct reset_control_ops sunxi_usb_reset_ops = {
 	.deassert	= sunxi_usb_reset_deassert,
 };
 
-/**
- * sunxi_usb_clk_setup() - Setup function for usb gate clocks
- */
 
 #define SUNXI_USB_MAX_SIZE 32
 
@@ -93,6 +82,12 @@ struct usb_clk_data {
 	bool reset_needs_clk;
 };
 
+/**
+ * sunxi_usb_clk_setup() - Setup function for usb gate clocks
+ * @node: &struct device_node for the clock
+ * @data: &struct usb_clk_data for the clock
+ * @lock: spinlock for the clock
+ */
 static void __init sunxi_usb_clk_setup(struct device_node *node,
 				       const struct usb_clk_data *data,
 				       spinlock_t *lock)

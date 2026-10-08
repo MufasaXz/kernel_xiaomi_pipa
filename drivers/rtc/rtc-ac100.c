@@ -1,18 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * RTC Driver for X-Powers AC100
  *
  * Copyright (c) 2016 Chen-Yu Tsai
  *
  * Chen-Yu Tsai <wens@csie.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #include <linux/bcd.h>
@@ -107,7 +99,7 @@ struct ac100_rtc_dev {
 	struct clk_hw_onecell_data *clk_data;
 };
 
-/**
+/*
  * Clock controls for 3 clock output pins
  */
 
@@ -386,7 +378,7 @@ static void ac100_rtc_unregister_clks(struct ac100_rtc_dev *chip)
 	clk_unregister_fixed_rate(chip->rtc_32k_clk->clk);
 }
 
-/**
+/*
  * RTC related bits
  */
 static int ac100_rtc_get_time(struct device *dev, struct rtc_time *rtc_tm)
@@ -536,7 +528,7 @@ static irqreturn_t ac100_rtc_irq(int irq, void *data)
 	unsigned int val = 0;
 	int ret;
 
-	mutex_lock(&chip->rtc->ops_lock);
+	rtc_lock(chip->rtc);
 
 	/* read status */
 	ret = regmap_read(regmap, AC100_ALM_INT_STA, &val);
@@ -559,7 +551,7 @@ static irqreturn_t ac100_rtc_irq(int irq, void *data)
 	}
 
 out:
-	mutex_unlock(&chip->rtc->ops_lock);
+	rtc_unlock(chip->rtc);
 	return IRQ_HANDLED;
 }
 
@@ -586,10 +578,8 @@ static int ac100_rtc_probe(struct platform_device *pdev)
 	chip->regmap = ac100->regmap;
 
 	chip->irq = platform_get_irq(pdev, 0);
-	if (chip->irq < 0) {
-		dev_err(&pdev->dev, "No IRQ resource\n");
+	if (chip->irq < 0)
 		return chip->irq;
-	}
 
 	chip->rtc = devm_rtc_allocate_device(&pdev->dev);
 	if (IS_ERR(chip->rtc))
@@ -620,24 +610,14 @@ static int ac100_rtc_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	ret = rtc_register_device(chip->rtc);
-	if (ret) {
-		dev_err(&pdev->dev, "unable to register device\n");
-		return ret;
-	}
-
-	dev_info(&pdev->dev, "RTC enabled\n");
-
-	return 0;
+	return devm_rtc_register_device(chip->rtc);
 }
 
-static int ac100_rtc_remove(struct platform_device *pdev)
+static void ac100_rtc_remove(struct platform_device *pdev)
 {
 	struct ac100_rtc_dev *chip = platform_get_drvdata(pdev);
 
 	ac100_rtc_unregister_clks(chip);
-
-	return 0;
 }
 
 static const struct of_device_id ac100_rtc_match[] = {

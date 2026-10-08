@@ -3,7 +3,9 @@
 
 # IPv4 and IPv6 onlink tests
 
+source lib.sh
 PAUSE_ON_FAIL=${PAUSE_ON_FAIL:=no}
+VERBOSE=0
 
 # Network interfaces
 # - odd in current namespace; even in peer ns
@@ -73,9 +75,6 @@ TEST_NET4IN6[2]=10.2.1.254
 # mcast address
 MCAST6=ff02::1
 
-
-PEER_NS=bart
-PEER_CMD="ip netns exec ${PEER_NS}"
 VRF=lisa
 VRF_TABLE=1101
 PBR_TABLE=101
@@ -91,10 +90,10 @@ log_test()
 
 	if [ ${rc} -eq ${expected} ]; then
 		nsuccess=$((nsuccess+1))
-		printf "\n    TEST: %-50s  [ OK ]\n" "${msg}"
+		printf "    TEST: %-50s  [ OK ]\n" "${msg}"
 	else
 		nfail=$((nfail+1))
-		printf "\n    TEST: %-50s  [FAIL]\n" "${msg}"
+		printf "    TEST: %-50s  [FAIL]\n" "${msg}"
 		if [ "${PAUSE_ON_FAIL}" = "yes" ]; then
 			echo
 			echo "hit enter to continue, 'q' to quit"
@@ -121,9 +120,23 @@ log_subsection()
 
 run_cmd()
 {
-	echo
-	echo "COMMAND: $*"
-	eval $*
+	local cmd="$1"
+	local out
+	local rc
+
+	if [ "$VERBOSE" = "1" ]; then
+		printf "    COMMAND: $cmd\n"
+	fi
+
+	out=$(eval $cmd 2>&1)
+	rc=$?
+	if [ "$VERBOSE" = "1" -a -n "$out" ]; then
+		echo "    $out"
+	fi
+
+	[ "$VERBOSE" = "1" ] && echo
+
+	return $rc
 }
 
 get_linklocal()
@@ -132,7 +145,7 @@ get_linklocal()
 	local pfx
 	local addr
 
-	addr=$(${pfx} ip -6 -br addr show dev ${dev} | \
+	addr=$(${pfx} ${IP} -6 -br addr show dev ${dev} | \
 	awk '{
 		for (i = 3; i <= NF; ++i) {
 			if ($i ~ /^fe80/)
@@ -160,57 +173,46 @@ setup()
 
 	set -e
 
-	# create namespace
-	ip netns add ${PEER_NS}
-	ip -netns ${PEER_NS} li set lo up
+	# create namespaces
+	setup_ns ns1
+	IP="ip -netns $ns1"
+	setup_ns ns2
 
 	# add vrf table
-	ip li add ${VRF} type vrf table ${VRF_TABLE}
-	ip li set ${VRF} up
-	ip ro add table ${VRF_TABLE} unreachable default metric 8192
-	ip -6 ro add table ${VRF_TABLE} unreachable default metric 8192
+	${IP} li add ${VRF} type vrf table ${VRF_TABLE}
+	${IP} li set ${VRF} up
+	${IP} ro add table ${VRF_TABLE} unreachable default metric 8192
+	${IP} -6 ro add table ${VRF_TABLE} unreachable default metric 8192
 
 	# create test interfaces
-	ip li add ${NETIFS[p1]} type veth peer name ${NETIFS[p2]}
-	ip li add ${NETIFS[p3]} type veth peer name ${NETIFS[p4]}
-	ip li add ${NETIFS[p5]} type veth peer name ${NETIFS[p6]}
-	ip li add ${NETIFS[p7]} type veth peer name ${NETIFS[p8]}
+	${IP} li add ${NETIFS[p1]} type veth peer name ${NETIFS[p2]}
+	${IP} li add ${NETIFS[p3]} type veth peer name ${NETIFS[p4]}
+	${IP} li add ${NETIFS[p5]} type veth peer name ${NETIFS[p6]}
+	${IP} li add ${NETIFS[p7]} type veth peer name ${NETIFS[p8]}
 
 	# enslave vrf interfaces
 	for n in 5 7; do
-		ip li set ${NETIFS[p${n}]} vrf ${VRF}
+		${IP} li set ${NETIFS[p${n}]} vrf ${VRF}
 	done
 
 	# add addresses
 	for n in 1 3 5 7; do
-		ip li set ${NETIFS[p${n}]} up
-		ip addr add ${V4ADDRS[p${n}]}/24 dev ${NETIFS[p${n}]}
-		ip addr add ${V6ADDRS[p${n}]}/64 dev ${NETIFS[p${n}]} nodad
+		${IP} li set ${NETIFS[p${n}]} up
+		${IP} addr add ${V4ADDRS[p${n}]}/24 dev ${NETIFS[p${n}]}
+		${IP} addr add ${V6ADDRS[p${n}]}/64 dev ${NETIFS[p${n}]} nodad
 	done
 
 	# move peer interfaces to namespace and add addresses
 	for n in 2 4 6 8; do
-		ip li set ${NETIFS[p${n}]} netns ${PEER_NS} up
-		ip -netns ${PEER_NS} addr add ${V4ADDRS[p${n}]}/24 dev ${NETIFS[p${n}]}
-		ip -netns ${PEER_NS} addr add ${V6ADDRS[p${n}]}/64 dev ${NETIFS[p${n}]} nodad
+		${IP} li set ${NETIFS[p${n}]} netns ${ns2} up
+		ip -netns $ns2 addr add ${V4ADDRS[p${n}]}/24 dev ${NETIFS[p${n}]}
+		ip -netns $ns2 addr add ${V6ADDRS[p${n}]}/64 dev ${NETIFS[p${n}]} nodad
 	done
 
-	ip -6 ro add default via ${V6ADDRS[p3]/::[0-9]/::64}
-	ip -6 ro add table ${VRF_TABLE} default via ${V6ADDRS[p7]/::[0-9]/::64}
+	${IP} -6 ro add default via ${V6ADDRS[p3]/::[0-9]/::64}
+	${IP} -6 ro add table ${VRF_TABLE} default via ${V6ADDRS[p7]/::[0-9]/::64}
 
 	set +e
-}
-
-cleanup()
-{
-	# make sure we start from a clean slate
-	ip netns del ${PEER_NS} 2>/dev/null
-	for n in 1 3 5 7; do
-		ip link del ${NETIFS[p${n}]} 2>/dev/null
-	done
-	ip link del ${VRF} 2>/dev/null
-	ip ro flush table ${VRF_TABLE}
-	ip -6 ro flush table ${VRF_TABLE}
 }
 
 ################################################################################
@@ -229,7 +231,7 @@ run_ip()
 	# dev arg may be empty
 	[ -n "${dev}" ] && dev="dev ${dev}"
 
-	run_cmd ip ro add table "${table}" "${prefix}"/32 via "${gw}" "${dev}" onlink
+	run_cmd "${IP} ro add table ${table} ${prefix}/32 via ${gw} ${dev} onlink"
 	log_test $? ${exp_rc} "${desc}"
 }
 
@@ -245,8 +247,8 @@ run_ip_mpath()
 	# dev arg may be empty
 	[ -n "${dev}" ] && dev="dev ${dev}"
 
-	run_cmd ip ro add table "${table}" "${prefix}"/32 \
-		nexthop via ${nh1} nexthop via ${nh2}
+	run_cmd "${IP} ro add table ${table} ${prefix}/32 \
+		nexthop via ${nh1} nexthop via ${nh2}"
 	log_test $? ${exp_rc} "${desc}"
 }
 
@@ -327,7 +329,7 @@ run_ip6()
 	# dev arg may be empty
 	[ -n "${dev}" ] && dev="dev ${dev}"
 
-	run_cmd ip -6 ro add table "${table}" "${prefix}"/128 via "${gw}" "${dev}" onlink
+	run_cmd "${IP} -6 ro add table ${table} ${prefix}/128 via ${gw} ${dev} onlink"
 	log_test $? ${exp_rc} "${desc}"
 }
 
@@ -341,8 +343,8 @@ run_ip6_mpath()
 	local exp_rc="$6"
 	local desc="$7"
 
-	run_cmd ip -6 ro add table "${table}" "${prefix}"/128 "${opts}" \
-		nexthop via ${nh1} nexthop via ${nh2}
+	run_cmd "${IP} -6 ro add table ${table} ${prefix}/128 ${opts} \
+		nexthop via ${nh1} nexthop via ${nh2}"
 	log_test $? ${exp_rc} "${desc}"
 }
 
@@ -451,15 +453,37 @@ run_onlink_tests()
 }
 
 ################################################################################
+# usage
+
+usage()
+{
+	cat <<EOF
+usage: ${0##*/} OPTS
+
+        -p          Pause on fail
+        -v          verbose mode (show commands and output)
+EOF
+}
+
+################################################################################
 # main
 
 nsuccess=0
 nfail=0
 
-cleanup
+while getopts :t:pPhv o
+do
+	case $o in
+		p) PAUSE_ON_FAIL=yes;;
+		v) VERBOSE=$(($VERBOSE + 1));;
+		h) usage; exit 0;;
+		*) usage; exit 1;;
+	esac
+done
+
 setup
 run_onlink_tests
-cleanup
+cleanup_ns ${ns1} ${ns2}
 
 if [ "$TESTS" != "none" ]; then
 	printf "\nTests passed: %3d\n" ${nsuccess}

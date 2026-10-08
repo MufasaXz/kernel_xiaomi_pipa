@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Battery driver for wm8350 PMIC
  *
@@ -6,10 +7,6 @@
  * Based on OLPC Battery Driver
  *
  * Copyright 2006  David Woodhouse <dwmw2@infradead.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -179,7 +176,7 @@ static ssize_t charger_state_show(struct device *dev,
 		return 0;
 	}
 
-	return sprintf(buf, "%s\n", charge);
+	return sysfs_emit(buf, "%s\n", charge);
 }
 
 static DEVICE_ATTR_RO(charger_state);
@@ -230,7 +227,7 @@ static irqreturn_t wm8350_charger_handler(int irq, void *data)
 	case WM8350_IRQ_EXT_USB_FB:
 	case WM8350_IRQ_EXT_WALL_FB:
 		wm8350_charger_config(wm8350, policy);
-		/* Fall through */
+		fallthrough;
 	case WM8350_IRQ_EXT_BAT_FB:
 		power_supply_changed(power->battery);
 		power_supply_changed(power->usb);
@@ -543,22 +540,17 @@ static int wm8350_power_probe(struct platform_device *pdev)
 	struct wm8350_charger_policy *policy = power->policy;
 	int ret;
 
-	power->ac = power_supply_register(&pdev->dev, &wm8350_ac_desc, NULL);
+	power->ac = devm_power_supply_register(&pdev->dev, &wm8350_ac_desc, NULL);
 	if (IS_ERR(power->ac))
 		return PTR_ERR(power->ac);
 
-	power->battery = power_supply_register(&pdev->dev, &wm8350_battery_desc,
-					       NULL);
-	if (IS_ERR(power->battery)) {
-		ret = PTR_ERR(power->battery);
-		goto battery_failed;
-	}
+	power->battery = devm_power_supply_register(&pdev->dev, &wm8350_battery_desc, NULL);
+	if (IS_ERR(power->battery))
+		return PTR_ERR(power->battery);
 
-	power->usb = power_supply_register(&pdev->dev, &wm8350_usb_desc, NULL);
-	if (IS_ERR(power->usb)) {
-		ret = PTR_ERR(power->usb);
-		goto usb_failed;
-	}
+	power->usb = devm_power_supply_register(&pdev->dev, &wm8350_usb_desc, NULL);
+	if (IS_ERR(power->usb))
+		return PTR_ERR(power->usb);
 
 	ret = device_create_file(&pdev->dev, &dev_attr_charger_state);
 	if (ret < 0)
@@ -573,26 +565,14 @@ static int wm8350_power_probe(struct platform_device *pdev)
 	}
 
 	return ret;
-
-usb_failed:
-	power_supply_unregister(power->battery);
-battery_failed:
-	power_supply_unregister(power->ac);
-
-	return ret;
 }
 
-static int wm8350_power_remove(struct platform_device *pdev)
+static void wm8350_power_remove(struct platform_device *pdev)
 {
 	struct wm8350 *wm8350 = platform_get_drvdata(pdev);
-	struct wm8350_power *power = &wm8350->power;
 
 	free_charger_irq(wm8350);
 	device_remove_file(&pdev->dev, &dev_attr_charger_state);
-	power_supply_unregister(power->battery);
-	power_supply_unregister(power->ac);
-	power_supply_unregister(power->usb);
-	return 0;
 }
 
 static struct platform_driver wm8350_power_driver = {

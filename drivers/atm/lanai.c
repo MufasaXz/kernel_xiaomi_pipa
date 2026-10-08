@@ -1,9 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* lanai.c -- Copyright 1999-2003 by Mitchell Blank Jr <mitch@sfgoth.com>
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version
- *  2 of the License, or (at your option) any later version.
  *
  * This driver supports ATM cards based on the Efficient "Lanai"
  * chipset such as the Speedstream 3010 and the ENI-25p.  The
@@ -759,7 +755,7 @@ static void lanai_shutdown_rx_vci(const struct lanai_vcc *lvcc)
 /* Shutdown transmitting on card.
  * Unfortunately the lanai needs us to wait until all the data
  * drains out of the buffer before we can dealloc it, so this
- * can take awhile -- up to 370ms for a full 128KB buffer
+ * can take a while -- up to 370ms for a full 128KB buffer
  * assuming everone else is quiet.  In theory the time is
  * boundless if there's a CBR VCC holding things up.
  */
@@ -769,8 +765,7 @@ static void lanai_shutdown_tx_vci(struct lanai_dev *lanai,
 	struct sk_buff *skb;
 	unsigned long flags, timeout;
 	int read, write, lastread = -1;
-	APRINTK(!in_interrupt(),
-	    "lanai_shutdown_tx_vci called w/o process context!\n");
+
 	if (lvcc->vbase == NULL)	/* We were never bound to a VCI */
 		return;
 	/* 15.2.1 - wait for queue to drain */
@@ -1763,7 +1758,7 @@ static void iter_dequeue(struct lanai_dev *lanai, vci_t vci)
 
 static void lanai_timed_poll(struct timer_list *t)
 {
-	struct lanai_dev *lanai = from_timer(lanai, t, timer);
+	struct lanai_dev *lanai = timer_container_of(lanai, t, timer);
 #ifndef DEBUG_RW
 	unsigned long flags;
 #ifdef USE_POWERDOWN
@@ -1797,7 +1792,7 @@ static inline void lanai_timed_poll_start(struct lanai_dev *lanai)
 
 static inline void lanai_timed_poll_stop(struct lanai_dev *lanai)
 {
-	del_timer_sync(&lanai->timer);
+	timer_delete_sync(&lanai->timer);
 }
 
 /* -------------------- INTERRUPT SERVICE: */
@@ -2023,7 +2018,7 @@ static int lanai_normalize_ci(struct lanai_dev *lanai,
 	switch (*vpip) {
 		case ATM_VPI_ANY:
 			*vpip = 0;
-			/* FALLTHROUGH */
+			fallthrough;
 		case 0:
 			break;
 		default:

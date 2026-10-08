@@ -1,4 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0-only
 Image
-Image-dtb
 Image.gz
-Image.gz-dtb
+vmlinuz*
+image.fit

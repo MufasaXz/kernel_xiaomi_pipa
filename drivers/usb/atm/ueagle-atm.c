@@ -1,59 +1,15 @@
-// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
-/*-
+// SPDX-License-Identifier: (GPL-2.0+ OR BSD-2-Clause)
+/*
  * Copyright (c) 2003, 2004
  *	Damien Bergamini <damien.bergamini@free.fr>. All rights reserved.
  *
  * Copyright (c) 2005-2007 Matthieu Castet <castet.matthieu@free.fr>
  * Copyright (c) 2005-2007 Stanislaw Gruszka <stf_xl@wp.pl>
  *
- * This software is available to you under a choice of one of two
- * licenses. You may choose to be licensed under the terms of the GNU
- * General Public License (GPL) Version 2, available from the file
- * COPYING in the main directory of this source tree, or the
- * BSD license below:
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice unmodified, this list of conditions, and the following
- *    disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- * GPL license :
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
- *
- *
  * HISTORY : some part of the code was base on ueagle 1.3 BSD driver,
  * Damien Bergamini agree to put his code under a DUAL GPL/BSD license.
  *
- * The rest of the code was was rewritten from scratch.
+ * The rest of the code was rewritten from scratch.
  */
 
 #include <linux/module.h>
@@ -69,7 +25,7 @@
 #include <linux/slab.h>
 #include <linux/kernel.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "usbatm.h"
 
@@ -394,7 +350,7 @@ struct l1_code {
 	u8 string_header[E4_L1_STRING_HEADER];
 	u8 page_number_to_block_index[E4_MAX_PAGE_NUMBER];
 	struct block_index page_header[E4_NO_SWAPPAGE_HEADERS];
-	u8 code[0];
+	u8 code[];
 } __packed;
 
 /* structures describing a block within a DSP page */
@@ -590,7 +546,7 @@ MODULE_PARM_DESC(annex,
 
 #define uea_wait(sc, cond, timeo) \
 ({ \
-	int _r = wait_event_interruptible_timeout(sc->sync_q, \
+	int _r = wait_event_freezable_timeout(sc->sync_q, \
 			(cond) || kthread_should_stop(), timeo); \
 	if (kthread_should_stop()) \
 		_r = -ENODEV; \
@@ -614,7 +570,7 @@ MODULE_PARM_DESC(annex,
 #define LOAD_INTERNAL     0xA0
 #define F8051_USBCS       0x7f92
 
-/**
+/*
  * uea_send_modem_cmd - Send a command for pre-firmware devices.
  */
 static int uea_send_modem_cmd(struct usb_device *usb,
@@ -716,7 +672,7 @@ err:
 	uea_leaves(usb);
 }
 
-/**
+/*
  * uea_load_firmware - Load usb firmware for pre-firmware devices.
  */
 static int uea_load_firmware(struct usb_device *usb, unsigned int ver)
@@ -852,7 +808,7 @@ static int check_dsp_e4(const u8 *dsp, int len)
 			if (l > len)
 				return 1;
 
-		/* zero is zero regardless endianes */
+		/* zero is zero regardless endianness */
 		} while (blockidx->NotLastBlock);
 	}
 
@@ -1320,7 +1276,7 @@ static void uea_set_bulk_timeout(struct uea_softc *sc, u32 dsrate)
 	    sc->stats.phy.dsrate == dsrate)
 		return;
 
-	/* Original timming (1Mbit/s) from ADI (used in windows driver) */
+	/* Original timing (1Mbit/s) from ADI (used in windows driver) */
 	timeout = (dsrate <= 1024*1024) ? 0 : 1;
 	ret = uea_request(sc, UEA_SET_TIMEOUT, timeout, 0, NULL);
 	uea_info(INS_TO_USBDEV(sc), "setting new timeout %d%s\n",
@@ -1940,7 +1896,6 @@ static int uea_kthread(void *data)
 			ret = sc->stat(sc);
 		if (ret != -EAGAIN)
 			uea_wait(sc, 0, msecs_to_jiffies(1000));
-		try_to_freeze();
 	}
 	uea_leaves(INS_TO_USBDEV(sc));
 	return ret;
@@ -2017,7 +1972,7 @@ static void uea_dispatch_cmv_e1(struct uea_softc *sc, struct intr_pkt *intr)
 	if (cmv->bDirection != E1_MODEMTOHOST)
 		goto bad1;
 
-	/* FIXME : ADI930 reply wrong preambule (func = 2, sub = 2) to
+	/* FIXME : ADI930 reply wrong preamble (func = 2, sub = 2) to
 	 * the first MEMACCESS cmv. Ignore it...
 	 */
 	if (cmv->bFunction != dsc->function) {
@@ -2296,7 +2251,7 @@ static ssize_t stat_status_show(struct device *dev, struct device_attribute *att
 	sc = dev_to_uea(dev);
 	if (!sc)
 		goto out;
-	ret = snprintf(buf, 10, "%08x\n", sc->stats.phy.state);
+	ret = sysfs_emit(buf, "%08x\n", sc->stats.phy.state);
 out:
 	mutex_unlock(&uea_mutex);
 	return ret;
@@ -2362,19 +2317,19 @@ static ssize_t stat_human_status_show(struct device *dev,
 
 	switch (modem_state) {
 	case 0:
-		ret = sprintf(buf, "Modem is booting\n");
+		ret = sysfs_emit(buf, "Modem is booting\n");
 		break;
 	case 1:
-		ret = sprintf(buf, "Modem is initializing\n");
+		ret = sysfs_emit(buf, "Modem is initializing\n");
 		break;
 	case 2:
-		ret = sprintf(buf, "Modem is operational\n");
+		ret = sysfs_emit(buf, "Modem is operational\n");
 		break;
 	case 3:
-		ret = sprintf(buf, "Modem synchronization failed\n");
+		ret = sysfs_emit(buf, "Modem synchronization failed\n");
 		break;
 	default:
-		ret = sprintf(buf, "Modem state is unknown\n");
+		ret = sysfs_emit(buf, "Modem state is unknown\n");
 		break;
 	}
 out:
@@ -2408,7 +2363,7 @@ static ssize_t stat_delin_show(struct device *dev, struct device_attribute *attr
 			delin = "LOSS";
 	}
 
-	ret = sprintf(buf, "%s\n", delin);
+	ret = sysfs_emit(buf, "%s\n", delin);
 out:
 	mutex_unlock(&uea_mutex);
 	return ret;
@@ -2428,7 +2383,7 @@ static ssize_t stat_##name##_show(struct device *dev,		\
 	sc = dev_to_uea(dev);					\
 	if (!sc)						\
 		goto out;					\
-	ret = snprintf(buf, 10, "%08x\n", sc->stats.phy.name);	\
+	ret = sysfs_emit(buf, "%08x\n", sc->stats.phy.name);	\
 	if (reset)						\
 		sc->stats.phy.name = 0;				\
 out:								\
@@ -2508,7 +2463,7 @@ static int claim_interface(struct usb_device *usb_dev,
 	return ret;
 }
 
-static struct attribute *attrs[] = {
+static struct attribute *uea_attrs[] = {
 	&dev_attr_stat_status.attr,
 	&dev_attr_stat_mflags.attr,
 	&dev_attr_stat_human_status.attr,
@@ -2529,9 +2484,7 @@ static struct attribute *attrs[] = {
 	&dev_attr_stat_firmid.attr,
 	NULL,
 };
-static const struct attribute_group attr_grp = {
-	.attrs = attrs,
-};
+ATTRIBUTE_GROUPS(uea);
 
 static int uea_bind(struct usbatm_data *usbatm, struct usb_interface *intf,
 		   const struct usb_device_id *id)
@@ -2600,18 +2553,12 @@ static int uea_bind(struct usbatm_data *usbatm, struct usb_interface *intf,
 		}
 	}
 
-	ret = sysfs_create_group(&intf->dev.kobj, &attr_grp);
+	ret = uea_boot(sc, intf);
 	if (ret < 0)
 		goto error;
 
-	ret = uea_boot(sc, intf);
-	if (ret < 0)
-		goto error_rm_grp;
-
 	return 0;
 
-error_rm_grp:
-	sysfs_remove_group(&intf->dev.kobj, &attr_grp);
 error:
 	kfree(sc);
 	return ret;
@@ -2621,7 +2568,6 @@ static void uea_unbind(struct usbatm_data *usbatm, struct usb_interface *intf)
 {
 	struct uea_softc *sc = usbatm->driver_data;
 
-	sysfs_remove_group(&intf->dev.kobj, &attr_grp);
 	uea_stop(sc);
 	kfree(sc);
 }
@@ -2771,6 +2717,7 @@ static struct usb_driver uea_driver = {
 	.id_table = uea_ids,
 	.probe = uea_probe,
 	.disconnect = uea_disconnect,
+	.dev_groups = uea_groups,
 };
 
 MODULE_DEVICE_TABLE(usb, uea_ids);

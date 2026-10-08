@@ -1,15 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * (c) 2017 Stefano Stabellini <stefano@aporeto.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/module.h>
@@ -234,22 +225,32 @@ again:
 	return IRQ_HANDLED;
 }
 
-static void pvcalls_front_free_map(struct pvcalls_bedata *bedata,
-				   struct sock_mapping *map)
+static void free_active_ring(struct sock_mapping *map);
+
+static void pvcalls_front_destroy_active(struct pvcalls_bedata *bedata,
+					 struct sock_mapping *map)
 {
 	int i;
 
 	unbind_from_irqhandler(map->active.irq, map);
 
-	spin_lock(&bedata->socket_lock);
-	if (!list_empty(&map->list))
-		list_del_init(&map->list);
-	spin_unlock(&bedata->socket_lock);
+	if (bedata) {
+		spin_lock(&bedata->socket_lock);
+		if (!list_empty(&map->list))
+			list_del_init(&map->list);
+		spin_unlock(&bedata->socket_lock);
+	}
 
 	for (i = 0; i < (1 << PVCALLS_RING_ORDER); i++)
-		gnttab_end_foreign_access(map->active.ring->ref[i], 0, 0);
-	gnttab_end_foreign_access(map->active.ref, 0, 0);
-	free_page((unsigned long)map->active.ring);
+		gnttab_end_foreign_access(map->active.ring->ref[i], NULL);
+	gnttab_end_foreign_access(map->active.ref, NULL);
+	free_active_ring(map);
+}
+
+static void pvcalls_front_free_map(struct pvcalls_bedata *bedata,
+				   struct sock_mapping *map)
+{
+	pvcalls_front_destroy_active(bedata, map);
 
 	kfree(map);
 }
@@ -340,6 +341,7 @@ int pvcalls_front_socket(struct socket *sock)
 	pvcalls_exit();
 	return ret;
 }
+EXPORT_SYMBOL_GPL(pvcalls_front_socket);
 
 static void free_active_ring(struct sock_mapping *map)
 {
@@ -377,12 +379,12 @@ out:
 	return -ENOMEM;
 }
 
-static int create_active(struct sock_mapping *map, int *evtchn)
+static int create_active(struct sock_mapping *map, evtchn_port_t *evtchn)
 {
 	void *bytes;
-	int ret = -ENOMEM, irq = -1, i;
+	int ret, irq = -1, i;
 
-	*evtchn = -1;
+	*evtchn = 0;
 	init_waitqueue_head(&map->active.inflight_conn_req);
 
 	bytes = map->active.data.in;
@@ -413,7 +415,7 @@ static int create_active(struct sock_mapping *map, int *evtchn)
 	return 0;
 
 out_error:
-	if (*evtchn >= 0)
+	if (*evtchn > 0)
 		xenbus_free_evtchn(pvcalls_front_dev, *evtchn);
 	return ret;
 }
@@ -424,7 +426,8 @@ int pvcalls_front_connect(struct socket *sock, struct sockaddr *addr,
 	struct pvcalls_bedata *bedata;
 	struct sock_mapping *map = NULL;
 	struct xen_pvcalls_request *req;
-	int notify, req_id, ret, evtchn;
+	int notify, req_id, ret;
+	evtchn_port_t evtchn;
 
 	if (addr->sa_family != AF_INET || sock->type != SOCK_STREAM)
 		return -EOPNOTSUPP;
@@ -439,19 +442,18 @@ int pvcalls_front_connect(struct socket *sock, struct sockaddr *addr,
 		pvcalls_exit_sock(sock);
 		return ret;
 	}
+	ret = create_active(map, &evtchn);
+	if (ret < 0) {
+		free_active_ring(map);
+		pvcalls_exit_sock(sock);
+		return ret;
+	}
 
 	spin_lock(&bedata->socket_lock);
 	ret = get_request(bedata, &req_id);
 	if (ret < 0) {
 		spin_unlock(&bedata->socket_lock);
-		free_active_ring(map);
-		pvcalls_exit_sock(sock);
-		return ret;
-	}
-	ret = create_active(map, &evtchn);
-	if (ret < 0) {
-		spin_unlock(&bedata->socket_lock);
-		free_active_ring(map);
+		pvcalls_front_destroy_active(NULL, map);
 		pvcalls_exit_sock(sock);
 		return ret;
 	}
@@ -485,6 +487,7 @@ int pvcalls_front_connect(struct socket *sock, struct sockaddr *addr,
 	pvcalls_exit_sock(sock);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(pvcalls_front_connect);
 
 static int __write_ring(struct pvcalls_data_intf *intf,
 			struct pvcalls_data *data,
@@ -580,6 +583,7 @@ again:
 	pvcalls_exit_sock(sock);
 	return tot_sent;
 }
+EXPORT_SYMBOL_GPL(pvcalls_front_sendmsg);
 
 static int __read_ring(struct pvcalls_data_intf *intf,
 		       struct pvcalls_data *data,
@@ -665,6 +669,7 @@ int pvcalls_front_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
 	pvcalls_exit_sock(sock);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(pvcalls_front_recvmsg);
 
 int pvcalls_front_bind(struct socket *sock, struct sockaddr *addr, int addr_len)
 {
@@ -718,6 +723,7 @@ int pvcalls_front_bind(struct socket *sock, struct sockaddr *addr, int addr_len)
 	pvcalls_exit_sock(sock);
 	return 0;
 }
+EXPORT_SYMBOL_GPL(pvcalls_front_bind);
 
 int pvcalls_front_listen(struct socket *sock, int backlog)
 {
@@ -767,14 +773,17 @@ int pvcalls_front_listen(struct socket *sock, int backlog)
 	pvcalls_exit_sock(sock);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(pvcalls_front_listen);
 
-int pvcalls_front_accept(struct socket *sock, struct socket *newsock, int flags)
+int pvcalls_front_accept(struct socket *sock, struct socket *newsock,
+			 struct proto_accept_arg *arg)
 {
 	struct pvcalls_bedata *bedata;
 	struct sock_mapping *map;
 	struct sock_mapping *map2 = NULL;
 	struct xen_pvcalls_request *req;
-	int notify, req_id, ret, evtchn, nonblock;
+	int notify, req_id, ret, nonblock;
+	evtchn_port_t evtchn;
 
 	map = pvcalls_enter_sock(sock);
 	if (IS_ERR(map))
@@ -786,7 +795,7 @@ int pvcalls_front_accept(struct socket *sock, struct socket *newsock, int flags)
 		return -EINVAL;
 	}
 
-	nonblock = flags & SOCK_NONBLOCK;
+	nonblock = arg->flags & SOCK_NONBLOCK;
 	/*
 	 * Backend only supports 1 inflight accept request, will return
 	 * errors for the others
@@ -826,28 +835,27 @@ int pvcalls_front_accept(struct socket *sock, struct socket *newsock, int flags)
 		pvcalls_exit_sock(sock);
 		return ret;
 	}
-	spin_lock(&bedata->socket_lock);
-	ret = get_request(bedata, &req_id);
-	if (ret < 0) {
-		clear_bit(PVCALLS_FLAG_ACCEPT_INFLIGHT,
-			  (void *)&map->passive.flags);
-		spin_unlock(&bedata->socket_lock);
-		free_active_ring(map2);
-		kfree(map2);
-		pvcalls_exit_sock(sock);
-		return ret;
-	}
-
 	ret = create_active(map2, &evtchn);
 	if (ret < 0) {
 		free_active_ring(map2);
 		kfree(map2);
 		clear_bit(PVCALLS_FLAG_ACCEPT_INFLIGHT,
 			  (void *)&map->passive.flags);
-		spin_unlock(&bedata->socket_lock);
 		pvcalls_exit_sock(sock);
 		return ret;
 	}
+
+	spin_lock(&bedata->socket_lock);
+	ret = get_request(bedata, &req_id);
+	if (ret < 0) {
+		clear_bit(PVCALLS_FLAG_ACCEPT_INFLIGHT,
+			  (void *)&map->passive.flags);
+		spin_unlock(&bedata->socket_lock);
+		pvcalls_front_free_map(bedata, map2);
+		pvcalls_exit_sock(sock);
+		return ret;
+	}
+
 	list_add_tail(&map2->list, &bedata->socket_mappings);
 
 	req = RING_GET_REQUEST(&bedata->ring, req_id);
@@ -903,6 +911,7 @@ received:
 	pvcalls_exit_sock(sock);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(pvcalls_front_accept);
 
 static __poll_t pvcalls_front_poll_passive(struct file *file,
 					       struct pvcalls_bedata *bedata,
@@ -1003,6 +1012,7 @@ __poll_t pvcalls_front_poll(struct file *file, struct socket *sock,
 	pvcalls_exit_sock(sock);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(pvcalls_front_poll);
 
 int pvcalls_front_release(struct socket *sock)
 {
@@ -1086,13 +1096,14 @@ int pvcalls_front_release(struct socket *sock)
 	pvcalls_exit();
 	return 0;
 }
+EXPORT_SYMBOL_GPL(pvcalls_front_release);
 
 static const struct xenbus_device_id pvcalls_front_ids[] = {
 	{ "pvcalls" },
 	{ "" }
 };
 
-static int pvcalls_front_remove(struct xenbus_device *dev)
+static void pvcalls_front_remove(struct xenbus_device *dev)
 {
 	struct pvcalls_bedata *bedata;
 	struct sock_mapping *map = NULL, *n;
@@ -1124,17 +1135,17 @@ static int pvcalls_front_remove(struct xenbus_device *dev)
 		}
 	}
 	if (bedata->ref != -1)
-		gnttab_end_foreign_access(bedata->ref, 0, 0);
+		gnttab_end_foreign_access(bedata->ref, NULL);
 	kfree(bedata->ring.sring);
 	kfree(bedata);
 	xenbus_switch_state(dev, XenbusStateClosed);
-	return 0;
 }
 
 static int pvcalls_front_probe(struct xenbus_device *dev,
 			  const struct xenbus_device_id *id)
 {
-	int ret = -ENOMEM, evtchn, i;
+	int ret = -ENOMEM, i;
+	evtchn_port_t evtchn;
 	unsigned int max_page_order, function_calls, len;
 	char *versions;
 	grant_ref_t gref_head = 0;
@@ -1269,7 +1280,7 @@ static void pvcalls_front_changed(struct xenbus_device *dev,
 		if (dev->state == XenbusStateClosed)
 			break;
 		/* Missed the backend's CLOSING state */
-		/* fall through */
+		fallthrough;
 	case XenbusStateClosing:
 		xenbus_frontend_closed(dev);
 		break;
@@ -1281,6 +1292,7 @@ static struct xenbus_driver pvcalls_front_driver = {
 	.probe = pvcalls_front_probe,
 	.remove = pvcalls_front_remove,
 	.otherend_changed = pvcalls_front_changed,
+	.not_essential = true,
 };
 
 static int __init pvcalls_frontend_init(void)

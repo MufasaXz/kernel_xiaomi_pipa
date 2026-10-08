@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Roccat Lua driver for Linux
  *
@@ -5,10 +6,6 @@
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
  */
 
 /*
@@ -69,7 +66,7 @@ static ssize_t lua_sysfs_write(struct file *fp, struct kobject *kobj,
 
 #define LUA_SYSFS_W(thingy, THINGY) \
 static ssize_t lua_sysfs_write_ ## thingy(struct file *fp, \
-		struct kobject *kobj, struct bin_attribute *attr, \
+		struct kobject *kobj, const struct bin_attribute *attr, \
 		char *buf, loff_t off, size_t count) \
 { \
 	return lua_sysfs_write(fp, kobj, buf, off, count, \
@@ -78,7 +75,7 @@ static ssize_t lua_sysfs_write_ ## thingy(struct file *fp, \
 
 #define LUA_SYSFS_R(thingy, THINGY) \
 static ssize_t lua_sysfs_read_ ## thingy(struct file *fp, \
-		struct kobject *kobj, struct bin_attribute *attr, \
+		struct kobject *kobj, const struct bin_attribute *attr, \
 		char *buf, loff_t off, size_t count) \
 { \
 	return lua_sysfs_read(fp, kobj, buf, off, count, \
@@ -88,7 +85,7 @@ static ssize_t lua_sysfs_read_ ## thingy(struct file *fp, \
 #define LUA_BIN_ATTRIBUTE_RW(thingy, THINGY) \
 LUA_SYSFS_W(thingy, THINGY) \
 LUA_SYSFS_R(thingy, THINGY) \
-static struct bin_attribute lua_ ## thingy ## _attr = { \
+static const struct bin_attribute lua_ ## thingy ## _attr = { \
 	.attr = { .name = #thingy, .mode = 0660 }, \
 	.size = LUA_SIZE_ ## THINGY, \
 	.read = lua_sysfs_read_ ## thingy, \

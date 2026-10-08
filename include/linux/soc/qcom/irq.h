@@ -1,7 +1,4 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
- */
 
 #ifndef __QCOM_IRQ_H
 #define __QCOM_IRQ_H
@@ -10,19 +7,28 @@
 
 #define GPIO_NO_WAKE_IRQ	~0U
 
-/**
- * struct qcom_irq_fwspec - qcom specific irq fwspec wrapper
- * @fwspec: irq fwspec
- * @mask: if true, keep the irq masked in the gpio controller
+/*
+ * QCOM specific IRQ domain flags that distinguishes the handling of wakeup
+ * capable interrupts by different interrupt controllers.
  *
- * Use this structure to communicate between the parent irq chip, MPM or PDC,
- * to the gpio chip, TLMM, about the gpio being allocated in the parent
- * and if the gpio chip should keep the line masked because the parent irq
- * chip is handling everything about the irq line.
+ * IRQ_DOMAIN_FLAG_QCOM_PDC_WAKEUP: Line must be masked at TLMM and the
+ *                                  interrupt configuration is done at PDC
+ * IRQ_DOMAIN_FLAG_QCOM_MPM_WAKEUP: Interrupt configuration is handled at TLMM
  */
-struct qcom_irq_fwspec {
-	struct irq_fwspec fwspec;
-	bool mask;
-};
+#define IRQ_DOMAIN_FLAG_QCOM_PDC_WAKEUP		(IRQ_DOMAIN_FLAG_NONCORE << 0)
+#define IRQ_DOMAIN_FLAG_QCOM_MPM_WAKEUP		(IRQ_DOMAIN_FLAG_NONCORE << 1)
+
+/**
+ * irq_domain_qcom_handle_wakeup: Return if the domain handles interrupt
+ *                                configuration
+ * @d: irq domain
+ *
+ * This QCOM specific irq domain call returns if the interrupt controller
+ * requires the interrupt be masked at the child interrupt controller.
+ */
+static inline bool irq_domain_qcom_handle_wakeup(const struct irq_domain *d)
+{
+	return (d->flags & IRQ_DOMAIN_FLAG_QCOM_PDC_WAKEUP);
+}
 
 #endif

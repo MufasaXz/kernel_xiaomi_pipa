@@ -7,22 +7,20 @@
 #define KMSG_COMPONENT "ism"
 #define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
+#include <linux/export.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/interrupt.h>
 #include <linux/device.h>
-#include <linux/pci.h>
 #include <linux/err.h>
-#include <net/smc.h>
-
-#include <asm/debug.h>
+#include <linux/ctype.h>
+#include <linux/processor.h>
 
 #include "ism.h"
 
 MODULE_DESCRIPTION("ISM driver for s390");
 MODULE_LICENSE("GPL");
 
-#define PCI_DEVICE_ID_IBM_ISM 0x04ED
 #define DRV_NAME "ism"
 
 static const struct pci_device_id ism_device_table[] = {
@@ -38,20 +36,21 @@ static int ism_cmd(struct ism_dev *ism, void *cmd)
 	struct ism_req_hdr *req = cmd;
 	struct ism_resp_hdr *resp = cmd;
 
-	memcpy_toio(ism->ctl + sizeof(*req), req + 1, req->len - sizeof(*req));
-	memcpy_toio(ism->ctl, req, sizeof(*req));
+	spin_lock(&ism->cmd_lock);
+	__ism_write_cmd(ism, req + 1, sizeof(*req), req->len - sizeof(*req));
+	__ism_write_cmd(ism, req, 0, sizeof(*req));
 
 	WRITE_ONCE(resp->ret, ISM_ERROR);
 
-	memcpy_fromio(resp, ism->ctl, sizeof(*resp));
+	__ism_read_cmd(ism, resp, 0, sizeof(*resp));
 	if (resp->ret) {
 		debug_text_event(ism_debug_info, 0, "cmd failure");
 		debug_event(ism_debug_info, 0, resp, sizeof(*resp));
 		goto out;
 	}
-	memcpy_fromio(resp + 1, ism->ctl + sizeof(*resp),
-		      resp->len - sizeof(*resp));
+	__ism_read_cmd(ism, resp + 1, sizeof(*resp), resp->len - sizeof(*resp));
 out:
+	spin_unlock(&ism->cmd_lock);
 	return resp->ret;
 }
 
@@ -89,8 +88,8 @@ static int register_sba(struct ism_dev *ism)
 	dma_addr_t dma_handle;
 	struct ism_sba *sba;
 
-	sba = dma_zalloc_coherent(&ism->pdev->dev, PAGE_SIZE,
-				  &dma_handle, GFP_KERNEL);
+	sba = dma_alloc_coherent(&ism->pdev->dev, PAGE_SIZE, &dma_handle,
+				 GFP_KERNEL);
 	if (!sba)
 		return -ENOMEM;
 
@@ -116,8 +115,8 @@ static int register_ieq(struct ism_dev *ism)
 	dma_addr_t dma_handle;
 	struct ism_eq *ieq;
 
-	ieq = dma_zalloc_coherent(&ism->pdev->dev, PAGE_SIZE,
-				  &dma_handle, GFP_KERNEL);
+	ieq = dma_alloc_coherent(&ism->pdev->dev, PAGE_SIZE, &dma_handle,
+				 GFP_KERNEL);
 	if (!ieq)
 		return -ENOMEM;
 
@@ -179,8 +178,9 @@ static int unregister_ieq(struct ism_dev *ism)
 	return 0;
 }
 
-static int ism_read_local_gid(struct ism_dev *ism)
+static int ism_read_local_gid(struct dibs_dev *dibs)
 {
+	struct ism_dev *ism = dibs->drv_priv;
 	union ism_read_gid cmd;
 	int ret;
 
@@ -192,68 +192,95 @@ static int ism_read_local_gid(struct ism_dev *ism)
 	if (ret)
 		goto out;
 
-	ism->smcd->local_gid = cmd.response.gid;
+	memset(&dibs->gid, 0, sizeof(dibs->gid));
+	memcpy(&dibs->gid, &cmd.response.gid, sizeof(cmd.response.gid));
 out:
 	return ret;
 }
 
-static int ism_query_rgid(struct smcd_dev *smcd, u64 rgid, u32 vid_valid,
-			  u32 vid)
+static int ism_query_rgid(struct dibs_dev *dibs, const uuid_t *rgid,
+			  u32 vid_valid, u32 vid)
 {
-	struct ism_dev *ism = smcd->priv;
+	struct ism_dev *ism = dibs->drv_priv;
 	union ism_query_rgid cmd;
 
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.request.hdr.cmd = ISM_QUERY_RGID;
 	cmd.request.hdr.len = sizeof(cmd.request);
 
-	cmd.request.rgid = rgid;
+	memcpy(&cmd.request.rgid, rgid, sizeof(cmd.request.rgid));
 	cmd.request.vlan_valid = vid_valid;
 	cmd.request.vlan_id = vid;
 
 	return ism_cmd(ism, &cmd);
 }
 
-static void ism_free_dmb(struct ism_dev *ism, struct smcd_dmb *dmb)
+static int ism_max_dmbs(void)
 {
-	clear_bit(dmb->sba_idx, ism->sba_bitmap);
-	dma_free_coherent(&ism->pdev->dev, dmb->dmb_len,
-			  dmb->cpu_addr, dmb->dma_addr);
+	return ISM_NR_DMBS;
 }
 
-static int ism_alloc_dmb(struct ism_dev *ism, struct smcd_dmb *dmb)
+static void ism_free_dmb(struct ism_dev *ism, struct dibs_dmb *dmb)
 {
+	clear_bit(dmb->idx, ism->sba_bitmap);
+	dma_unmap_page(&ism->pdev->dev, dmb->dma_addr, dmb->dmb_len,
+		       DMA_FROM_DEVICE);
+	folio_put(virt_to_folio(dmb->cpu_addr));
+}
+
+static int ism_alloc_dmb(struct ism_dev *ism, struct dibs_dmb *dmb)
+{
+	struct folio *folio;
 	unsigned long bit;
+	int rc;
 
 	if (PAGE_ALIGN(dmb->dmb_len) > dma_get_max_seg_size(&ism->pdev->dev))
 		return -EINVAL;
 
-	if (!dmb->sba_idx) {
+	if (!dmb->idx) {
 		bit = find_next_zero_bit(ism->sba_bitmap, ISM_NR_DMBS,
 					 ISM_DMB_BIT_OFFSET);
 		if (bit == ISM_NR_DMBS)
-			return -ENOMEM;
+			return -ENOSPC;
 
-		dmb->sba_idx = bit;
+		dmb->idx = bit;
 	}
-	if (dmb->sba_idx < ISM_DMB_BIT_OFFSET ||
-	    test_and_set_bit(dmb->sba_idx, ism->sba_bitmap))
+	if (dmb->idx < ISM_DMB_BIT_OFFSET ||
+	    test_and_set_bit(dmb->idx, ism->sba_bitmap))
 		return -EINVAL;
 
-	dmb->cpu_addr = dma_zalloc_coherent(&ism->pdev->dev, dmb->dmb_len,
-					    &dmb->dma_addr, GFP_KERNEL |
-					    __GFP_NOWARN | __GFP_NOMEMALLOC |
-					    __GFP_COMP | __GFP_NORETRY);
-	if (!dmb->cpu_addr)
-		clear_bit(dmb->sba_idx, ism->sba_bitmap);
+	folio = folio_alloc(GFP_KERNEL | __GFP_NOWARN | __GFP_NOMEMALLOC |
+			    __GFP_NORETRY, get_order(dmb->dmb_len));
 
-	return dmb->cpu_addr ? 0 : -ENOMEM;
+	if (!folio) {
+		rc = -ENOMEM;
+		goto out_bit;
+	}
+
+	dmb->cpu_addr = folio_address(folio);
+	dmb->dma_addr = dma_map_page(&ism->pdev->dev,
+				     virt_to_page(dmb->cpu_addr), 0,
+				     dmb->dmb_len, DMA_FROM_DEVICE);
+	if (dma_mapping_error(&ism->pdev->dev, dmb->dma_addr)) {
+		rc = -ENOMEM;
+		goto out_free;
+	}
+
+	return 0;
+
+out_free:
+	kfree(dmb->cpu_addr);
+out_bit:
+	clear_bit(dmb->idx, ism->sba_bitmap);
+	return rc;
 }
 
-static int ism_register_dmb(struct smcd_dev *smcd, struct smcd_dmb *dmb)
+static int ism_register_dmb(struct dibs_dev *dibs, struct dibs_dmb *dmb,
+			    struct dibs_client *client)
 {
-	struct ism_dev *ism = smcd->priv;
+	struct ism_dev *ism = dibs->drv_priv;
 	union ism_reg_dmb cmd;
+	unsigned long flags;
 	int ret;
 
 	ret = ism_alloc_dmb(ism, dmb);
@@ -266,10 +293,10 @@ static int ism_register_dmb(struct smcd_dev *smcd, struct smcd_dmb *dmb)
 
 	cmd.request.dmb = dmb->dma_addr;
 	cmd.request.dmb_len = dmb->dmb_len;
-	cmd.request.sba_idx = dmb->sba_idx;
+	cmd.request.sba_idx = dmb->idx;
 	cmd.request.vlan_valid = dmb->vlan_valid;
 	cmd.request.vlan_id = dmb->vlan_id;
-	cmd.request.rgid = dmb->rgid;
+	memcpy(&cmd.request.rgid, &dmb->rgid, sizeof(u64));
 
 	ret = ism_cmd(ism, &cmd);
 	if (ret) {
@@ -277,14 +304,18 @@ static int ism_register_dmb(struct smcd_dev *smcd, struct smcd_dmb *dmb)
 		goto out;
 	}
 	dmb->dmb_tok = cmd.response.dmb_tok;
+	spin_lock_irqsave(&dibs->lock, flags);
+	dibs->dmb_clientid_arr[dmb->idx - ISM_DMB_BIT_OFFSET] = client->id;
+	spin_unlock_irqrestore(&dibs->lock, flags);
 out:
 	return ret;
 }
 
-static int ism_unregister_dmb(struct smcd_dev *smcd, struct smcd_dmb *dmb)
+static int ism_unregister_dmb(struct dibs_dev *dibs, struct dibs_dmb *dmb)
 {
-	struct ism_dev *ism = smcd->priv;
+	struct ism_dev *ism = dibs->drv_priv;
 	union ism_unreg_dmb cmd;
+	unsigned long flags;
 	int ret;
 
 	memset(&cmd, 0, sizeof(cmd));
@@ -292,6 +323,10 @@ static int ism_unregister_dmb(struct smcd_dev *smcd, struct smcd_dmb *dmb)
 	cmd.request.hdr.len = sizeof(cmd.request);
 
 	cmd.request.dmb_tok = dmb->dmb_tok;
+
+	spin_lock_irqsave(&dibs->lock, flags);
+	dibs->dmb_clientid_arr[dmb->idx - ISM_DMB_BIT_OFFSET] = NO_DIBS_CLIENT;
+	spin_unlock_irqrestore(&dibs->lock, flags);
 
 	ret = ism_cmd(ism, &cmd);
 	if (ret && ret != ISM_ERROR)
@@ -302,9 +337,9 @@ out:
 	return ret;
 }
 
-static int ism_add_vlan_id(struct smcd_dev *smcd, u64 vlan_id)
+static int ism_add_vlan_id(struct dibs_dev *dibs, u64 vlan_id)
 {
-	struct ism_dev *ism = smcd->priv;
+	struct ism_dev *ism = dibs->drv_priv;
 	union ism_set_vlan_id cmd;
 
 	memset(&cmd, 0, sizeof(cmd));
@@ -316,9 +351,9 @@ static int ism_add_vlan_id(struct smcd_dev *smcd, u64 vlan_id)
 	return ism_cmd(ism, &cmd);
 }
 
-static int ism_del_vlan_id(struct smcd_dev *smcd, u64 vlan_id)
+static int ism_del_vlan_id(struct dibs_dev *dibs, u64 vlan_id)
 {
-	struct ism_dev *ism = smcd->priv;
+	struct ism_dev *ism = dibs->drv_priv;
 	union ism_set_vlan_id cmd;
 
 	memset(&cmd, 0, sizeof(cmd));
@@ -330,27 +365,17 @@ static int ism_del_vlan_id(struct smcd_dev *smcd, u64 vlan_id)
 	return ism_cmd(ism, &cmd);
 }
 
-static int ism_set_vlan_required(struct smcd_dev *smcd)
+static int ism_signal_ieq(struct dibs_dev *dibs, const uuid_t *rgid,
+			  u32 trigger_irq, u32 event_code, u64 info)
 {
-	return ism_cmd_simple(smcd->priv, ISM_SET_VLAN);
-}
-
-static int ism_reset_vlan_required(struct smcd_dev *smcd)
-{
-	return ism_cmd_simple(smcd->priv, ISM_RESET_VLAN);
-}
-
-static int ism_signal_ieq(struct smcd_dev *smcd, u64 rgid, u32 trigger_irq,
-			  u32 event_code, u64 info)
-{
-	struct ism_dev *ism = smcd->priv;
+	struct ism_dev *ism = dibs->drv_priv;
 	union ism_sig_ieq cmd;
 
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.request.hdr.cmd = ISM_SIGNAL_IEQ;
 	cmd.request.hdr.len = sizeof(cmd.request);
 
-	cmd.request.rgid = rgid;
+	memcpy(&cmd.request.rgid, rgid, sizeof(cmd.request.rgid));
 	cmd.request.trigger_irq = trigger_irq;
 	cmd.request.event_code = event_code;
 	cmd.request.info = info;
@@ -364,10 +389,11 @@ static unsigned int max_bytes(unsigned int start, unsigned int len,
 	return min(boundary - (start & (boundary - 1)), len);
 }
 
-static int ism_move(struct smcd_dev *smcd, u64 dmb_tok, unsigned int idx,
-		    bool sf, unsigned int offset, void *data, unsigned int size)
+static int ism_move(struct dibs_dev *dibs, u64 dmb_tok, unsigned int idx,
+		    bool sf, unsigned int offset, void *data,
+		    unsigned int size)
 {
-	struct ism_dev *ism = smcd->priv;
+	struct ism_dev *ism = dibs->drv_priv;
 	unsigned int bytes;
 	u64 dmb_req;
 	int ret;
@@ -389,17 +415,79 @@ static int ism_move(struct smcd_dev *smcd, u64 dmb_tok, unsigned int idx,
 	return 0;
 }
 
+static u16 ism_get_chid(struct dibs_dev *dibs)
+{
+	struct ism_dev *ism = dibs->drv_priv;
+
+	if (!ism || !ism->pdev)
+		return 0;
+
+	return to_zpci(ism->pdev)->pchid;
+}
+
+static int ism_match_event_type(u32 s390_event_type)
+{
+	switch (s390_event_type) {
+	case ISM_EVENT_BUF:
+		return DIBS_BUF_EVENT;
+	case ISM_EVENT_DEV:
+		return DIBS_DEV_EVENT;
+	case ISM_EVENT_SWR:
+		return DIBS_SW_EVENT;
+	default:
+		return DIBS_OTHER_TYPE;
+	}
+}
+
+static int ism_match_event_subtype(u32 s390_event_subtype)
+{
+	switch (s390_event_subtype) {
+	case ISM_BUF_DMB_UNREGISTERED:
+		return DIBS_BUF_UNREGISTERED;
+	case ISM_DEV_GID_DISABLED:
+		return DIBS_DEV_DISABLED;
+	case ISM_DEV_GID_ERR_STATE:
+		return DIBS_DEV_ERR_STATE;
+	default:
+		return DIBS_OTHER_SUBTYPE;
+	}
+}
+
 static void ism_handle_event(struct ism_dev *ism)
 {
-	struct smcd_event *entry;
+	struct dibs_dev *dibs = ism->dibs;
+	struct dibs_event event;
+	struct ism_event *entry;
+	struct dibs_client *clt;
+	int i;
 
 	while ((ism->ieq_idx + 1) != READ_ONCE(ism->ieq->header.idx)) {
-		if (++(ism->ieq_idx) == ARRAY_SIZE(ism->ieq->entry))
+		if (++ism->ieq_idx == ARRAY_SIZE(ism->ieq->entry))
 			ism->ieq_idx = 0;
 
 		entry = &ism->ieq->entry[ism->ieq_idx];
 		debug_event(ism_debug_info, 2, entry, sizeof(*entry));
-		smcd_handle_event(ism->smcd, entry);
+		__memset(&event, 0, sizeof(event));
+		event.type = ism_match_event_type(entry->type);
+		if (event.type == DIBS_SW_EVENT)
+			event.subtype = entry->code;
+		else
+			event.subtype = ism_match_event_subtype(entry->code);
+		event.time = entry->time;
+		event.data = entry->info;
+		switch (event.type) {
+		case DIBS_BUF_EVENT:
+			event.buffer_tok = entry->tok;
+			break;
+		case DIBS_DEV_EVENT:
+		case DIBS_SW_EVENT:
+			memcpy(&event.gid, &entry->tok, sizeof(u64));
+		}
+		for (i = 0; i < MAX_DIBS_CLIENTS; ++i) {
+			clt = dibs->subs[i];
+			if (clt)
+				clt->ops->handle_event(dibs, &event);
+		}
 	}
 }
 
@@ -407,12 +495,17 @@ static irqreturn_t ism_handle_irq(int irq, void *data)
 {
 	struct ism_dev *ism = data;
 	unsigned long bit, end;
+	struct dibs_dev *dibs;
 	unsigned long *bv;
+	u16 dmbemask;
+	u8 client_id;
+
+	dibs = ism->dibs;
 
 	bv = (void *) &ism->sba->dmb_bits[ISM_DMB_WORD_OFFSET];
 	end = sizeof(ism->sba->dmb_bits) * BITS_PER_BYTE - ISM_DMB_BIT_OFFSET;
 
-	spin_lock(&ism->lock);
+	spin_lock(&dibs->lock);
 	ism->sba->s = 0;
 	barrier();
 	for (bit = 0;;) {
@@ -421,9 +514,16 @@ static irqreturn_t ism_handle_irq(int irq, void *data)
 			break;
 
 		clear_bit_inv(bit, bv);
+		dmbemask = ism->sba->dmbe_mask[bit + ISM_DMB_BIT_OFFSET];
 		ism->sba->dmbe_mask[bit + ISM_DMB_BIT_OFFSET] = 0;
 		barrier();
-		smcd_handle_irq(ism->smcd, bit + ISM_DMB_BIT_OFFSET);
+		client_id = dibs->dmb_clientid_arr[bit];
+		if (unlikely(client_id == NO_DIBS_CLIENT ||
+			     !dibs->subs[client_id]))
+			continue;
+		dibs->subs[client_id]->ops->handle_irq(dibs,
+						       bit + ISM_DMB_BIT_OFFSET,
+						       dmbemask);
 	}
 
 	if (ism->sba->e) {
@@ -431,20 +531,20 @@ static irqreturn_t ism_handle_irq(int irq, void *data)
 		barrier();
 		ism_handle_event(ism);
 	}
-	spin_unlock(&ism->lock);
+	spin_unlock(&dibs->lock);
 	return IRQ_HANDLED;
 }
 
-static const struct smcd_ops ism_ops = {
+static const struct dibs_dev_ops ism_ops = {
+	.get_fabric_id = ism_get_chid,
 	.query_remote_gid = ism_query_rgid,
+	.max_dmbs = ism_max_dmbs,
 	.register_dmb = ism_register_dmb,
 	.unregister_dmb = ism_unregister_dmb,
+	.move_data = ism_move,
 	.add_vlan_id = ism_add_vlan_id,
 	.del_vlan_id = ism_del_vlan_id,
-	.set_vlan_required = ism_set_vlan_required,
-	.reset_vlan_required = ism_reset_vlan_required,
 	.signal_event = ism_signal_ieq,
-	.move_data = ism_move,
 };
 
 static int ism_dev_init(struct ism_dev *ism)
@@ -469,19 +569,9 @@ static int ism_dev_init(struct ism_dev *ism)
 	if (ret)
 		goto unreg_sba;
 
-	ret = ism_read_local_gid(ism);
-	if (ret)
-		goto unreg_ieq;
-
-	ret = smcd_register_dev(ism->smcd);
-	if (ret)
-		goto unreg_ieq;
-
 	query_info(ism);
 	return 0;
 
-unreg_ieq:
-	unregister_ieq(ism);
 unreg_sba:
 	unregister_sba(ism);
 free_irq:
@@ -492,8 +582,20 @@ out:
 	return ret;
 }
 
+static void ism_dev_exit(struct ism_dev *ism)
+{
+	struct pci_dev *pdev = ism->pdev;
+
+	unregister_ieq(ism);
+	unregister_sba(ism);
+	free_irq(pci_irq_vector(pdev, 0), ism);
+	pci_free_irq_vectors(pdev);
+}
+
 static int ism_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
+	struct dibs_dev *dibs;
+	struct zpci_dev *zdev;
 	struct ism_dev *ism;
 	int ret;
 
@@ -501,106 +603,96 @@ static int ism_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (!ism)
 		return -ENOMEM;
 
-	spin_lock_init(&ism->lock);
+	spin_lock_init(&ism->cmd_lock);
 	dev_set_drvdata(&pdev->dev, ism);
 	ism->pdev = pdev;
 
 	ret = pci_enable_device_mem(pdev);
 	if (ret)
-		goto err;
+		goto err_dev;
 
 	ret = pci_request_mem_regions(pdev, DRV_NAME);
 	if (ret)
 		goto err_disable;
 
-	ism->ctl = pci_iomap(pdev, 2, 0);
-	if (!ism->ctl)
+	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+	if (ret)
 		goto err_resource;
 
-	ret = pci_set_dma_mask(pdev, DMA_BIT_MASK(64));
-	if (ret)
-		goto err_unmap;
-
-	pci_set_dma_seg_boundary(pdev, SZ_1M - 1);
-	pci_set_dma_max_seg_size(pdev, SZ_1M);
+	dma_set_seg_boundary(&pdev->dev, SZ_1M - 1);
+	dma_set_max_seg_size(&pdev->dev, SZ_1M);
 	pci_set_master(pdev);
 
-	ism->smcd = smcd_alloc_dev(&pdev->dev, dev_name(&pdev->dev), &ism_ops,
-				   ISM_NR_DMBS);
-	if (!ism->smcd)
-		goto err_unmap;
+	dibs = dibs_dev_alloc();
+	if (!dibs) {
+		ret = -ENOMEM;
+		goto err_resource;
+	}
+	/* set this up before we enable interrupts */
+	ism->dibs = dibs;
+	dibs->drv_priv = ism;
+	dibs->ops = &ism_ops;
 
-	ism->smcd->priv = ism;
+	/* enable ism device, but any interrupts and events will be ignored
+	 * before dibs_dev_add() adds it to any clients.
+	 */
 	ret = ism_dev_init(ism);
 	if (ret)
-		goto err_free;
+		goto err_dibs;
+
+	/* after ism_dev_init() we can call ism function to set gid */
+	ret = ism_read_local_gid(dibs);
+	if (ret)
+		goto err_ism;
+
+	dibs->dev.parent = &pdev->dev;
+
+	zdev = to_zpci(pdev);
+	dev_set_name(&dibs->dev, "ism%x", zdev->uid ? zdev->uid : zdev->fid);
+
+	ret = dibs_dev_add(dibs);
+	if (ret)
+		goto err_ism;
 
 	return 0;
 
-err_free:
-	smcd_free_dev(ism->smcd);
-err_unmap:
-	pci_iounmap(pdev, ism->ctl);
+err_ism:
+	ism_dev_exit(ism);
+err_dibs:
+	/* pairs with dibs_dev_alloc() */
+	put_device(&dibs->dev);
 err_resource:
 	pci_release_mem_regions(pdev);
 err_disable:
 	pci_disable_device(pdev);
-err:
-	kfree(ism);
+err_dev:
 	dev_set_drvdata(&pdev->dev, NULL);
+	kfree(ism);
+
 	return ret;
-}
-
-static void ism_dev_exit(struct ism_dev *ism)
-{
-	struct pci_dev *pdev = ism->pdev;
-
-	smcd_unregister_dev(ism->smcd);
-	unregister_ieq(ism);
-	unregister_sba(ism);
-	free_irq(pci_irq_vector(pdev, 0), ism);
-	pci_free_irq_vectors(pdev);
 }
 
 static void ism_remove(struct pci_dev *pdev)
 {
 	struct ism_dev *ism = dev_get_drvdata(&pdev->dev);
+	struct dibs_dev *dibs = ism->dibs;
 
+	dibs_dev_del(dibs);
 	ism_dev_exit(ism);
+	/* pairs with dibs_dev_alloc() */
+	put_device(&dibs->dev);
 
-	smcd_free_dev(ism->smcd);
-	pci_iounmap(pdev, ism->ctl);
 	pci_release_mem_regions(pdev);
 	pci_disable_device(pdev);
 	dev_set_drvdata(&pdev->dev, NULL);
 	kfree(ism);
 }
-
-static int ism_suspend(struct device *dev)
-{
-	struct ism_dev *ism = dev_get_drvdata(dev);
-
-	ism_dev_exit(ism);
-	return 0;
-}
-
-static int ism_resume(struct device *dev)
-{
-	struct ism_dev *ism = dev_get_drvdata(dev);
-
-	return ism_dev_init(ism);
-}
-
-static SIMPLE_DEV_PM_OPS(ism_pm_ops, ism_suspend, ism_resume);
 
 static struct pci_driver ism_driver = {
 	.name	  = DRV_NAME,
 	.id_table = ism_device_table,
 	.probe	  = ism_probe,
 	.remove	  = ism_remove,
-	.driver	  = {
-		.pm = &ism_pm_ops,
-	},
 };
 
 static int __init ism_init(void)

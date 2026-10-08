@@ -1,4 +1,5 @@
-/*
+/* SPDX-License-Identifier: GPL-2.0
+ *
  * Dmaengine driver base library for DMA controllers, found on SH-based SoCs
  *
  * extracted from shdma.c and headers
@@ -7,10 +8,6 @@
  * Copyright (C) 2009 Nobuhiro Iwamatsu <iwamatsu.nobuhiro@renesas.com>
  * Copyright (C) 2009 Renesas Solutions, Inc. All rights reserved.
  * Copyright (C) 2007 Freescale Semiconductor, Inc. All rights reserved.
- *
- * This is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
  */
 
 #ifndef SHDMA_BASE_H
@@ -99,7 +96,7 @@ struct shdma_ops {
 	int (*desc_setup)(struct shdma_chan *, struct shdma_desc *,
 			  dma_addr_t, dma_addr_t, size_t *);
 	int (*set_slave)(struct shdma_chan *, int, dma_addr_t, bool);
-	void (*setup_xfer)(struct shdma_chan *, int);
+	int (*setup_xfer)(struct shdma_chan *, int);
 	void (*start_xfer)(struct shdma_chan *, struct shdma_desc *);
 	struct shdma_desc *(*embedded_desc)(void *, int);
 	bool (*chan_irq)(struct shdma_chan *, int);

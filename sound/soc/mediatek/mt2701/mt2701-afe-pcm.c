@@ -12,8 +12,6 @@
 #include <linux/module.h>
 #include <linux/mfd/syscon.h>
 #include <linux/of.h>
-#include <linux/of_address.h>
-#include <linux/of_device.h>
 #include <linux/pm_runtime.h>
 
 #include "mt2701-afe-common.h"
@@ -58,6 +56,27 @@ static const struct mt2701_afe_rate mt2701_afe_i2s_rates[] = {
 	{ .rate = 88200, .regvalue = 22 },
 	{ .rate = 176400, .regvalue = 23 },
 	{ .rate = 352800, .regvalue = 24 },
+};
+
+static const unsigned int mt2701_afe_backup_list[] = {
+	AUDIO_TOP_CON0,
+	AUDIO_TOP_CON4,
+	AUDIO_TOP_CON5,
+	ASYS_TOP_CON,
+	AFE_CONN0,
+	AFE_CONN1,
+	AFE_CONN2,
+	AFE_CONN3,
+	AFE_CONN15,
+	AFE_CONN16,
+	AFE_CONN17,
+	AFE_CONN18,
+	AFE_CONN19,
+	AFE_CONN20,
+	AFE_CONN21,
+	AFE_CONN22,
+	AFE_DAC_CON0,
+	AFE_MEMIF_PBUF_SIZE,
 };
 
 static int mt2701_dai_num_to_i2s(struct mtk_base_afe *afe, int num)
@@ -473,10 +492,10 @@ static int mt2701_dlm_fe_trigger(struct snd_pcm_substream *substream,
 static int mt2701_memif_fs(struct snd_pcm_substream *substream,
 			   unsigned int rate)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	int fs;
 
-	if (rtd->cpu_dai->id != MT2701_MEMIF_ULBT)
+	if (snd_soc_rtd_to_cpu(rtd, 0)->id != MT2701_MEMIF_ULBT)
 		fs = mt2701_afe_i2s_fs(rate);
 	else
 		fs = (rate == 16000 ? 1 : 0);
@@ -528,8 +547,6 @@ static struct snd_soc_dai_driver mt2701_afe_pcm_dais[] = {
 	{
 		.name = "PCMO0",
 		.id = MT2701_MEMIF_DL1,
-		.suspend = mtk_afe_dai_suspend,
-		.resume = mtk_afe_dai_resume,
 		.playback = {
 			.stream_name = "DL1",
 			.channels_min = 1,
@@ -544,8 +561,6 @@ static struct snd_soc_dai_driver mt2701_afe_pcm_dais[] = {
 	{
 		.name = "PCM_multi",
 		.id = MT2701_MEMIF_DLM,
-		.suspend = mtk_afe_dai_suspend,
-		.resume = mtk_afe_dai_resume,
 		.playback = {
 			.stream_name = "DLM",
 			.channels_min = 1,
@@ -561,8 +576,6 @@ static struct snd_soc_dai_driver mt2701_afe_pcm_dais[] = {
 	{
 		.name = "PCM0",
 		.id = MT2701_MEMIF_UL1,
-		.suspend = mtk_afe_dai_suspend,
-		.resume = mtk_afe_dai_resume,
 		.capture = {
 			.stream_name = "UL1",
 			.channels_min = 1,
@@ -577,8 +590,6 @@ static struct snd_soc_dai_driver mt2701_afe_pcm_dais[] = {
 	{
 		.name = "PCM1",
 		.id = MT2701_MEMIF_UL2,
-		.suspend = mtk_afe_dai_suspend,
-		.resume = mtk_afe_dai_resume,
 		.capture = {
 			.stream_name = "UL2",
 			.channels_min = 1,
@@ -594,8 +605,6 @@ static struct snd_soc_dai_driver mt2701_afe_pcm_dais[] = {
 	{
 		.name = "PCM_BT_DL",
 		.id = MT2701_MEMIF_DLBT,
-		.suspend = mtk_afe_dai_suspend,
-		.resume = mtk_afe_dai_resume,
 		.playback = {
 			.stream_name = "DLBT",
 			.channels_min = 1,
@@ -609,8 +618,6 @@ static struct snd_soc_dai_driver mt2701_afe_pcm_dais[] = {
 	{
 		.name = "PCM_BT_UL",
 		.id = MT2701_MEMIF_ULBT,
-		.suspend = mtk_afe_dai_suspend,
-		.resume = mtk_afe_dai_resume,
 		.capture = {
 			.stream_name = "ULBT",
 			.channels_min = 1,
@@ -646,7 +653,7 @@ static struct snd_soc_dai_driver mt2701_afe_pcm_dais[] = {
 
 		},
 		.ops = &mt2701_afe_i2s_ops,
-		.symmetric_rates = 1,
+		.symmetric_rate = 1,
 	},
 	{
 		.name = "I2S1",
@@ -670,7 +677,7 @@ static struct snd_soc_dai_driver mt2701_afe_pcm_dais[] = {
 				| SNDRV_PCM_FMTBIT_S32_LE)
 			},
 		.ops = &mt2701_afe_i2s_ops,
-		.symmetric_rates = 1,
+		.symmetric_rate = 1,
 	},
 	{
 		.name = "I2S2",
@@ -694,7 +701,7 @@ static struct snd_soc_dai_driver mt2701_afe_pcm_dais[] = {
 				| SNDRV_PCM_FMTBIT_S32_LE)
 			},
 		.ops = &mt2701_afe_i2s_ops,
-		.symmetric_rates = 1,
+		.symmetric_rate = 1,
 	},
 	{
 		.name = "I2S3",
@@ -718,7 +725,7 @@ static struct snd_soc_dai_driver mt2701_afe_pcm_dais[] = {
 				| SNDRV_PCM_FMTBIT_S32_LE)
 			},
 		.ops = &mt2701_afe_i2s_ops,
-		.symmetric_rates = 1,
+		.symmetric_rate = 1,
 	},
 	{
 		.name = "MRG BT",
@@ -740,7 +747,7 @@ static struct snd_soc_dai_driver mt2701_afe_pcm_dais[] = {
 			.formats = SNDRV_PCM_FMTBIT_S16_LE,
 		},
 		.ops = &mt2701_btmrg_ops,
-		.symmetric_rates = 1,
+		.symmetric_rate = 1,
 	}
 };
 
@@ -796,14 +803,6 @@ static const struct snd_kcontrol_new mt2701_afe_o22_mix[] = {
 	SOC_DAPM_SINGLE_AUTODISABLE("I19 Switch", AFE_CONN22, 19, 1, 0),
 };
 
-static const struct snd_kcontrol_new mt2701_afe_o23_mix[] = {
-	SOC_DAPM_SINGLE_AUTODISABLE("I20 Switch", AFE_CONN23, 20, 1, 0),
-};
-
-static const struct snd_kcontrol_new mt2701_afe_o24_mix[] = {
-	SOC_DAPM_SINGLE_AUTODISABLE("I21 Switch", AFE_CONN24, 21, 1, 0),
-};
-
 static const struct snd_kcontrol_new mt2701_afe_o31_mix[] = {
 	SOC_DAPM_SINGLE_AUTODISABLE("I35 Switch", AFE_CONN41, 9, 1, 0),
 };
@@ -830,11 +829,6 @@ static const struct snd_kcontrol_new mt2701_afe_multi_ch_out_i2s2[] = {
 static const struct snd_kcontrol_new mt2701_afe_multi_ch_out_i2s3[] = {
 	SOC_DAPM_SINGLE_AUTODISABLE("Multich I2S3 Out Switch",
 				    PWR2_TOP_CON, 18, 1, 0),
-};
-
-static const struct snd_kcontrol_new mt2701_afe_multi_ch_out_i2s4[] = {
-	SOC_DAPM_SINGLE_AUTODISABLE("Multich I2S4 Out Switch",
-				    PWR2_TOP_CON, 19, 1, 0),
 };
 
 static const struct snd_soc_dapm_widget mt2701_afe_pcm_widgets[] = {
@@ -974,9 +968,11 @@ static const struct snd_soc_component_driver mt2701_afe_pcm_dai_component = {
 	.num_dapm_widgets = ARRAY_SIZE(mt2701_afe_pcm_widgets),
 	.dapm_routes = mt2701_afe_pcm_routes,
 	.num_dapm_routes = ARRAY_SIZE(mt2701_afe_pcm_routes),
+	.suspend = mtk_afe_suspend,
+	.resume = mtk_afe_resume,
 };
 
-static const struct mtk_base_memif_data memif_data[MT2701_MEMIF_NUM] = {
+static const struct mtk_base_memif_data memif_data_array[MT2701_MEMIF_NUM] = {
 	{
 		.name = "DL1",
 		.id = MT2701_MEMIF_DL1,
@@ -994,7 +990,6 @@ static const struct mtk_base_memif_data memif_data[MT2701_MEMIF_NUM] = {
 		.agent_disable_reg = AUDIO_TOP_CON5,
 		.agent_disable_shift = 6,
 		.msb_reg = -1,
-		.msb_shift = -1,
 	},
 	{
 		.name = "DL2",
@@ -1013,7 +1008,6 @@ static const struct mtk_base_memif_data memif_data[MT2701_MEMIF_NUM] = {
 		.agent_disable_reg = AUDIO_TOP_CON5,
 		.agent_disable_shift = 7,
 		.msb_reg = -1,
-		.msb_shift = -1,
 	},
 	{
 		.name = "DL3",
@@ -1032,7 +1026,6 @@ static const struct mtk_base_memif_data memif_data[MT2701_MEMIF_NUM] = {
 		.agent_disable_reg = AUDIO_TOP_CON5,
 		.agent_disable_shift = 8,
 		.msb_reg = -1,
-		.msb_shift = -1,
 	},
 	{
 		.name = "DL4",
@@ -1051,7 +1044,6 @@ static const struct mtk_base_memif_data memif_data[MT2701_MEMIF_NUM] = {
 		.agent_disable_reg = AUDIO_TOP_CON5,
 		.agent_disable_shift = 9,
 		.msb_reg = -1,
-		.msb_shift = -1,
 	},
 	{
 		.name = "DL5",
@@ -1070,7 +1062,6 @@ static const struct mtk_base_memif_data memif_data[MT2701_MEMIF_NUM] = {
 		.agent_disable_reg = AUDIO_TOP_CON5,
 		.agent_disable_shift = 10,
 		.msb_reg = -1,
-		.msb_shift = -1,
 	},
 	{
 		.name = "DLM",
@@ -1089,7 +1080,6 @@ static const struct mtk_base_memif_data memif_data[MT2701_MEMIF_NUM] = {
 		.agent_disable_reg = AUDIO_TOP_CON5,
 		.agent_disable_shift = 12,
 		.msb_reg = -1,
-		.msb_shift = -1,
 	},
 	{
 		.name = "UL1",
@@ -1108,7 +1098,6 @@ static const struct mtk_base_memif_data memif_data[MT2701_MEMIF_NUM] = {
 		.agent_disable_reg = AUDIO_TOP_CON5,
 		.agent_disable_shift = 0,
 		.msb_reg = -1,
-		.msb_shift = -1,
 	},
 	{
 		.name = "UL2",
@@ -1127,7 +1116,6 @@ static const struct mtk_base_memif_data memif_data[MT2701_MEMIF_NUM] = {
 		.agent_disable_reg = AUDIO_TOP_CON5,
 		.agent_disable_shift = 1,
 		.msb_reg = -1,
-		.msb_shift = -1,
 	},
 	{
 		.name = "UL3",
@@ -1146,7 +1134,6 @@ static const struct mtk_base_memif_data memif_data[MT2701_MEMIF_NUM] = {
 		.agent_disable_reg = AUDIO_TOP_CON5,
 		.agent_disable_shift = 2,
 		.msb_reg = -1,
-		.msb_shift = -1,
 	},
 	{
 		.name = "UL4",
@@ -1165,7 +1152,6 @@ static const struct mtk_base_memif_data memif_data[MT2701_MEMIF_NUM] = {
 		.agent_disable_reg = AUDIO_TOP_CON5,
 		.agent_disable_shift = 3,
 		.msb_reg = -1,
-		.msb_shift = -1,
 	},
 	{
 		.name = "UL5",
@@ -1184,7 +1170,6 @@ static const struct mtk_base_memif_data memif_data[MT2701_MEMIF_NUM] = {
 		.agent_disable_reg = AUDIO_TOP_CON5,
 		.agent_disable_shift = 4,
 		.msb_reg = -1,
-		.msb_shift = -1,
 	},
 	{
 		.name = "DLBT",
@@ -1203,7 +1188,6 @@ static const struct mtk_base_memif_data memif_data[MT2701_MEMIF_NUM] = {
 		.agent_disable_reg = AUDIO_TOP_CON5,
 		.agent_disable_shift = 13,
 		.msb_reg = -1,
-		.msb_shift = -1,
 	},
 	{
 		.name = "ULBT",
@@ -1222,7 +1206,6 @@ static const struct mtk_base_memif_data memif_data[MT2701_MEMIF_NUM] = {
 		.agent_disable_reg = AUDIO_TOP_CON5,
 		.agent_disable_shift = 16,
 		.msb_reg = -1,
-		.msb_shift = -1,
 	},
 };
 
@@ -1355,10 +1338,8 @@ static int mt2701_afe_pcm_dev_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	irq_id = platform_get_irq_byname(pdev, "asys");
-	if (irq_id < 0) {
-		dev_err(dev, "unable to get ASYS IRQ\n");
+	if (irq_id < 0)
 		return irq_id;
-	}
 
 	ret = devm_request_irq(dev, irq_id, mt2701_asys_isr,
 			       IRQF_TRIGGER_NONE, "asys-isr", (void *)afe);
@@ -1383,7 +1364,7 @@ static int mt2701_afe_pcm_dev_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	for (i = 0; i < afe->memif_size; i++) {
-		afe->memif[i].data = &memif_data[i];
+		afe->memif[i].data = &memif_data_array[i];
 		afe->memif[i].irq_usage = -1;
 	}
 
@@ -1456,14 +1437,12 @@ err_pm_disable:
 	return ret;
 }
 
-static int mt2701_afe_pcm_dev_remove(struct platform_device *pdev)
+static void mt2701_afe_pcm_dev_remove(struct platform_device *pdev)
 {
 	pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 	if (!pm_runtime_status_suspended(&pdev->dev))
 		mt2701_afe_runtime_suspend(&pdev->dev);
-
-	return 0;
 }
 
 static const struct mt2701_soc_variants mt2701_soc_v1 = {
@@ -1483,17 +1462,15 @@ static const struct of_device_id mt2701_afe_pcm_dt_match[] = {
 MODULE_DEVICE_TABLE(of, mt2701_afe_pcm_dt_match);
 
 static const struct dev_pm_ops mt2701_afe_pm_ops = {
-	SET_RUNTIME_PM_OPS(mt2701_afe_runtime_suspend,
-			   mt2701_afe_runtime_resume, NULL)
+	RUNTIME_PM_OPS(mt2701_afe_runtime_suspend,
+		       mt2701_afe_runtime_resume, NULL)
 };
 
 static struct platform_driver mt2701_afe_pcm_driver = {
 	.driver = {
 		   .name = "mt2701-audio",
 		   .of_match_table = mt2701_afe_pcm_dt_match,
-#ifdef CONFIG_PM
-		   .pm = &mt2701_afe_pm_ops,
-#endif
+		   .pm = pm_ptr(&mt2701_afe_pm_ops),
 	},
 	.probe = mt2701_afe_pcm_dev_probe,
 	.remove = mt2701_afe_pcm_dev_remove,

@@ -54,6 +54,7 @@
 
 #include <linux/hil_mlc.h>
 #include <linux/errno.h>
+#include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -77,7 +78,7 @@ static struct timer_list	hil_mlcs_kicker;
 static int			hil_mlcs_probe, hil_mlc_stop;
 
 static void hil_mlcs_process(unsigned long unused);
-static DECLARE_TASKLET_DISABLED(hil_mlcs_tasklet, hil_mlcs_process, 0);
+static DECLARE_TASKLET_DISABLED_OLD(hil_mlcs_tasklet, hil_mlcs_process);
 
 
 /* #define HIL_MLC_DEBUG */
@@ -1017,7 +1018,7 @@ static int __init hil_mlc_init(void)
 
 static void __exit hil_mlc_exit(void)
 {
-	del_timer_sync(&hil_mlcs_kicker);
+	timer_delete_sync(&hil_mlcs_kicker);
 	tasklet_kill(&hil_mlcs_tasklet);
 }
 

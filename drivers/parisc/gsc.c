@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Interrupt management for most GSC and related devices.
  *
@@ -6,11 +7,6 @@
  * (c) Copyright 1999 Matthew Wilcox
  * (c) Copyright 2000 Helge Deller
  * (c) Copyright 2001 Matthew Wilcox for Hewlett-Packard
- *
- *	This program is free software; you can redistribute it and/or modify
- *	it under the terms of the GNU General Public License as published by
- *      the Free Software Foundation; either version 2 of the License, or
- *      (at your option) any later version.
  */
 
 #include <linux/bitops.h>
@@ -158,7 +154,9 @@ static int gsc_set_affinity_irq(struct irq_data *d, const struct cpumask *dest,
 	gsc_dev->eim = ((u32) gsc_dev->gsc_irq.txn_addr) | gsc_dev->gsc_irq.txn_data;
 
 	/* switch IRQ's for devices below LASI/WAX to other CPU */
-	gsc_writel(gsc_dev->eim, gsc_dev->hpa + OFFSET_IAR);
+	/* ASP chip (svers 0x70) does not support reprogramming */
+	if (gsc_dev->gsc->id.sversion != 0x70)
+		gsc_writel(gsc_dev->eim, gsc_dev->hpa + OFFSET_IAR);
 
 	irq_data_update_effective_affinity(d, &tmask);
 
@@ -261,19 +259,4 @@ int gsc_common_setup(struct parisc_device *parent, struct gsc_asic *gsc_asic)
 #endif
 
 	return 0;
-}
-
-extern struct parisc_driver lasi_driver;
-extern struct parisc_driver asp_driver;
-extern struct parisc_driver wax_driver;
-
-void __init gsc_init(void)
-{
-#ifdef CONFIG_GSC_LASI
-	register_parisc_driver(&lasi_driver);
-	register_parisc_driver(&asp_driver);
-#endif
-#ifdef CONFIG_GSC_WAX
-	register_parisc_driver(&wax_driver);
-#endif
 }

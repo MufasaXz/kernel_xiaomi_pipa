@@ -17,6 +17,7 @@
 
 #ifndef __ASSEMBLY__
 #include <linux/kernel.h>
+#include <linux/math.h>
 #include <linux/sizes.h>
 #include <asm/boot.h>
 #include <asm/page.h>
@@ -28,41 +29,48 @@
  * compile time, but to set the physical address only
  * in the boot process.
  *
- * These 'compile-time allocated' memory buffers are
- * page-sized. Use set_fixmap(idx,phys) to associate
- * physical memory with fixmap indices.
- *
+ * Each enum increment in these 'compile-time allocated'
+ * memory buffers is page-sized. Use set_fixmap(idx,phys)
+ * to associate physical memory with a fixmap index.
  */
 enum fixed_addresses {
 	FIX_HOLE,
 
 	/*
-	 * Reserve a virtual window for the FDT that is 2 MB larger than the
-	 * maximum supported size, and put it at the top of the fixmap region.
-	 * The additional space ensures that any FDT that does not exceed
-	 * MAX_FDT_SIZE can be mapped regardless of whether it crosses any
-	 * 2 MB alignment boundaries.
-	 *
-	 * Keep this at the top so it remains 2 MB aligned.
+	 * Reserve a virtual window for the FDT that is a page bigger than the
+	 * maximum supported size. The additional space ensures that any FDT
+	 * that does not exceed MAX_FDT_SIZE can be mapped regardless of
+	 * whether it crosses any page boundary.
 	 */
-#define FIX_FDT_SIZE		(MAX_FDT_SIZE + SZ_2M)
 	FIX_FDT_END,
-	FIX_FDT = FIX_FDT_END + FIX_FDT_SIZE / PAGE_SIZE - 1,
+	FIX_FDT = FIX_FDT_END + DIV_ROUND_UP(MAX_FDT_SIZE, PAGE_SIZE) + 1,
 
 	FIX_EARLYCON_MEM_BASE,
 	FIX_TEXT_POKE0,
 
+#ifdef CONFIG_KVM
+	/* One slot per CPU, mapping the guest's VNCR page at EL2. */
+	FIX_VNCR_END,
+	FIX_VNCR = FIX_VNCR_END + NR_CPUS,
+#endif
+
 #ifdef CONFIG_ACPI_APEI_GHES
 	/* Used for GHES mapping from assorted contexts */
 	FIX_APEI_GHES_IRQ,
-	FIX_APEI_GHES_NMI,
+	FIX_APEI_GHES_SEA,
+#ifdef CONFIG_ARM_SDE_INTERFACE
+	FIX_APEI_GHES_SDEI_NORMAL,
+	FIX_APEI_GHES_SDEI_CRITICAL,
+#endif
 #endif /* CONFIG_ACPI_APEI_GHES */
 
 #ifdef CONFIG_UNMAP_KERNEL_AT_EL0
+#ifdef CONFIG_RELOCATABLE
+	FIX_ENTRY_TRAMP_TEXT4,	/* one extra slot for the data page */
+#endif
 	FIX_ENTRY_TRAMP_TEXT3,
 	FIX_ENTRY_TRAMP_TEXT2,
 	FIX_ENTRY_TRAMP_TEXT1,
-	FIX_ENTRY_TRAMP_DATA,
 #define TRAMP_VALIAS		(__fix_to_virt(FIX_ENTRY_TRAMP_TEXT1))
 #endif /* CONFIG_UNMAP_KERNEL_AT_EL0 */
 	__end_of_permanent_fixed_addresses,
@@ -85,13 +93,16 @@ enum fixed_addresses {
 	FIX_PTE,
 	FIX_PMD,
 	FIX_PUD,
+	FIX_P4D,
 	FIX_PGD,
 
 	__end_of_fixed_addresses
 };
 
-#define FIXADDR_SIZE	(__end_of_permanent_fixed_addresses << PAGE_SHIFT)
-#define FIXADDR_START	(FIXADDR_TOP - FIXADDR_SIZE)
+#define FIXADDR_SIZE		(__end_of_permanent_fixed_addresses << PAGE_SHIFT)
+#define FIXADDR_START		(FIXADDR_TOP - FIXADDR_SIZE)
+#define FIXADDR_TOT_SIZE	(__end_of_fixed_addresses << PAGE_SHIFT)
+#define FIXADDR_TOT_START	(FIXADDR_TOP - FIXADDR_TOT_SIZE)
 
 #define FIXMAP_PAGE_IO     __pgprot(PROT_DEVICE_nGnRE)
 

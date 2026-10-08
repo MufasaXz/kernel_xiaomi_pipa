@@ -1,15 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * offload engine driver for the Marvell XOR engine
  * Copyright (C) 2007, 2008, Marvell International Ltd.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #include <linux/init.h>
@@ -18,8 +10,8 @@
 #include <linux/dma-mapping.h>
 #include <linux/spinlock.h>
 #include <linux/interrupt.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/memory.h>
 #include <linux/clk.h>
 #include <linux/of.h>
@@ -344,13 +336,13 @@ static void mv_chan_slot_cleanup(struct mv_xor_chan *mv_chan)
 		mv_chan->dmachan.completed_cookie = cookie;
 }
 
-static void mv_xor_tasklet(unsigned long data)
+static void mv_xor_tasklet(struct tasklet_struct *t)
 {
-	struct mv_xor_chan *chan = (struct mv_xor_chan *) data;
+	struct mv_xor_chan *chan = from_tasklet(chan, t, irq_tasklet);
 
-	spin_lock_bh(&chan->lock);
+	spin_lock(&chan->lock);
 	mv_chan_slot_cleanup(chan);
-	spin_unlock_bh(&chan->lock);
+	spin_unlock(&chan->lock);
 }
 
 static struct mv_xor_desc_slot *
@@ -422,7 +414,7 @@ mv_xor_tx_submit(struct dma_async_tx_descriptor *tx)
 		if (!mv_chan_is_busy(mv_chan)) {
 			u32 current_desc = mv_chan_get_current_desc(mv_chan);
 			/*
-			 * and the curren desc is the end of the chain before
+			 * and the current desc is the end of the chain before
 			 * the append, then we need to start the channel
 			 */
 			if (current_desc == old_chain_tail->async_tx.phys)
@@ -1021,7 +1013,7 @@ static int mv_xor_channel_remove(struct mv_xor_chan *mv_chan)
 
 	dma_async_device_unregister(&mv_chan->dmadev);
 
-	dma_free_coherent(dev, MV_XOR_POOL_SIZE,
+	dma_free_wc(dev, MV_XOR_POOL_SIZE,
 			  mv_chan->dma_desc_pool_virt, mv_chan->dma_desc_pool);
 	dma_unmap_single(dev, mv_chan->dummy_src_addr,
 			 MV_XOR_MIN_BYTE_COUNT, DMA_FROM_DEVICE);
@@ -1092,7 +1084,7 @@ mv_xor_channel_add(struct mv_xor_device *xordev,
 		goto err_unmap_dst;
 	}
 
-	/* discover transaction capabilites from the platform data */
+	/* discover transaction capabilities from the platform data */
 	dma_dev->cap_mask = cap_mask;
 
 	INIT_LIST_HEAD(&dma_dev->channels);
@@ -1115,8 +1107,7 @@ mv_xor_channel_add(struct mv_xor_device *xordev,
 
 	mv_chan->mmr_base = xordev->xor_base;
 	mv_chan->mmr_high_base = xordev->xor_high_base;
-	tasklet_init(&mv_chan->irq_tasklet, mv_xor_tasklet, (unsigned long)
-		     mv_chan);
+	tasklet_setup(&mv_chan->irq_tasklet, mv_xor_tasklet);
 
 	/* clear errors before enabling interrupts */
 	mv_chan_clear_err_status(mv_chan);
@@ -1163,13 +1154,16 @@ mv_xor_channel_add(struct mv_xor_device *xordev,
 		 dma_has_cap(DMA_MEMCPY, dma_dev->cap_mask) ? "cpy " : "",
 		 dma_has_cap(DMA_INTERRUPT, dma_dev->cap_mask) ? "intr " : "");
 
-	dma_async_device_register(dma_dev);
+	ret = dma_async_device_register(dma_dev);
+	if (ret)
+		goto err_free_irq;
+
 	return mv_chan;
 
 err_free_irq:
 	free_irq(mv_chan->irq, mv_chan);
 err_free_dma:
-	dma_free_coherent(&pdev->dev, MV_XOR_POOL_SIZE,
+	dma_free_wc(&pdev->dev, MV_XOR_POOL_SIZE,
 			  mv_chan->dma_desc_pool_virt, mv_chan->dma_desc_pool);
 err_unmap_dst:
 	dma_unmap_single(dma_dev->dev, mv_chan->dummy_dst_addr,
@@ -1351,13 +1345,8 @@ static int mv_xor_probe(struct platform_device *pdev)
 	 * setting up. In non-dt case it can only be the legacy one.
 	 */
 	xordev->xor_type = XOR_ORION;
-	if (pdev->dev.of_node) {
-		const struct of_device_id *of_id =
-			of_match_device(mv_xor_dt_ids,
-					&pdev->dev);
-
-		xordev->xor_type = (uintptr_t)of_id->data;
-	}
+	if (pdev->dev.of_node)
+		xordev->xor_type = (uintptr_t)device_get_match_data(&pdev->dev);
 
 	/*
 	 * (Re-)program MBUS remapping windows if we are asked to.
@@ -1397,10 +1386,9 @@ static int mv_xor_probe(struct platform_device *pdev)
 		return 0;
 
 	if (pdev->dev.of_node) {
-		struct device_node *np;
 		int i = 0;
 
-		for_each_child_of_node(pdev->dev.of_node, np) {
+		for_each_child_of_node_scoped(pdev->dev.of_node, np) {
 			struct mv_xor_chan *chan;
 			dma_cap_mask_t cap_mask;
 			int irq;
@@ -1416,7 +1404,6 @@ static int mv_xor_probe(struct platform_device *pdev)
 			irq = irq_of_parse_and_map(np, 0);
 			if (!irq) {
 				ret = -ENODEV;
-				of_node_put(np);
 				goto err_channel_add;
 			}
 
@@ -1425,7 +1412,6 @@ static int mv_xor_probe(struct platform_device *pdev)
 			if (IS_ERR(chan)) {
 				ret = PTR_ERR(chan);
 				irq_dispose_mapping(irq);
-				of_node_put(np);
 				goto err_channel_add;
 			}
 
@@ -1480,7 +1466,7 @@ static struct platform_driver mv_xor_driver = {
 	.resume         = mv_xor_resume,
 	.driver		= {
 		.name	        = MV_XOR_NAME,
-		.of_match_table = of_match_ptr(mv_xor_dt_ids),
+		.of_match_table = mv_xor_dt_ids,
 	},
 };
 

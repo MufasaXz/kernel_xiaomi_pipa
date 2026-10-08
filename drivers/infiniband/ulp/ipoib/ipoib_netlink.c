@@ -32,7 +32,6 @@
 
 #include <linux/netdevice.h>
 #include <linux/if_arp.h>      /* For ARPHRD_xxx */
-#include <linux/module.h>
 #include <net/rtnetlink.h>
 #include "ipoib.h"
 
@@ -98,10 +97,13 @@ out_err:
 	return ret;
 }
 
-static int ipoib_new_child_link(struct net *src_net, struct net_device *dev,
-				struct nlattr *tb[], struct nlattr *data[],
+static int ipoib_new_child_link(struct net_device *dev,
+				struct rtnl_newlink_params *params,
 				struct netlink_ext_ack *extack)
 {
+	struct net *link_net = rtnl_newlink_link_net(params);
+	struct nlattr **data = params->data;
+	struct nlattr **tb = params->tb;
 	struct net_device *pdev;
 	struct ipoib_dev_priv *ppriv;
 	u16 child_pkey;
@@ -110,7 +112,7 @@ static int ipoib_new_child_link(struct net *src_net, struct net_device *dev,
 	if (!tb[IFLA_LINK])
 		return -EINVAL;
 
-	pdev = __dev_get_by_index(src_net, nla_get_u32(tb[IFLA_LINK]));
+	pdev = __dev_get_by_index(link_net, nla_get_u32(tb[IFLA_LINK]));
 	if (!pdev || pdev->type != ARPHRD_INFINIBAND)
 		return -ENODEV;
 
@@ -127,12 +129,36 @@ static int ipoib_new_child_link(struct net *src_net, struct net_device *dev,
 	} else
 		child_pkey  = nla_get_u16(data[IFLA_IPOIB_PKEY]);
 
+	err = ipoib_intf_init(ppriv->ca, ppriv->port, dev->name, dev);
+	if (err) {
+		ipoib_warn(ppriv, "failed to initialize pkey device\n");
+		return err;
+	}
+
 	err = __ipoib_vlan_add(ppriv, ipoib_priv(dev),
 			       child_pkey, IPOIB_RTNL_CHILD);
+	if (err)
+		return err;
 
-	if (!err && data)
+	if (data) {
 		err = ipoib_changelink(dev, tb, data, extack);
-	return err;
+		if (err) {
+			unregister_netdevice(dev);
+			return err;
+		}
+	}
+
+	return 0;
+}
+
+static void ipoib_del_child_link(struct net_device *dev, struct list_head *head)
+{
+	struct ipoib_dev_priv *priv = ipoib_priv(dev);
+
+	if (!priv->parent)
+		return;
+
+	unregister_netdevice_queue(dev, head);
 }
 
 static size_t ipoib_get_size(const struct net_device *dev)
@@ -144,17 +170,24 @@ static size_t ipoib_get_size(const struct net_device *dev)
 
 static struct rtnl_link_ops ipoib_link_ops __read_mostly = {
 	.kind		= "ipoib",
+	.netns_refund   = true,
 	.maxtype	= IFLA_IPOIB_MAX,
 	.policy		= ipoib_policy,
 	.priv_size	= sizeof(struct ipoib_dev_priv),
 	.setup		= ipoib_setup_common,
 	.newlink	= ipoib_new_child_link,
+	.dellink	= ipoib_del_child_link,
 	.changelink	= ipoib_changelink,
 	.get_size	= ipoib_get_size,
 	.fill_info	= ipoib_fill_info,
 	.get_num_rx_queues = ipoib_get_max_num_queues,
 	.get_num_tx_queues = ipoib_get_max_num_queues,
 };
+
+struct rtnl_link_ops *ipoib_get_link_ops(void)
+{
+	return &ipoib_link_ops;
+}
 
 int __init ipoib_netlink_init(void)
 {

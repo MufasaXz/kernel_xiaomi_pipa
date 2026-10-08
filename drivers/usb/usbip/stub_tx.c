@@ -201,7 +201,7 @@ static int stub_send_ret_submit(struct stub_device *sdev)
 
 		/* 1. setup usbip_header */
 		setup_ret_submit_pdu(&pdu_header, urb);
-		usbip_dbg_stub_tx("setup txdata seqnum: %d\n",
+		usbip_dbg_stub_tx("setup txdata seqnum: %u\n",
 				  pdu_header.base.seqnum);
 
 		if (priv->sgl) {
@@ -291,7 +291,7 @@ static int stub_send_ret_submit(struct stub_device *sdev)
 				kfree(iov);
 				usbip_event_add(&sdev->ud,
 						SDEV_EVENT_ERROR_TCP);
-			   return -1;
+				return -1;
 			}
 		}
 

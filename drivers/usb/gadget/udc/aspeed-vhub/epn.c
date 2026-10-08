@@ -5,11 +5,6 @@
  * epn.c - Generic endpoints management
  *
  * Copyright 2017 IBM Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/kernel.h>
@@ -26,7 +21,6 @@
 #include <linux/clk.h>
 #include <linux/usb/gadget.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/regmap.h>
 #include <linux/dma-mapping.h>
 
@@ -89,6 +83,7 @@ static void ast_vhub_epn_handle_ack(struct ast_vhub_ep *ep)
 {
 	struct ast_vhub_req *req;
 	unsigned int len;
+	int status = 0;
 	u32 stat;
 
 	/* Read EP status */
@@ -120,13 +115,19 @@ static void ast_vhub_epn_handle_ack(struct ast_vhub_ep *ep)
 	/* No current DMA ongoing */
 	req->active = false;
 
-	/* Grab lenght out of HW */
+	/* Grab length out of HW */
 	len = VHUB_EP_DMA_TX_SIZE(stat);
 
 	/* If not using DMA, copy data out if needed */
-	if (!req->req.dma && !ep->epn.is_in && len)
-		memcpy(req->req.buf + req->req.actual, ep->buf, len);
-
+	if (!req->req.dma && !ep->epn.is_in && len) {
+		if (req->req.actual + len > req->req.length) {
+			req->last_desc = 1;
+			status = -EOVERFLOW;
+			goto done;
+		} else {
+			memcpy(req->req.buf + req->req.actual, ep->buf, len);
+		}
+	}
 	/* Adjust size */
 	req->req.actual += len;
 
@@ -134,9 +135,10 @@ static void ast_vhub_epn_handle_ack(struct ast_vhub_ep *ep)
 	if (len < ep->ep.maxpacket)
 		req->last_desc = 1;
 
+done:
 	/* That's it ? complete the request and pick a new one */
 	if (req->last_desc >= 0) {
-		ast_vhub_done(ep, req, 0);
+		ast_vhub_done(ep, req, status);
 		req = list_first_entry_or_null(&ep->queue, struct ast_vhub_req,
 					       queue);
 
@@ -352,8 +354,8 @@ static int ast_vhub_epn_queue(struct usb_ep* u_ep, struct usb_request *u_req,
 
 	/* Endpoint enabled ? */
 	if (!ep->epn.enabled || !u_ep->desc || !ep->dev || !ep->d_idx ||
-	    !ep->dev->enabled || ep->dev->suspended) {
-		EPDBG(ep,"Enqueing request on wrong or disabled EP\n");
+	    !ep->dev->enabled) {
+		EPDBG(ep, "Enqueuing request on wrong or disabled EP\n");
 		return -ESHUTDOWN;
 	}
 
@@ -471,19 +473,21 @@ static int ast_vhub_epn_dequeue(struct usb_ep* u_ep, struct usb_request *u_req)
 {
 	struct ast_vhub_ep *ep = to_ast_ep(u_ep);
 	struct ast_vhub *vhub = ep->vhub;
-	struct ast_vhub_req *req;
+	struct ast_vhub_req *req = NULL, *iter;
 	unsigned long flags;
 	int rc = -EINVAL;
 
 	spin_lock_irqsave(&vhub->lock, flags);
 
 	/* Make sure it's actually queued on this endpoint */
-	list_for_each_entry (req, &ep->queue, queue) {
-		if (&req->req == u_req)
-			break;
+	list_for_each_entry(iter, &ep->queue, queue) {
+		if (&iter->req != u_req)
+			continue;
+		req = iter;
+		break;
 	}
 
-	if (&req->req == u_req) {
+	if (req) {
 		EPVDBG(ep, "dequeue req @%p active=%d\n",
 		       req, req->active);
 		if (req->active)
@@ -596,10 +600,6 @@ static int ast_vhub_epn_disable(struct usb_ep* u_ep)
 static int ast_vhub_epn_enable(struct usb_ep* u_ep,
 			       const struct usb_endpoint_descriptor *desc)
 {
-	static const char *ep_type_string[] __maybe_unused = { "ctrl",
-							       "isoc",
-							       "bulk",
-							       "intr" };
 	struct ast_vhub_ep *ep = to_ast_ep(u_ep);
 	struct ast_vhub_dev *dev;
 	struct ast_vhub *vhub;
@@ -649,7 +649,7 @@ static int ast_vhub_epn_enable(struct usb_ep* u_ep,
 	ep->epn.wedged = false;
 
 	EPDBG(ep, "Enabling [%s] %s num %d maxpacket=%d\n",
-	      ep->epn.is_in ? "in" : "out", ep_type_string[type],
+	      ep->epn.is_in ? "in" : "out", usb_ep_type_string(type),
 	      usb_endpoint_num(desc), maxpacket);
 
 	/* Can we use DMA descriptor mode ? */
@@ -807,10 +807,10 @@ struct ast_vhub_ep *ast_vhub_alloc_epn(struct ast_vhub_dev *d, u8 addr)
 
 	/* Find a free one (no device) */
 	spin_lock_irqsave(&vhub->lock, flags);
-	for (i = 0; i < AST_VHUB_NUM_GEN_EPs; i++)
+	for (i = 0; i < vhub->max_epns; i++)
 		if (vhub->epns[i].dev == NULL)
 			break;
-	if (i >= AST_VHUB_NUM_GEN_EPs) {
+	if (i >= vhub->max_epns) {
 		spin_unlock_irqrestore(&vhub->lock, flags);
 		return NULL;
 	}

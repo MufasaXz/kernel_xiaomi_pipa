@@ -21,6 +21,7 @@
 #include <asm/sections.h>
 #include <asm/io.h>
 #include <asm/setup_arch.h>
+#include <asm/sev.h>
 
 static struct resource system_rom_resource = {
 	.name	= "System ROM",
@@ -80,7 +81,7 @@ static struct resource video_rom_resource = {
  */
 static bool match_id(struct pci_dev *pdev, unsigned short vendor, unsigned short device)
 {
-	struct pci_driver *drv = pdev->driver;
+	struct pci_driver *drv = to_pci_driver(pdev->dev.driver);
 	const struct pci_device_id *id;
 
 	if (pdev->vendor == vendor && pdev->device == device)
@@ -94,7 +95,7 @@ static bool match_id(struct pci_dev *pdev, unsigned short vendor, unsigned short
 }
 
 static bool probe_list(struct pci_dev *pdev, unsigned short vendor,
-		       const unsigned char *rom_list)
+		       const void *rom_list)
 {
 	unsigned short device;
 
@@ -119,7 +120,7 @@ static struct resource *find_oprom(struct pci_dev *pdev)
 	for (i = 0; i < ARRAY_SIZE(adapter_rom_resources); i++) {
 		struct resource *res = &adapter_rom_resources[i];
 		unsigned short offset, vendor, device, list, rev;
-		const unsigned char *rom;
+		const void *rom;
 
 		if (res->end == 0)
 			break;
@@ -197,8 +198,8 @@ static int __init romchecksum(const unsigned char *rom, unsigned long length)
 
 void __init probe_roms(void)
 {
-	const unsigned char *rom;
 	unsigned long start, length, upper;
+	const unsigned char *rom;
 	unsigned char c;
 	int i;
 

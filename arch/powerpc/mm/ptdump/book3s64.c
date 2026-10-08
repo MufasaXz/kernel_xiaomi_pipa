@@ -38,8 +38,13 @@ static const struct flag_info flag_array[] = {
 	}, {
 		.mask	= _PAGE_PRESENT,
 		.val	= _PAGE_PRESENT,
-		.set	= "present",
-		.clear	= "       ",
+		.set	= "valid",
+		.clear	= "     ",
+	}, {
+		.mask	= _PAGE_PRESENT | _PAGE_INVALID,
+		.val	= 0,
+		.set	= "       ",
+		.clear	= "present",
 	}, {
 		.mask	= H_PAGE_HASHPTE,
 		.val	= H_PAGE_HASHPTE,
@@ -97,9 +102,11 @@ static const struct flag_info flag_array[] = {
 	}
 };
 
-struct pgtable_level pg_level[5] = {
-	{
-	}, { /* pgd */
+struct ptdump_pg_level pg_level[5] = {
+	{ /* pgd */
+		.flag	= flag_array,
+		.num	= ARRAY_SIZE(flag_array),
+	}, { /* p4d */
 		.flag	= flag_array,
 		.num	= ARRAY_SIZE(flag_array),
 	}, { /* pud */

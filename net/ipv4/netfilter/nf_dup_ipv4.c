@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * (C) 2007 by Sebastian Claßen <sebastian.classen@freenet.ag>
  * (C) 2007-2010 by Jan Engelhardt <jengelh@medozas.de>
  *
  * Extracted from xt_TEE.c
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 or later, as
- * published by the Free Software Foundation.
  */
 #include <linux/ip.h>
 #include <linux/module.h>
@@ -15,6 +12,7 @@
 #include <linux/skbuff.h>
 #include <linux/netfilter.h>
 #include <net/checksum.h>
+#include <net/flow.h>
 #include <net/icmp.h>
 #include <net/ip.h>
 #include <net/route.h>
@@ -35,7 +33,7 @@ static bool nf_dup_ipv4_route(struct net *net, struct sk_buff *skb,
 		fl4.flowi4_oif = oif;
 
 	fl4.daddr = gw->s_addr;
-	fl4.flowi4_tos = RT_TOS(iph->tos);
+	fl4.flowi4_dscp = ip4h_dscp(iph);
 	fl4.flowi4_scope = RT_SCOPE_UNIVERSE;
 	fl4.flowi4_flags = FLOWI_FLAG_KNOWN_NH;
 	rt = ip_route_output_key(net, &fl4);
@@ -56,7 +54,7 @@ void nf_dup_ipv4(struct net *net, struct sk_buff *skb, unsigned int hooknum,
 	struct iphdr *iph;
 
 	local_bh_disable();
-	if (this_cpu_read(nf_skb_duplicated))
+	if (current->in_nf_duplicate)
 		goto out;
 	/*
 	 * Copy the skb, and route the copy. Will later return %XT_CONTINUE for
@@ -69,7 +67,7 @@ void nf_dup_ipv4(struct net *net, struct sk_buff *skb, unsigned int hooknum,
 
 #if IS_ENABLED(CONFIG_NF_CONNTRACK)
 	/* Avoid counting cloned packets towards the original connection. */
-	nf_reset(skb);
+	nf_reset_ct(skb);
 	nf_ct_set(skb, NULL, IP_CT_UNTRACKED);
 #endif
 	/*
@@ -88,9 +86,9 @@ void nf_dup_ipv4(struct net *net, struct sk_buff *skb, unsigned int hooknum,
 		--iph->ttl;
 
 	if (nf_dup_ipv4_route(net, skb, gw, oif)) {
-		__this_cpu_write(nf_skb_duplicated, true);
+		current->in_nf_duplicate = true;
 		ip_local_out(net, skb->sk, skb);
-		__this_cpu_write(nf_skb_duplicated, false);
+		current->in_nf_duplicate = false;
 	} else {
 		kfree_skb(skb);
 	}

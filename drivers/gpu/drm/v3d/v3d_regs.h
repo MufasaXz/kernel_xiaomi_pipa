@@ -15,6 +15,14 @@
 		fieldval & field##_MASK;				\
 	 })
 
+#define V3D_SET_FIELD_VER(value, field, ver)				\
+	({								\
+		typeof(ver) _ver = (ver);				\
+		u32 fieldval = (value) << field##_SHIFT(_ver);		\
+		WARN_ON((fieldval & ~field##_MASK(_ver)) != 0);		\
+		fieldval & field##_MASK(_ver);				\
+	 })
+
 #define V3D_GET_FIELD(word, field) (((word) & field##_MASK) >>		\
 				    field##_SHIFT)
 
@@ -57,6 +65,7 @@
 #define V3D_HUB_INT_MSK_STS                            0x0005c
 #define V3D_HUB_INT_MSK_SET                            0x00060
 #define V3D_HUB_INT_MSK_CLR                            0x00064
+# define V3D_V7_HUB_INT_GMPV                           BIT(6)
 # define V3D_HUB_INT_MMU_WRV                           BIT(5)
 # define V3D_HUB_INT_MMU_PTI                           BIT(4)
 # define V3D_HUB_INT_MMU_CAP                           BIT(3)
@@ -64,6 +73,7 @@
 # define V3D_HUB_INT_TFUC                              BIT(1)
 # define V3D_HUB_INT_TFUF                              BIT(0)
 
+/* GCA registers only exist in V3D < 41 */
 #define V3D_GCA_CACHE_CTRL                             0x0000c
 # define V3D_GCA_CACHE_CTRL_FLUSH                      BIT(0)
 
@@ -86,10 +96,63 @@
 # define V3D_TOP_GR_BRIDGE_SW_INIT_1                   0x0000c
 # define V3D_TOP_GR_BRIDGE_SW_INIT_1_V3D_CLK_108_SW_INIT BIT(0)
 
+#define V3D_TFU_CS(ver) ((ver >= 71) ? 0x00700 : 0x00400)
+
+/* Stops current job, empties input fifo. */
+# define V3D_TFU_CS_TFURST                             BIT(31)
+# define V3D_TFU_CS_CVTCT_MASK                         V3D_MASK(23, 16)
+# define V3D_TFU_CS_CVTCT_SHIFT                        16
+# define V3D_TFU_CS_NFREE_MASK                         V3D_MASK(13, 8)
+# define V3D_TFU_CS_NFREE_SHIFT                        8
+# define V3D_TFU_CS_BUSY                               BIT(0)
+
+#define V3D_TFU_SU(ver) ((ver >= 71) ? 0x00704 : 0x00404)
+/* Interrupt when FINTTHR input slots are free (0 = disabled) */
+# define V3D_TFU_SU_FINTTHR_MASK                       V3D_MASK(13, 8)
+# define V3D_TFU_SU_FINTTHR_SHIFT                      8
+/* Skips resetting the CRC at the start of CRC generation. */
+# define V3D_TFU_SU_CRCCHAIN                           BIT(4)
+/* skips writes, computes CRC of the image.  miplevels must be 0. */
+# define V3D_TFU_SU_CRC                                BIT(3)
+# define V3D_TFU_SU_THROTTLE_MASK                      V3D_MASK(1, 0)
+# define V3D_TFU_SU_THROTTLE_SHIFT                     0
+
+#define V3D_TFU_ICFG(ver) ((ver >= 71) ? 0x00708 : 0x00408)
+/* Interrupt when the conversion is complete. */
+# define V3D_TFU_ICFG_IOC                              BIT(0)
+
+/* Input Image Address */
+#define V3D_TFU_IIA(ver) ((ver >= 71) ? 0x0070c : 0x0040c)
+/* Input Chroma Address */
+#define V3D_TFU_ICA(ver) ((ver >= 71) ? 0x00710 : 0x00410)
+/* Input Image Stride */
+#define V3D_TFU_IIS(ver) ((ver >= 71) ? 0x00714 : 0x00414)
+/* Input Image U-Plane Address */
+#define V3D_TFU_IUA(ver) ((ver >= 71) ? 0x00718 : 0x00418)
+/* Image output config (VD 7.x only) */
+#define V3D_V7_TFU_IOC                                 0x0071c
+/* Output Image Address */
+#define V3D_TFU_IOA(ver) ((ver >= 71) ? 0x00720 : 0x0041c)
+/* Image Output Size */
+#define V3D_TFU_IOS(ver) ((ver >= 71) ? 0x00724 : 0x00420)
+/* TFU YUV Coefficient 0 */
+#define V3D_TFU_COEF0(ver) ((ver >= 71) ? 0x00728 : 0x00424)
+/* Use these regs instead of the defaults (V3D 4.x only) */
+# define V3D_TFU_COEF0_USECOEF                         BIT(31)
+/* TFU YUV Coefficient 1 */
+#define V3D_TFU_COEF1(ver) ((ver >= 71) ? 0x0072c : 0x00428)
+/* TFU YUV Coefficient 2 */
+#define V3D_TFU_COEF2(ver) ((ver >= 71) ? 0x00730 : 0x0042c)
+/* TFU YUV Coefficient 3 */
+#define V3D_TFU_COEF3(ver) ((ver >= 71) ? 0x00734 : 0x00430)
+
+/* V3D 4.x only */
+#define V3D_TFU_CRC                                    0x00434
+
 /* Per-MMU registers. */
 
 #define V3D_MMUC_CONTROL                               0x01000
-# define V3D_MMUC_CONTROL_CLEAR                        BIT(3)
+#define V3D_MMUC_CONTROL_CLEAR(ver) ((ver >= 71) ? BIT(11) : BIT(3))
 # define V3D_MMUC_CONTROL_FLUSHING                     BIT(2)
 # define V3D_MMUC_CONTROL_FLUSH                        BIT(1)
 # define V3D_MMUC_CONTROL_ENABLE                       BIT(0)
@@ -103,7 +166,8 @@
 # define V3D_MMU_CTL_PT_INVALID_ABORT                  BIT(19)
 # define V3D_MMU_CTL_PT_INVALID_INT                    BIT(18)
 # define V3D_MMU_CTL_PT_INVALID_EXCEPTION              BIT(17)
-# define V3D_MMU_CTL_WRITE_VIOLATION                   BIT(16)
+# define V3D_MMU_CTL_PT_INVALID_ENABLE                 BIT(16)
+# define V3D_MMU_CTL_WRITE_VIOLATION                   BIT(12)
 # define V3D_MMU_CTL_WRITE_VIOLATION_ABORT             BIT(11)
 # define V3D_MMU_CTL_WRITE_VIOLATION_INT               BIT(10)
 # define V3D_MMU_CTL_WRITE_VIOLATION_EXCEPTION         BIT(9)
@@ -142,6 +206,14 @@
 /* Address that faulted */
 #define V3D_MMU_VIO_ADDR                               0x01234
 
+#define V3D_MMU_DEBUG_INFO                             0x01238
+# define V3D_MMU_PA_WIDTH_MASK                         V3D_MASK(11, 8)
+# define V3D_MMU_PA_WIDTH_SHIFT                        8
+# define V3D_MMU_VA_WIDTH_MASK                         V3D_MASK(7, 4)
+# define V3D_MMU_VA_WIDTH_SHIFT                        4
+# define V3D_MMU_VERSION_MASK                          V3D_MASK(3, 0)
+# define V3D_MMU_VERSION_SHIFT                         0
+
 /* Per-V3D-core registers */
 
 #define V3D_CTL_IDENT0                                 0x00000
@@ -167,6 +239,8 @@
 # define V3D_IDENT2_BCG_INT                            BIT(28)
 
 #define V3D_CTL_MISCCFG                                0x00018
+# define V3D_CTL_MISCCFG_QRMAXCNT_MASK                 V3D_MASK(3, 1)
+# define V3D_CTL_MISCCFG_QRMAXCNT_SHIFT                1
 # define V3D_MISCCFG_OVRTMUOUT                         BIT(0)
 
 #define V3D_CTL_L2CACTL                                0x00020
@@ -186,9 +260,11 @@
 
 #define V3D_CTL_L2TCACTL                               0x00030
 # define V3D_L2TCACTL_TMUWCF                           BIT(8)
-# define V3D_L2TCACTL_L2T_NO_WM                        BIT(4)
+/* Invalidates cache lines. */
 # define V3D_L2TCACTL_FLM_FLUSH                        0
+/* Removes cachelines without writing dirty lines back. */
 # define V3D_L2TCACTL_FLM_CLEAR                        1
+/* Writes out dirty cachelines and marks them clean, but doesn't invalidate. */
 # define V3D_L2TCACTL_FLM_CLEAN                        2
 # define V3D_L2TCACTL_FLM_MASK                         V3D_MASK(2, 1)
 # define V3D_L2TCACTL_FLM_SHIFT                        1
@@ -204,6 +280,8 @@
 #define V3D_CTL_INT_MSK_CLR                            0x00064
 # define V3D_INT_QPU_MASK                              V3D_MASK(27, 16)
 # define V3D_INT_QPU_SHIFT                             16
+#define V3D_INT_CSDDONE(ver) ((ver >= 71) ? BIT(6) : BIT(7))
+#define V3D_INT_PCTR(ver) ((ver >= 71) ? BIT(5) : BIT(6))
 # define V3D_INT_GMPV                                  BIT(5)
 # define V3D_INT_TRFB                                  BIT(4)
 # define V3D_INT_SPILLUSE                              BIT(3)
@@ -267,7 +345,40 @@
 # define V3D_PTB_BXCF_RWORDERDISA                      BIT(1)
 # define V3D_PTB_BXCF_CLIPDISA                         BIT(0)
 
-#define V3D_GMP_STATUS                                 0x00800
+#define V3D_V3_PCTR_0_EN                               0x00674
+#define V3D_V3_PCTR_0_EN_ENABLE                        BIT(31)
+#define V3D_V4_PCTR_0_EN                               0x00650
+/* When a bit is set, resets the counter to 0. */
+#define V3D_V3_PCTR_0_CLR                              0x00670
+#define V3D_V4_PCTR_0_CLR                              0x00654
+#define V3D_PCTR_0_OVERFLOW                            0x00658
+
+#define V3D_V3_PCTR_0_PCTRS0                           0x00684
+#define V3D_V3_PCTR_0_PCTRS15                          0x00660
+#define V3D_V3_PCTR_0_PCTRSX(x)                        (V3D_V3_PCTR_0_PCTRS0 + \
+							4 * (x))
+/* Each src reg muxes four counters each. */
+#define V3D_V4_PCTR_0_SRC_0_3                          0x00660
+#define V3D_V4_PCTR_0_SRC_28_31                        0x0067c
+#define V3D_V4_PCTR_0_SRC_X(x)                         (V3D_V4_PCTR_0_SRC_0_3 + \
+							4 * (x))
+# define V3D_PCTR_S0_MASK(ver) (((ver) >= 71) ? V3D_MASK(7, 0) : V3D_MASK(6, 0))
+# define V3D_PCTR_S0_SHIFT(ver)                        0
+# define V3D_PCTR_S1_MASK(ver) (((ver) >= 71) ? V3D_MASK(15, 8) : V3D_MASK(14, 8))
+# define V3D_PCTR_S1_SHIFT(ver)                        8
+# define V3D_PCTR_S2_MASK(ver) (((ver) >= 71) ? V3D_MASK(23, 16) : V3D_MASK(22, 16))
+# define V3D_PCTR_S2_SHIFT(ver)                        16
+# define V3D_PCTR_S3_MASK(ver) (((ver) >= 71) ? V3D_MASK(31, 24) : V3D_MASK(30, 24))
+# define V3D_PCTR_S3_SHIFT(ver)                        24
+
+#define V3D_PCTR_CYCLE_COUNT(ver) ((ver >= 71) ? 0 : 32)
+
+/* Output values of the counters. */
+#define V3D_PCTR_0_PCTR0                               0x00680
+#define V3D_PCTR_0_PCTR31                              0x006fc
+#define V3D_PCTR_0_PCTRX(x)                            (V3D_PCTR_0_PCTR0 + \
+							4 * (x))
+#define V3D_GMP_STATUS(ver) ((ver >= 71) ? 0x00600 : 0x00800)
 # define V3D_GMP_STATUS_GMPRST                         BIT(31)
 # define V3D_GMP_STATUS_WR_COUNT_MASK                  V3D_MASK(30, 24)
 # define V3D_GMP_STATUS_WR_COUNT_SHIFT                 24
@@ -280,17 +391,154 @@
 # define V3D_GMP_STATUS_INVPROT                        BIT(1)
 # define V3D_GMP_STATUS_VIO                            BIT(0)
 
-#define V3D_GMP_CFG                                    0x00804
+#define V3D_GMP_CFG(ver) ((ver >= 71) ? 0x00604 : 0x00804)
 # define V3D_GMP_CFG_LBURSTEN                          BIT(3)
 # define V3D_GMP_CFG_PGCRSEN                           BIT()
 # define V3D_GMP_CFG_STOP_REQ                          BIT(1)
 # define V3D_GMP_CFG_PROT_ENABLE                       BIT(0)
 
-#define V3D_GMP_VIO_ADDR                               0x00808
+#define V3D_GMP_VIO_ADDR(ver) ((ver >= 71) ? 0x00608 : 0x00808)
 #define V3D_GMP_VIO_TYPE                               0x0080c
 #define V3D_GMP_TABLE_ADDR                             0x00810
 #define V3D_GMP_CLEAR_LOAD                             0x00814
 #define V3D_GMP_PRESERVE_LOAD                          0x00818
 #define V3D_GMP_VALID_LINES                            0x00820
+
+#define V3D_CSD_STATUS                                 0x00900
+# define V3D_CSD_STATUS_NUM_COMPLETED_MASK             V3D_MASK(11, 4)
+# define V3D_CSD_STATUS_NUM_COMPLETED_SHIFT            4
+# define V3D_CSD_STATUS_NUM_ACTIVE_MASK                V3D_MASK(3, 2)
+# define V3D_CSD_STATUS_NUM_ACTIVE_SHIFT               2
+# define V3D_CSD_STATUS_HAVE_CURRENT_DISPATCH          BIT(1)
+# define V3D_CSD_STATUS_HAVE_QUEUED_DISPATCH           BIT(0)
+
+#define V3D_CSD_QUEUED_CFG0(ver) ((ver >= 71) ? 0x00930 : 0x00904)
+# define V3D_CSD_QUEUED_CFG0_NUM_WGS_X_MASK            V3D_MASK(31, 16)
+# define V3D_CSD_QUEUED_CFG0_NUM_WGS_X_SHIFT           16
+# define V3D_CSD_QUEUED_CFG0_WG_X_OFFSET_MASK          V3D_MASK(15, 0)
+# define V3D_CSD_QUEUED_CFG0_WG_X_OFFSET_SHIFT         0
+
+#define V3D_CSD_QUEUED_CFG1(ver) ((ver >= 71) ? 0x00934 : 0x00908)
+# define V3D_CSD_QUEUED_CFG1_NUM_WGS_Y_MASK            V3D_MASK(31, 16)
+# define V3D_CSD_QUEUED_CFG1_NUM_WGS_Y_SHIFT           16
+# define V3D_CSD_QUEUED_CFG1_WG_Y_OFFSET_MASK          V3D_MASK(15, 0)
+# define V3D_CSD_QUEUED_CFG1_WG_Y_OFFSET_SHIFT         0
+
+#define V3D_CSD_QUEUED_CFG2(ver) ((ver >= 71) ? 0x00938 : 0x0090c)
+# define V3D_CSD_QUEUED_CFG2_NUM_WGS_Z_MASK            V3D_MASK(31, 16)
+# define V3D_CSD_QUEUED_CFG2_NUM_WGS_Z_SHIFT           16
+# define V3D_CSD_QUEUED_CFG2_WG_Z_OFFSET_MASK          V3D_MASK(15, 0)
+# define V3D_CSD_QUEUED_CFG2_WG_Z_OFFSET_SHIFT         0
+
+#define V3D_CSD_QUEUED_CFG3(ver) ((ver >= 71) ? 0x0093c : 0x00910)
+# define V3D_CSD_QUEUED_CFG3_OVERLAP_WITH_PREV         BIT(26)
+# define V3D_CSD_QUEUED_CFG3_MAX_SG_ID_MASK            V3D_MASK(25, 20)
+# define V3D_CSD_QUEUED_CFG3_MAX_SG_ID_SHIFT           20
+# define V3D_CSD_QUEUED_CFG3_BATCHES_PER_SG_M1_MASK    V3D_MASK(19, 12)
+# define V3D_CSD_QUEUED_CFG3_BATCHES_PER_SG_M1_SHIFT   12
+# define V3D_CSD_QUEUED_CFG3_WGS_PER_SG_MASK           V3D_MASK(11, 8)
+# define V3D_CSD_QUEUED_CFG3_WGS_PER_SG_SHIFT          8
+# define V3D_CSD_QUEUED_CFG3_WG_SIZE_MASK              V3D_MASK(7, 0)
+# define V3D_CSD_QUEUED_CFG3_WG_SIZE_SHIFT             0
+
+/* Number of batches, minus 1 */
+#define V3D_CSD_QUEUED_CFG4(ver) ((ver >= 71) ? 0x00940 : 0x00914)
+
+/* Shader address, pnan, singleseg, threading, like a shader record. */
+#define V3D_CSD_QUEUED_CFG5(ver) ((ver >= 71) ? 0x00944 : 0x00918)
+
+/* Uniforms address (4 byte aligned) */
+#define V3D_CSD_QUEUED_CFG6(ver) ((ver >= 71) ? 0x00948 : 0x0091c)
+
+/* V3D 7.x+ only */
+#define V3D_V7_CSD_QUEUED_CFG7                         0x0094c
+
+#define V3D_CSD_CURRENT_CFG0(ver) ((ver >= 71) ? 0x00958 : 0x00920)
+#define V3D_CSD_CURRENT_CFG1(ver) ((ver >= 71) ? 0x0095c : 0x00924)
+#define V3D_CSD_CURRENT_CFG2(ver) ((ver >= 71) ? 0x00960 : 0x00928)
+#define V3D_CSD_CURRENT_CFG3(ver) ((ver >= 71) ? 0x00964 : 0x0092c)
+#define V3D_CSD_CURRENT_CFG4(ver) ((ver >= 71) ? 0x00968 : 0x00930)
+#define V3D_CSD_CURRENT_CFG5(ver) ((ver >= 71) ? 0x0096c : 0x00934)
+#define V3D_CSD_CURRENT_CFG6(ver) ((ver >= 71) ? 0x00970 : 0x00938)
+/* V3D 7.x+ only */
+#define V3D_V7_CSD_CURRENT_CFG7                        0x00974
+
+#define V3D_CSD_CURRENT_ID0(ver) ((ver >= 71) ? 0x00978 : 0x0093c)
+# define V3D_CSD_CURRENT_ID0_WG_X_MASK                 V3D_MASK(31, 16)
+# define V3D_CSD_CURRENT_ID0_WG_X_SHIFT                16
+# define V3D_CSD_CURRENT_ID0_WG_IN_SG_MASK             V3D_MASK(11, 8)
+# define V3D_CSD_CURRENT_ID0_WG_IN_SG_SHIFT            8
+# define V3D_CSD_CURRENT_ID0_L_IDX_MASK                V3D_MASK(7, 0)
+# define V3D_CSD_CURRENT_ID0_L_IDX_SHIFT               0
+
+#define V3D_CSD_CURRENT_ID1(ver) ((ver >= 71) ? 0x0097c : 0x00940)
+# define V3D_CSD_CURRENT_ID0_WG_Z_MASK                 V3D_MASK(31, 16)
+# define V3D_CSD_CURRENT_ID0_WG_Z_SHIFT                16
+# define V3D_CSD_CURRENT_ID0_WG_Y_MASK                 V3D_MASK(15, 0)
+# define V3D_CSD_CURRENT_ID0_WG_Y_SHIFT                0
+
+#define V3D_ERR_FDBGO                                  0x00f04
+#define V3D_ERR_FDBGB                                  0x00f08
+#define V3D_ERR_FDBGR                                  0x00f0c
+
+#define V3D_ERR_FDBGS                                  0x00f10
+# define V3D_ERR_FDBGS_INTERPZ_IP_STALL                BIT(17)
+# define V3D_ERR_FDBGS_DEPTHO_FIFO_IP_STALL            BIT(16)
+# define V3D_ERR_FDBGS_XYNRM_IP_STALL                  BIT(14)
+# define V3D_ERR_FDBGS_EZREQ_FIFO_OP_VALID             BIT(13)
+# define V3D_ERR_FDBGS_QXYF_FIFO_OP_VALID              BIT(12)
+# define V3D_ERR_FDBGS_QXYF_FIFO_OP_LAST               BIT(11)
+# define V3D_ERR_FDBGS_EZTEST_ANYQVALID                BIT(7)
+# define V3D_ERR_FDBGS_EZTEST_PASS                     BIT(6)
+# define V3D_ERR_FDBGS_EZTEST_QREADY                   BIT(5)
+# define V3D_ERR_FDBGS_EZTEST_VLF_OKNOVALID            BIT(4)
+# define V3D_ERR_FDBGS_EZTEST_QSTALL                   BIT(3)
+# define V3D_ERR_FDBGS_EZTEST_IP_VLFSTALL              BIT(2)
+# define V3D_ERR_FDBGS_EZTEST_IP_PRSTALL               BIT(1)
+# define V3D_ERR_FDBGS_EZTEST_IP_QSTALL                BIT(0)
+
+#define V3D_ERR_STAT                                   0x00f20
+# define V3D_ERR_L2CARE                                BIT(15)
+# define V3D_ERR_VCMBE                                 BIT(14)
+# define V3D_ERR_VCMRE                                 BIT(13)
+# define V3D_ERR_VCDI                                  BIT(12)
+# define V3D_ERR_VCDE                                  BIT(11)
+# define V3D_ERR_VDWE                                  BIT(10)
+# define V3D_ERR_VPMEAS                                BIT(9)
+# define V3D_ERR_VPMEFNA                               BIT(8)
+# define V3D_ERR_VPMEWNA                               BIT(7)
+# define V3D_ERR_VPMERNA                               BIT(6)
+# define V3D_ERR_VPMERR                                BIT(5)
+# define V3D_ERR_VPMEWR                                BIT(4)
+# define V3D_ERR_VPAERRGL                              BIT(3)
+# define V3D_ERR_VPAEBRGL                              BIT(2)
+# define V3D_ERR_VPAERGS                               BIT(1)
+# define V3D_ERR_VPAEABB                               BIT(0)
+
+#define V3D_SMS_REE_CS                                 0x00000
+#define V3D_SMS_TEE_CS                                 0x00400
+# define V3D_SMS_INTERRUPT                             BIT(31)
+# define V3D_SMS_POWER_OFF                             BIT(30)
+# define V3D_SMS_CLEAR_POWER_OFF                       BIT(29)
+# define V3D_SMS_LOCK                                  BIT(28)
+# define V3D_SMS_CLEAR_LOCK                            BIT(27)
+# define V3D_SMS_SVP_MODE_EXIT                         BIT(26)
+# define V3D_SMS_CLEAR_SVP_MODE_EXIT                   BIT(25)
+# define V3D_SMS_SVP_MODE_ENTER                        BIT(24)
+# define V3D_SMS_CLEAR_SVP_MODE_ENTER                  BIT(23)
+# define V3D_SMS_THEIR_MODE_EXIT                       BIT(22)
+# define V3D_SMS_THEIR_MODE_ENTER                      BIT(21)
+# define V3D_SMS_OUR_MODE_EXIT                         BIT(20)
+# define V3D_SMS_CLEAR_OUR_MODE_EXIT                   BIT(19)
+# define V3D_SMS_SEQ_PC_MASK                           V3D_MASK(16, 10)
+# define V3D_SMS_SEQ_PC_SHIFT                          10
+# define V3D_SMS_HUBCORE_STATUS_MASK                   V3D_MASK(9, 8)
+# define V3D_SMS_HUBCORE_STATUS_SHIFT                  8
+# define V3D_SMS_NEW_MODE_MASK                         V3D_MASK(7, 6)
+# define V3D_SMS_NEW_MODE_SHIFT                        6
+# define V3D_SMS_OLD_MODE_MASK                         V3D_MASK(5, 4)
+# define V3D_SMS_OLD_MODE_SHIFT                        4
+# define V3D_SMS_STATE_MASK                            V3D_MASK(3, 0)
+# define V3D_SMS_STATE_SHIFT                           0
 
 #endif /* V3D_REGS_H */

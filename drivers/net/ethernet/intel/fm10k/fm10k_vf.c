@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Copyright(c) 2013 - 2018 Intel Corporation. */
+/* Copyright(c) 2013 - 2019 Intel Corporation. */
 
+#include <linux/bitfield.h>
 #include "fm10k_vf.h"
 
 /**
@@ -126,15 +127,14 @@ static s32 fm10k_init_hw_vf(struct fm10k_hw *hw)
 	hw->mac.max_queues = i;
 
 	/* fetch default VLAN and ITR scale */
-	hw->mac.default_vid = (fm10k_read_reg(hw, FM10K_TXQCTL(0)) &
-			       FM10K_TXQCTL_VID_MASK) >> FM10K_TXQCTL_VID_SHIFT;
+	hw->mac.default_vid = FIELD_GET(FM10K_TXQCTL_VID_MASK,
+					fm10k_read_reg(hw, FM10K_TXQCTL(0)));
 	/* Read the ITR scale from TDLEN. See the definition of
 	 * FM10K_TDLEN_ITR_SCALE_SHIFT for more information about how TDLEN is
 	 * used here.
 	 */
-	hw->mac.itr_scale = (fm10k_read_reg(hw, FM10K_TDLEN(0)) &
-			     FM10K_TDLEN_ITR_SCALE_MASK) >>
-			    FM10K_TDLEN_ITR_SCALE_SHIFT;
+	hw->mac.itr_scale = FIELD_GET(FM10K_TDLEN_ITR_SCALE_MASK,
+				      fm10k_read_reg(hw, FM10K_TDLEN(0)));
 
 	return 0;
 
@@ -198,7 +198,7 @@ static s32 fm10k_update_vlan_vf(struct fm10k_hw *hw, u32 vid, u8 vsi, bool set)
  *  This function should determine the MAC address for the VF
  **/
 s32 fm10k_msg_mac_vlan_vf(struct fm10k_hw *hw, u32 **results,
-			  struct fm10k_mbx_info *mbx)
+			  struct fm10k_mbx_info __always_unused *mbx)
 {
 	u8 perm_addr[ETH_ALEN];
 	u16 vid;
@@ -267,8 +267,10 @@ static s32 fm10k_read_mac_addr_vf(struct fm10k_hw *hw)
  *  This function is used to add or remove unicast MAC addresses for
  *  the VF.
  **/
-static s32 fm10k_update_uc_addr_vf(struct fm10k_hw *hw, u16 glort,
-				   const u8 *mac, u16 vid, bool add, u8 flags)
+static s32 fm10k_update_uc_addr_vf(struct fm10k_hw *hw,
+				   u16 __always_unused glort,
+				   const u8 *mac, u16 vid, bool add,
+				   u8 __always_unused flags)
 {
 	struct fm10k_mbx_info *mbx = &hw->mbx;
 	u32 msg[7];
@@ -309,7 +311,8 @@ static s32 fm10k_update_uc_addr_vf(struct fm10k_hw *hw, u16 glort,
  *  This function is used to add or remove multicast MAC addresses for
  *  the VF.
  **/
-static s32 fm10k_update_mc_addr_vf(struct fm10k_hw *hw, u16 glort,
+static s32 fm10k_update_mc_addr_vf(struct fm10k_hw *hw,
+				   u16 __always_unused glort,
 				   const u8 *mac, u16 vid, bool add)
 {
 	struct fm10k_mbx_info *mbx = &hw->mbx;
@@ -373,7 +376,7 @@ const struct fm10k_tlv_attr fm10k_lport_state_msg_attr[] = {
  *  are ready to bring up the interface.
  **/
 s32 fm10k_msg_lport_state_vf(struct fm10k_hw *hw, u32 **results,
-			     struct fm10k_mbx_info *mbx)
+			     struct fm10k_mbx_info __always_unused *mbx)
 {
 	hw->mac.dglort_map = !results[FM10K_LPORT_STATE_MSG_READY] ?
 			     FM10K_DGLORTMAP_NONE : FM10K_DGLORTMAP_ZERO;
@@ -392,8 +395,9 @@ s32 fm10k_msg_lport_state_vf(struct fm10k_hw *hw, u32 **results,
  *  enabled we can add filters, if it is disabled all filters for this
  *  logical port are flushed.
  **/
-static s32 fm10k_update_lport_state_vf(struct fm10k_hw *hw, u16 glort,
-				       u16 count, bool enable)
+static s32 fm10k_update_lport_state_vf(struct fm10k_hw *hw,
+				       u16 __always_unused glort,
+				       u16 __always_unused count, bool enable)
 {
 	struct fm10k_mbx_info *mbx = &hw->mbx;
 	u32 msg[2];
@@ -420,7 +424,8 @@ static s32 fm10k_update_lport_state_vf(struct fm10k_hw *hw, u16 glort,
  *  so that it can enable either multicast, multicast promiscuous, or
  *  promiscuous mode of operation.
  **/
-static s32 fm10k_update_xcast_mode_vf(struct fm10k_hw *hw, u16 glort, u8 mode)
+static s32 fm10k_update_xcast_mode_vf(struct fm10k_hw *hw,
+				      u16 __always_unused glort, u8 mode)
 {
 	struct fm10k_mbx_info *mbx = &hw->mbx;
 	u32 msg[3];
@@ -460,7 +465,7 @@ static void fm10k_rebind_hw_stats_vf(struct fm10k_hw *hw,
 				     struct fm10k_hw_stats *stats)
 {
 	/* Unbind Queue Statistics */
-	fm10k_unbind_hw_stats_q(stats->q, 0, hw->mac.max_queues);
+	fm10k_unbind_hw_stats_q(stats->q, hw->mac.max_queues);
 
 	/* Reinitialize bases for all stats */
 	fm10k_update_hw_stats_vf(hw, stats);
@@ -475,7 +480,7 @@ static void fm10k_rebind_hw_stats_vf(struct fm10k_hw *hw,
  *  that information to then populate a DGLORTMAP/DEC entry and the queues
  *  to which it has been assigned.
  **/
-static s32 fm10k_configure_dglort_map_vf(struct fm10k_hw *hw,
+static s32 fm10k_configure_dglort_map_vf(struct fm10k_hw __always_unused *hw,
 					 struct fm10k_dglort_cfg *dglort)
 {
 	/* verify the dglort pointer */

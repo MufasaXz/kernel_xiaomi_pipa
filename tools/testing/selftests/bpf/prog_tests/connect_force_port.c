@@ -4,7 +4,8 @@
 #include "cgroup_helpers.h"
 #include "network_helpers.h"
 
-static int verify_port(int family, int fd, int expected)
+static int verify_ports(int family, int fd,
+			__u16 expected_local, __u16 expected_peer)
 {
 	struct sockaddr_storage addr;
 	socklen_t len = sizeof(addr);
@@ -20,9 +21,25 @@ static int verify_port(int family, int fd, int expected)
 	else
 		port = ((struct sockaddr_in6 *)&addr)->sin6_port;
 
-	if (ntohs(port) != expected) {
-		log_err("Unexpected port %d, expected %d", ntohs(port),
-			expected);
+	if (ntohs(port) != expected_local) {
+		log_err("Unexpected local port %d, expected %d", ntohs(port),
+			expected_local);
+		return -1;
+	}
+
+	if (getpeername(fd, (struct sockaddr *)&addr, &len)) {
+		log_err("Failed to get peer addr");
+		return -1;
+	}
+
+	if (family == AF_INET)
+		port = ((struct sockaddr_in *)&addr)->sin_port;
+	else
+		port = ((struct sockaddr_in6 *)&addr)->sin6_port;
+
+	if (ntohs(port) != expected_peer) {
+		log_err("Unexpected peer port %d, expected %d", ntohs(port),
+			expected_peer);
 		return -1;
 	}
 
@@ -31,46 +48,81 @@ static int verify_port(int family, int fd, int expected)
 
 static int run_test(int cgroup_fd, int server_fd, int family, int type)
 {
-	struct bpf_prog_load_attr attr = {
-		.prog_type = BPF_PROG_TYPE_CGROUP_SOCK_ADDR,
-	};
+	bool v4 = family == AF_INET;
+	__u16 expected_local_port = v4 ? 22222 : 22223;
+	__u16 expected_peer_port = 60000;
+	struct bpf_program *prog;
 	struct bpf_object *obj;
-	int expected_port;
-	int prog_fd;
-	int err;
-	int fd;
+	const char *obj_file = v4 ? "connect_force_port4.bpf.o" : "connect_force_port6.bpf.o";
+	int fd, err;
+	__u32 duration = 0;
 
-	if (family == AF_INET) {
-		attr.file = "./connect_force_port4.o";
-		attr.expected_attach_type = BPF_CGROUP_INET4_CONNECT;
-		expected_port = 22222;
-	} else {
-		attr.file = "./connect_force_port6.o";
-		attr.expected_attach_type = BPF_CGROUP_INET6_CONNECT;
-		expected_port = 22223;
-	}
-
-	err = bpf_prog_load_xattr(&attr, &obj, &prog_fd);
-	if (err) {
-		log_err("Failed to load BPF object");
+	obj = bpf_object__open_file(obj_file, NULL);
+	if (!ASSERT_OK_PTR(obj, "bpf_obj_open"))
 		return -1;
+
+	err = bpf_object__load(obj);
+	if (!ASSERT_OK(err, "bpf_obj_load")) {
+		err = -EIO;
+		goto close_bpf_object;
 	}
 
-	err = bpf_prog_attach(prog_fd, cgroup_fd, attr.expected_attach_type,
-			      0);
+	prog = bpf_object__find_program_by_name(obj, v4 ?
+						"connect4" :
+						"connect6");
+	if (CHECK(!prog, "find_prog", "connect prog not found\n")) {
+		err = -EIO;
+		goto close_bpf_object;
+	}
+
+	err = bpf_prog_attach(bpf_program__fd(prog), cgroup_fd, v4 ?
+			      BPF_CGROUP_INET4_CONNECT :
+			      BPF_CGROUP_INET6_CONNECT, 0);
 	if (err) {
 		log_err("Failed to attach BPF program");
 		goto close_bpf_object;
 	}
 
-	fd = connect_to_fd(family, type, server_fd);
+	prog = bpf_object__find_program_by_name(obj, v4 ?
+						"getpeername4" :
+						"getpeername6");
+	if (CHECK(!prog, "find_prog", "getpeername prog not found\n")) {
+		err = -EIO;
+		goto close_bpf_object;
+	}
+
+	err = bpf_prog_attach(bpf_program__fd(prog), cgroup_fd, v4 ?
+			      BPF_CGROUP_INET4_GETPEERNAME :
+			      BPF_CGROUP_INET6_GETPEERNAME, 0);
+	if (err) {
+		log_err("Failed to attach BPF program");
+		goto close_bpf_object;
+	}
+
+	prog = bpf_object__find_program_by_name(obj, v4 ?
+						"getsockname4" :
+						"getsockname6");
+	if (CHECK(!prog, "find_prog", "getsockname prog not found\n")) {
+		err = -EIO;
+		goto close_bpf_object;
+	}
+
+	err = bpf_prog_attach(bpf_program__fd(prog), cgroup_fd, v4 ?
+			      BPF_CGROUP_INET4_GETSOCKNAME :
+			      BPF_CGROUP_INET6_GETSOCKNAME, 0);
+	if (err) {
+		log_err("Failed to attach BPF program");
+		goto close_bpf_object;
+	}
+
+	fd = connect_to_fd(server_fd, 0);
 	if (fd < 0) {
 		err = -1;
 		goto close_bpf_object;
 	}
 
-	err = verify_port(family, fd, expected_port);
-
+	err = verify_ports(family, fd, expected_local_port,
+			   expected_peer_port);
 	close(fd);
 
 close_bpf_object:
@@ -86,25 +138,25 @@ void test_connect_force_port(void)
 	if (CHECK_FAIL(cgroup_fd < 0))
 		return;
 
-	server_fd = start_server(AF_INET, SOCK_STREAM);
+	server_fd = start_server(AF_INET, SOCK_STREAM, NULL, 60123, 0);
 	if (CHECK_FAIL(server_fd < 0))
 		goto close_cgroup_fd;
 	CHECK_FAIL(run_test(cgroup_fd, server_fd, AF_INET, SOCK_STREAM));
 	close(server_fd);
 
-	server_fd = start_server(AF_INET6, SOCK_STREAM);
+	server_fd = start_server(AF_INET6, SOCK_STREAM, NULL, 60124, 0);
 	if (CHECK_FAIL(server_fd < 0))
 		goto close_cgroup_fd;
 	CHECK_FAIL(run_test(cgroup_fd, server_fd, AF_INET6, SOCK_STREAM));
 	close(server_fd);
 
-	server_fd = start_server(AF_INET, SOCK_DGRAM);
+	server_fd = start_server(AF_INET, SOCK_DGRAM, NULL, 60123, 0);
 	if (CHECK_FAIL(server_fd < 0))
 		goto close_cgroup_fd;
 	CHECK_FAIL(run_test(cgroup_fd, server_fd, AF_INET, SOCK_DGRAM));
 	close(server_fd);
 
-	server_fd = start_server(AF_INET6, SOCK_DGRAM);
+	server_fd = start_server(AF_INET6, SOCK_DGRAM, NULL, 60124, 0);
 	if (CHECK_FAIL(server_fd < 0))
 		goto close_cgroup_fd;
 	CHECK_FAIL(run_test(cgroup_fd, server_fd, AF_INET6, SOCK_DGRAM));
