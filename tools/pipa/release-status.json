@@ -1,0 +1,22 @@
+{
+  "version": "6.18.28-pipa-a17-v0.1",
+  "source_revision": "3fd483240e935ee7055a93ec5681f3715f003784",
+  "release_ready": false,
+  "compile_passed": true,
+  "device_boot_verified": false,
+  "android_launcher_verified": false,
+  "encrypted_data_verified": false,
+  "hardware_verified": false,
+  "recovery_and_rollback_verified": false,
+  "sideload_installer_verified": false,
+  "blocking_interfaces": [
+    "KGSL GPU ioctl ABI",
+    "ION allocation and downstream Qualcomm display ABI",
+    "dm-default-key and SM8250 wrappedkey_v0 integration",
+    "QSEECom userspace ABI",
+    "ADSPRPC and Android audio HAL integration",
+    "CamX camera and video codec integration",
+    "coherent bootloader DTB/DTBO and vendor_boot integration"
+  ],
+  "artifact_distribution": "withheld at user request; source checkpoint only"
+}
